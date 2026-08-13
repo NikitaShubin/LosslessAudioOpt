@@ -1,0 +1,299 @@
+#include <windows.h>
+
+#include <cstdio>
+#include <exception>
+#include <string>
+#include <vector>
+
+#include "config.h"
+#include "i18n.h"
+#include "optimize.h"
+#include "out.h"
+#include "proc.h"
+#include "stats.h"
+#include "tool.h"
+#include "util.h"
+
+namespace {
+
+std::vector<std::string> wide_argv() {
+    int argc = 0;
+    LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!wargv) return {};
+    std::vector<std::string> out;
+    for (int i = 0; i < argc; i++) out.push_back(util::w2u(std::wstring(wargv[i])));
+    LocalFree(wargv);
+    return out;
+}
+
+void usage() {
+    out::print("LLAO — Lossless Audio Optimizer\n\n");
+    out::print("Commands:\n");
+    out::print("  llao.exe check-formats                       validate the formats/*.json schema\n");
+    out::print("  llao.exe variants [fmt_id ...]               compression variants from formats/*.json\n");
+    out::print("  llao.exe tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n");
+    out::print("  llao.exe help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n");
+    out::print("  llao.exe stats                               show accumulated statistics\n");
+    out::print("  llao.exe optimize <file|folder> [...]        main enumeration\n");
+    out::print("             [--jobs=N] [--formats=a,b] [--report=<file|folder>]\n");
+    out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
+    out::print("  llao.exe restore <file|folder> [...]         decode + re-encode to the target format\n");
+    out::print("             [--jobs=N] [--to=flac] [--variant=<id>] [--no-download]\n");
+    out::print("             [--allow-lossy]\n");
+    out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
+}
+
+int cmd_check_formats() {
+    try {
+        auto fmts = config::load_all();
+        out::print("Configs are valid: %zu formats\n", fmts.size());
+        for (const auto& f : fmts) {
+            out::print("  %-16s %-26s [%s]\n", f.id.c_str(), f.name.c_str(),
+                   i18n::str(f.enabled ? "enabled" : "disabled").c_str());
+        }
+        return 0;
+    } catch (const std::exception& exc) {
+        out::error("ERROR: %s\n", exc.what());
+        return 1;
+    }
+}
+
+int cmd_tools(const std::vector<std::string>& args) {
+    std::vector<std::string> ids;
+    bool no_download = false;
+    for (const auto& a : args) {
+        if (a == "--no-download") no_download = true;
+        else ids.push_back(a);
+    }
+    try {
+        auto fmts = config::load_all();
+        if (!ids.empty()) {
+            std::vector<config::Format> filtered;
+            for (const auto& f : fmts) {
+                if (std::find(ids.begin(), ids.end(), f.id) != ids.end()) filtered.push_back(f);
+            }
+            std::vector<std::string> unknown;
+            for (const auto& id : ids) {
+                bool found = false;
+                for (const auto& f : fmts)
+                    if (f.id == id) found = true;
+                if (!found) unknown.push_back(id);
+            }
+            for (const auto& u : unknown) out::error("ERROR: unknown format '%s'\n", u.c_str());
+            if (unknown.empty() && filtered.empty()) {
+                out::error("ERROR: no formats to check\n");
+                return 1;
+            }
+            fmts = filtered;
+        }
+        for (const auto& f : fmts) {
+            tool::Status st = tool::ensure(f, !no_download, "[" + f.id + "] ");
+            if (st.path.empty()) {
+                if (!st.message.empty())
+                    out::print("  %-16s %-10s %s\n", f.id.c_str(), st.status.c_str(), st.message.c_str());
+                else
+                    out::print("  %-16s %-10s (not found)\n", f.id.c_str(), st.status.c_str());
+            } else {
+                std::string line = i18n::fmt("  %-16s %-10s %s", f.id.c_str(), st.status.c_str(), st.path.c_str());
+                if (!st.message.empty()) line += i18n::fmt("  [%s]", st.message.c_str());
+                out::text(stdout, line + "\n");
+            }
+        }
+        return 0;
+    } catch (const std::exception& exc) {
+        out::error("ERROR: %s\n", exc.what());
+        return 1;
+    }
+}
+
+int cmd_help(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        out::error("ERROR: help <fmt_id> [--no-download] [-- <arguments>]\n");
+        return 2;
+    }
+    std::string fmt_id = args[0];
+    bool no_download = false;
+    std::vector<std::string> tool_args;
+    bool after_dashdash = false;
+    for (size_t i = 1; i < args.size(); i++) {
+        const std::string& a = args[i];
+        if (!after_dashdash && a == "--") {
+            after_dashdash = true;
+        } else if (!after_dashdash && a == "--no-download") {
+            no_download = true;
+        } else {
+            tool_args.push_back(a);
+        }
+    }
+    if (tool_args.empty()) tool_args = {"--help"};
+
+    try {
+        auto fmts = config::load_all();
+        const config::Format& fmt = config::load_one(fmts, fmt_id);
+        tool::Status st = tool::ensure(fmt, !no_download, "[" + fmt_id + "] ");
+        if (st.path.empty()) {
+            out::text(stderr, i18n::fmt("Tool for '%s' is unavailable", fmt_id.c_str()));
+            if (!st.message.empty()) out::text(stderr, i18n::fmt(" (%s)", st.message.c_str()));
+            out::text(stderr, ".\n");
+            return 1;
+        }
+        out::print("[%s] %s (%s)\n", fmt_id.c_str(), st.path.c_str(), st.status.c_str());
+        if (!st.message.empty()) out::print("WARNING: %s\n", st.message.c_str());
+
+        std::vector<std::string> run_args = {st.path};
+        run_args.insert(run_args.end(), tool_args.begin(), tool_args.end());
+        proc::Result r = proc::run(run_args, 60);
+        if (!r.started) {
+            out::print("Launch error: %s\n", r.error.empty() ? i18n::str("unknown error").c_str() : r.error.c_str());
+            out::print("\n[exit code: %d]\n", r.exit_code);
+            return 1;
+        }
+        std::string out = util::trim(r.output);
+        if (out.size() > 4000) {
+            out::print("%s\n... (truncated, %zu characters total)\n", out.substr(0, 4000).c_str(), out.size());
+        } else {
+            out::print("%s\n", out.empty() ? i18n::str("(no output)").c_str() : out.c_str());
+        }
+        out::print("\n[exit code: %d%s]\n", r.exit_code, r.timed_out ? i18n::str(", timed out").c_str() : "");
+        return 0;
+    } catch (const std::exception& exc) {
+        out::error("ERROR: %s\n", exc.what());
+        return 1;
+    }
+}
+
+int cmd_stats() {
+    auto items = stats::load();
+    stats::print_summary(items);
+    return 0;
+}
+
+int cmd_optimize(const std::vector<std::string>& args) {
+    optimize::Options opts;
+    bool no_more_opts = false;
+    for (const auto& a : args) {
+        if (!no_more_opts && a == "--") {
+            no_more_opts = true;
+        } else if (!no_more_opts && a == "--dry-run") {
+            opts.dry_run = true;
+        } else if (!no_more_opts && a == "--allow-lossy") {
+            opts.allow_lossy = true;
+        } else if (!no_more_opts && a == "--no-download") {
+            opts.no_download = true;
+        } else if (!no_more_opts && a == "--debug") {
+            opts.debug = true;
+        } else if (!no_more_opts && a == "--no-stats") {
+            opts.no_stats = true;
+        } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
+            opts.jobs = std::stoi(a.substr(7));
+        } else if (!no_more_opts && a == "--jobs") {
+            out::error("ERROR: use --jobs=N\n");
+            return 2;
+        } else if (!no_more_opts && a.rfind("--formats=", 0) == 0) {
+            opts.formats = util::split(a.substr(10), ',');
+        } else if (!no_more_opts && a == "--formats") {
+            out::error("ERROR: use --formats=fmt1,fmt2\n");
+            return 2;
+        } else if (!no_more_opts && a.rfind("--report=", 0) == 0) {
+            opts.report_path = a.substr(9);
+        } else if (!no_more_opts && a == "--report") {
+            out::error("ERROR: use --report=<file|folder>\n");
+            return 2;
+        } else {
+            opts.inputs.push_back(a);
+        }
+    }
+    if (opts.inputs.empty()) {
+        out::error("ERROR: optimize <file|folder> [...] [--jobs=N] [--formats=a,b] "
+                   "[--report=<file|folder>] [--no-download] [--dry-run]\n");
+        return 2;
+    }
+    return optimize::run(opts);
+}
+
+int cmd_restore(const std::vector<std::string>& args) {
+    optimize::RestoreOptions opts;
+    bool no_more_opts = false;
+    for (const auto& a : args) {
+        if (!no_more_opts && a == "--") {
+            no_more_opts = true;
+        } else if (!no_more_opts && a == "--no-download") {
+            opts.no_download = true;
+        } else if (!no_more_opts && a == "--allow-lossy") {
+            opts.allow_lossy = true;
+        } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
+            opts.jobs = std::stoi(a.substr(7));
+        } else if (!no_more_opts && a == "--jobs") {
+            out::error("ERROR: use --jobs=N\n");
+            return 2;
+        } else if (!no_more_opts && a.rfind("--to=", 0) == 0) {
+            opts.to = a.substr(5);
+        } else if (!no_more_opts && a == "--to") {
+            out::error("ERROR: use --to=<format>\n");
+            return 2;
+        } else if (!no_more_opts && a.rfind("--variant=", 0) == 0) {
+            opts.variant = a.substr(10);
+        } else if (!no_more_opts && a == "--variant") {
+            out::error("ERROR: use --variant=<id>\n");
+            return 2;
+        } else {
+            opts.inputs.push_back(a);
+        }
+    }
+    if (opts.inputs.empty()) {
+        out::error("ERROR: restore <file|folder> [...] [--jobs=N] [--to=flac] [--variant=<id>] "
+                   "[--no-download]\n");
+        return 2;
+    }
+    return optimize::restore_run(opts);
+}
+
+}  // namespace
+
+int main() {
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+
+    try {
+        auto args = wide_argv();
+
+        // Выделяем --lang=<код> / --lang <код> из любого места командной строки.
+        std::string lang_flag;
+        std::vector<std::string> filtered;
+        for (size_t i = 0; i < args.size(); i++) {
+            const std::string& a = args[i];
+            if (a == "--lang" && i + 1 < args.size()) {
+                lang_flag = args[++i];
+            } else if (a.rfind("--lang=", 0) == 0) {
+                lang_flag = a.substr(7);
+            } else {
+                filtered.push_back(a);
+            }
+        }
+        args = std::move(filtered);
+
+        i18n::init(lang_flag, config::load_settings_lang());
+
+        if (args.size() < 2) {
+            usage();
+            return 1;
+        }
+        std::string cmd = args[1];
+        std::vector<std::string> rest(args.begin() + 2, args.end());
+
+        if (cmd == "check-formats") return cmd_check_formats();
+        if (cmd == "variants") return optimize::list_variants(rest);
+        if (cmd == "tools") return cmd_tools(rest);
+        if (cmd == "help") return cmd_help(rest);
+        if (cmd == "stats") return cmd_stats();
+        if (cmd == "optimize") return cmd_optimize(rest);
+        if (cmd == "restore") return cmd_restore(rest);
+
+        out::error("ERROR: unknown command '%s'\n\n", cmd.c_str());
+        usage();
+        return 2;
+    } catch (const std::exception& exc) {
+        out::error("ERROR: %s\n", exc.what());
+        return 1;
+    }
+}

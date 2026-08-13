@@ -1,0 +1,60 @@
+{
+  "id": "monkeys_audio",
+  "name": "Monkey's Audio (APE)",
+  "extension": "ape",
+  "homepage": "https://www.monkeysaudio.com/",
+  "enabled": true,
+  "engine": {
+    "kind": "binary",
+    "executable": "mac",
+    "decoder_executable": "mac"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "extract7z",
+      "url": "https://monkeysaudio.com/x64",
+      "file_glob": null,
+      "files": ["MAC.exe", "MACDll64.dll", "MACDll.dll"],
+      "checksum": { "type": "sha256", "value": "091931dc828ade7a7ec3abb380d8612fcc44e956f9ad1b3bec227f8a70c492f1" },
+      "notes": "Официальный инсталлятор Monkey's Audio 13.20 (x64, редирект на MAC_1320_x64.exe). Сначала ищется уже установленная mac.exe (Program Files); иначе из инсталлятора напрямую через 7-Zip (kind=extract7z) извлекаются MAC.exe и MACDll64.dll/MACDll.dll — установка и winamp-плагины не требуются. Если 7-Zip не установлен — поставьте mac.exe вручную, llao найдёт его в Program Files."
+    }
+  ],
+  "encode": {
+    "cmd": ["mac", "{input}", "{output}", "{params}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "c1000", "args": ["-c1000"], "note": "fast (на шумоподобном контенте может оказаться лучшим)" },
+      { "id": "c2000", "args": ["-c2000"], "note": "normal" },
+      { "id": "c3000", "args": ["-c3000"], "note": "high" },
+      { "id": "c4000", "args": ["-c4000"], "note": "extra high" },
+      { "id": "c5000", "args": ["-c5000"], "note": "insane (максимальное сжатие)" }
+    ]
+  },
+  "decode": {
+    "cmd": ["mac", "{input}", "{output}", "-d"],
+    "output_format": "wav"
+  },
+  "verify": {
+    "kind": "builtin",
+    "cmd": ["mac", "{input}", "-v"]
+  },
+  "tag": {
+    "system": "apev2",
+    "writer": "monkeysaudio",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": true,
+      "cue_sheet": true,
+      "replay_gain": true,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 2 },
+    "bit_depth": [8, 16, 24],
+    "sample_rate": { "min": 1000, "max": 655350 }
+  },
+  "notes": "Теги — APEv2 (картинки через 'Cover Art (Front)'). Многоканальность (до 8) и 32-бит поддерживаются только новыми сборками mac — консервативно ограничено 2 каналами/24 бит; при использовании свежей сборки caps можно расширить."
+}

@@ -1,0 +1,74 @@
+{
+  "id": "flac",
+  "name": "FLAC",
+  "extension": "flac",
+  "homepage": "https://xiph.org/flac/",
+  "enabled": true,
+  "engine": {
+    "kind": "binary",
+    "executable": "flac",
+    "decoder_executable": "flac"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "archive",
+      "url": "https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip",
+      "file_glob": "**/flac.exe",
+      "checksum": { "type": "sha256", "value": "53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde" }
+    }
+  ],
+  "encode": {
+    "cmd": ["flac", "-f", "-s", "-o", "{output}", "{params}", "{input}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "0", "args": ["-0"], "note": "быстро, наименьшее сжатие" },
+      { "id": "1", "args": ["-1"] },
+      { "id": "2", "args": ["-2"] },
+      { "id": "3", "args": ["-3"] },
+      { "id": "4", "args": ["-4"] },
+      { "id": "5", "args": ["-5"] },
+      { "id": "6", "args": ["-6"] },
+      { "id": "7", "args": ["-7"] },
+      { "id": "8", "args": ["-8"], "note": "максимальное сжатие" },
+      { "id": "8_p", "args": ["-8", "-p"], "note": "точный поиск квантования LP-коэффициентов" },
+      { "id": "8_ptukey", "args": ["-8", "-A", "partial_tukey(2)"], "note": "другая аподизация" },
+      { "id": "8_punchout", "args": ["-8", "-A", "punchout_tukey(3)"], "note": "другая аподизация" },
+      { "id": "8_kaiser", "args": ["-8", "-A", "kaiser_bessel"], "note": "другая аподизация" },
+      { "id": "8_hann", "args": ["-8", "-A", "hann"], "note": "другая аподизация" },
+      { "id": "8_l24", "args": ["-8", "--lax", "-l", "24"], "note": "LPC до 24-го порядка (не-Subset)" },
+      { "id": "8_l32", "args": ["-8", "--lax", "-l", "32"], "note": "LPC до 32-го порядка (не-Subset)" },
+      { "id": "8_l24_p", "args": ["-8", "--lax", "-l", "24", "-p"], "note": "LPC 24 + точный поиск (не-Subset)" }
+    ]
+  },
+  "decode": {
+    "cmd": ["flac", "-d", "-f", "-s", "-o", "{output}", "{input}"],
+    "output_format": "wav"
+  },
+  "verify": {
+    "kind": "builtin",
+    "cmd": ["flac", "-t", "-s", "{input}"]
+  },
+  "cli_check": {
+    "cmd": ["--help"],
+    "expect": ["flac - command-line flac encoder/decoder", "version 1.5.0"]
+  },
+  "tag": {
+    "system": "vorbis",
+    "writer": "flac",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": true,
+      "cue_sheet": true,
+      "replay_gain": true,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 8 },
+    "bit_depth": [8, 16, 24],
+    "sample_rate": { "min": 1000, "max": 655350 }
+  },
+  "notes": "Встроенный MD5 (проверяется `flac -t`). Поддержка 32-бит PCM появилась в flac 1.4+ — включите 32 в bit_depth, если используете 1.4+. Варианты с --lax дают не-Subset-файлы (вне стандарта FLAC Subset): декодируются любым FLAC-декодером, но могут не играться на части железа — для хранилища это допустимо."
+}

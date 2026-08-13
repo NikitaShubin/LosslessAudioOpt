@@ -1,0 +1,27 @@
+# Wine prefix (внутри проекта — симлинк на ~/.wine-llao)
+.wine/
+
+# Скачанные утилиты кодеков
+bin/
+
+# Временные файлы оптимизации и кэши
+tmp/
+runs/
+
+# Накопленная статистика и служебные файлы
+stats.json
+session.json
+log.log
+
+# Рабочие/тестовые данные
+files/
+wav/
+rzlt/
+scratch_test/
+
+# Python
+__pycache__/
+
+# Артефакты сборки
+*.o
+llao.exe
