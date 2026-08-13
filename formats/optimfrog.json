@@ -1,0 +1,74 @@
+{
+  "id": "optimfrog",
+  "name": "OptimFROG",
+  "extension": "ofr",
+  "homepage": "http://losslessaudio.org/",
+  "enabled": true,
+  "engine": {
+    "kind": "binary",
+    "executable": "ofr",
+    "decoder_executable": "ofr"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "archive",
+      "url": "http://losslessaudio.org/Downloads/A1C0/5100/Win/OptimFROG_Win_x64_5100.zip",
+      "file_glob": "**/ofr.exe",
+      "checksum": { "type": "sha256", "value": "fde2909a35131f88d470c1248df0d741a4959465f48986a15808ea40096fd698" },
+      "notes": "Windows x64, v5.100."
+    }
+  ],
+  "encode": {
+    "cmd": ["ofr", "--encode", "{input}", "--output", "{output}", "--preset", "{params}", "--md5", "--overwrite", "--silent"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "p0", "args": ["0"], "note": "быстрейший режим" },
+      { "id": "p1", "args": ["1"] },
+      { "id": "p2", "args": ["2"], "note": "режим по умолчанию" },
+      { "id": "p3", "args": ["3"] },
+      { "id": "p4", "args": ["4"] },
+      { "id": "p5", "args": ["5"] },
+      { "id": "p6", "args": ["6"] },
+      { "id": "p7", "args": ["7"] },
+      { "id": "p8", "args": ["8"] },
+      { "id": "p9", "args": ["9"] },
+      { "id": "p10", "args": ["10"], "note": "ultranew-light" },
+      { "id": "max", "args": ["max"], "note": "максимальное сжатие (очень медленно)" },
+      { "id": "p9_acm", "args": ["9", "--acm"], "note": "пресет 9 + адаптивное кодирование" },
+      { "id": "p10_acm", "args": ["10", "--acm"], "note": "пресет 10 + адаптивное кодирование" },
+      { "id": "p10_optbest", "args": ["10", "--optimize", "best"], "note": "пресет 10 + оптимизация best" },
+      { "id": "p9_acm_optbest", "args": ["9", "--acm", "--optimize", "best"], "note": "промежуточный между 9 и max" }
+    ]
+  },
+  "decode": {
+    "cmd": ["ofr", "--decode", "{input}", "--output", "{output}", "--overwrite", "--silent"],
+    "output_format": "wav"
+  },
+  "verify": {
+    "kind": "builtin",
+    "cmd": ["ofr", "--check", "{input}"]
+  },
+  "cli_check": {
+    "cmd": ["--help"],
+    "expect": ["optimfrog lossless audio codec", "v5.100"]
+  },
+  "tag": {
+    "system": "apev2",
+    "writer": "optimfrog",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": true,
+      "cue_sheet": false,
+      "replay_gain": true,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 2 },
+    "bit_depth": [8, 16, 24, 32],
+    "sample_rate": { "min": 1000, "max": 384000 }
+  },
+  "notes": "Обычно даёт лучший размер среди lossless. Пресеты max (--acm --optimize best) чрезвычайно медленны — намеренно оставлены для полного перебора. `--md5` сохраняет MD5 исходного PCM, проверка `ofr --check`."
+}

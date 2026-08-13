@@ -1,0 +1,61 @@
+{
+  "id": "alac",
+  "name": "Apple Lossless (ALAC)",
+  "extension": "m4a",
+  "homepage": "https://macosforge.github.io/alac/",
+  "enabled": true,
+  "engine": {
+    "kind": "ffmpeg",
+    "executable": "ffmpeg",
+    "decoder_executable": "ffmpeg",
+    "codec": "alac",
+    "container": "m4a"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "archive",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+      "file_glob": "**/ffmpeg.exe",
+      "checksum": { "type": "sha256", "value": "" },
+      "notes": "Свежие сборки BtbN (win64-gpl). ffmpeg.exe скачивается один раз в bin/ffmpeg/ и используется всеми ffmpeg-форматами. 'latest' — плавающий тег, поэтому SHA-256 не фиксируется."
+    }
+  ],
+  "encode": {
+    "cmd": ["ffmpeg", "-y", "-loglevel", "error", "-i", "{input}", "-c:a", "{codec}", "{params}", "{output}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "default", "args": [], "note": "единственный режим (без уровней)" }
+    ]
+  },
+  "decode": {
+    "cmd": ["ffmpeg", "-y", "-loglevel", "error", "-i", "{input}", "{output}"],
+    "output_format": "wav"
+  },
+  "cli_check": {
+    "cmd": ["-version"],
+    "expect": ["ffmpeg version"]
+  },
+  "verify": {
+    "kind": "none",
+    "cmd": []
+  },
+  "tag": {
+    "system": "mp4",
+    "writer": "mp4",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": true,
+      "cue_sheet": false,
+      "replay_gain": false,
+      "chapters": true
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 8 },
+    "bit_depth": [16, 20, 24, 32],
+    "sample_rate": { "min": 1000, "max": 384000 }
+  },
+  "notes": "Теги — атомы MP4 (ilst): картинки через covr, лирика через ©lyr/----. ReplayGain не имеет стандартного представления в MP4 — при наличии уходит в sidecar."
+}

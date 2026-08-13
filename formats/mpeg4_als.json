@@ -1,0 +1,61 @@
+{
+  "id": "mpeg4_als",
+  "name": "MPEG-4 ALS",
+  "extension": "m4a",
+  "homepage": "https://www.nue.tu-berlin.de/menue/forschung/projekte/lossless/mp4als/",
+  "enabled": false,
+  "engine": {
+    "kind": "ffmpeg",
+    "executable": "ffmpeg",
+    "decoder_executable": "ffmpeg",
+    "codec": "mp4als",
+    "container": "m4a"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "archive",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+      "file_glob": "**/ffmpeg.exe",
+      "checksum": { "type": "sha256", "value": "" },
+      "notes": "Внимание: в современных сборках ffmpeg кодер mp4als удалён (остался только декодер als). Формат фактически нерабочий, поэтому enabled=false. ffmpeg.exe общий для ffmpeg-форматов."
+    }
+  ],
+  "encode": {
+    "cmd": ["ffmpeg", "-y", "-loglevel", "error", "-i", "{input}", "-c:a", "{codec}", "{params}", "{output}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "default", "args": ["-strict", "experimental"], "note": "экспериментальный кодер" }
+    ]
+  },
+  "decode": {
+    "cmd": ["ffmpeg", "-y", "-loglevel", "error", "-i", "{input}", "{output}"],
+    "output_format": "wav"
+  },
+  "cli_check": {
+    "cmd": ["-version"],
+    "expect": ["ffmpeg version"]
+  },
+  "verify": {
+    "kind": "none",
+    "cmd": []
+  },
+  "tag": {
+    "system": "mp4",
+    "writer": "mp4",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": false,
+      "cue_sheet": false,
+      "replay_gain": false,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 8 },
+    "bit_depth": [16, 24, 32],
+    "sample_rate": { "min": 1000, "max": 192000 }
+  },
+  "notes": "MPEG-4 Audio Lossless Coding. Кодер в ffmpeg экспериментальный (enabled=false по умолчанию). Сжатие обычно хуже WavPack/TAK; включён для полноты перебора."
+}

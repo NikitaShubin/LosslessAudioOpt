@@ -1,0 +1,59 @@
+{
+  "id": "la",
+  "name": "LA (LoselessAudio)",
+  "extension": "la",
+  "homepage": "http://www.lossless-audio.com/",
+  "enabled": true,
+  "engine": {
+    "kind": "binary",
+    "executable": "la",
+    "decoder_executable": "la"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "extract7z",
+      "url": "https://web.archive.org/web/2021id_/http://www.lossless-audio.com/La04b.exe",
+      "file_glob": null,
+      "files": ["la.exe", "la-core.dll"],
+      "checksum": { "type": "sha256", "value": "6f1f0275c825ea89fe0802f4497d183aa564ea3f823539cbbb2431e93f885408" },
+      "notes": "Windows-версия 0.4b. La04b.exe — NSIS-самораспаковывающийся установщик (winamp-плагин). Установка НЕ требуется: llao извлекает la.exe и la-core.dll напрямую через 7-Zip (kind=extract7z), плагины для winamp/foobar не ставятся. Если 7-Zip не установлен — извлеките вручную: 7z x La04b.exe -o<dir>, положите la.exe и la-core.dll (из $SYSDIR/) в bin/la/. Проверено: encode/decode работают под wine headless, roundtrip MD5 сходится."
+    }
+  ],
+  "encode": {
+    "cmd": ["la", "-overwrite", "{params}", "{input}", "{output}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "default", "args": [], "note": "быстрее, чуть хуже сжатие (seek включён)" },
+      { "id": "noseek", "args": ["-noseek"], "note": "без таблицы поиска — чуть меньше" },
+      { "id": "high", "args": ["-high"], "note": "максимальное сжатие (медленно)" },
+      { "id": "high_noseek", "args": ["-high", "-noseek"], "note": "макс. сжатие + без таблицы поиска" }
+    ]
+  },
+  "decode": {
+    "cmd": ["la", "-overwrite", "{input}", "{output}"],
+    "output_format": "wav"
+  },
+  "verify": {
+    "kind": "none",
+    "cmd": []
+  },
+  "tag": {
+    "system": "id3v1",
+    "writer": "id3",
+    "capabilities": {
+      "text": false,
+      "pictures": false,
+      "lyrics": false,
+      "cue_sheet": false,
+      "replay_gain": false,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 2 },
+    "bit_depth": [16],
+    "sample_rate": { "min": 8000, "max": 48000 }
+  },
+  "notes": "Только моно/стерео 16-бит PCM, только ID3v1-теги (текстовые поля). Файлы вне caps исключаются ДО кодирования. По историческим тестам — лучший размер среди lossless, но очень медленный и без встроенного MD5; выводит прогресс в консоль (stderr)."
+}

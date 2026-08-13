@@ -1,0 +1,80 @@
+{
+  "id": "wavpack",
+  "name": "WavPack",
+  "extension": "wv",
+  "homepage": "https://www.wavpack.com/",
+  "enabled": true,
+  "engine": {
+    "kind": "binary",
+    "executable": "wavpack",
+    "decoder_executable": "wvunpack"
+  },
+  "downloads": [
+    {
+      "os": "windows",
+      "kind": "archive",
+      "url": "https://github.com/dbry/WavPack/releases/download/5.9.0/wavpack-5.9.0-x64.zip",
+      "file_glob": "**/wavpack.exe",
+      "checksum": { "type": "sha256", "value": "ad5e94bcde6f4edfc859210d98f144f225805a391c633c68f6dbb15a9e52570e" }
+    }
+  ],
+  "encode": {
+    "cmd": ["wavpack", "-y", "-m", "{params}", "{input}", "-o", "{output}"],
+    "input_format": "wav",
+    "variants": [
+      { "id": "h_x0", "args": ["-h", "-x0"], "note": "high, без доп. обработки" },
+      { "id": "h_x1", "args": ["-h", "-x1"] },
+      { "id": "h_x2", "args": ["-h", "-x2"] },
+      { "id": "h_x3", "args": ["-h", "-x3"] },
+      { "id": "h_x4", "args": ["-h", "-x4"], "note": "очень медленно (генерация фильтров)" },
+      { "id": "h_x5", "args": ["-h", "-x5"], "note": "очень медленно" },
+      { "id": "h_x6", "args": ["-h", "-x6"], "note": "очень медленно" },
+      { "id": "h_x6_j1", "args": ["-h", "-x6", "-j1"], "note": "принудительно mid/side joint-stereo" },
+      { "id": "h_x6_bs", "args": ["-h", "-x6", "--blocksize=131072"], "note": "блок 131072" },
+      { "id": "h_x6_j1_bs", "args": ["-h", "-x6", "-j1", "--blocksize=131072"], "note": "mid/side + блок 131072" },
+      { "id": "hh_x0", "args": ["-hh", "-x0"], "note": "very high, без доп. обработки" },
+      { "id": "hh_x1", "args": ["-hh", "-x1"] },
+      { "id": "hh_x2", "args": ["-hh", "-x2"] },
+      { "id": "hh_x3", "args": ["-hh", "-x3"] },
+      { "id": "hh_x4", "args": ["-hh", "-x4"], "note": "очень медленно" },
+      { "id": "hh_x5", "args": ["-hh", "-x5"], "note": "очень медленно" },
+      { "id": "hh_x5_j1", "args": ["-hh", "-x5", "-j1"], "note": "mid/side joint-stereo" },
+      { "id": "hh_x5_bs", "args": ["-hh", "-x5", "--blocksize=131072"] },
+      { "id": "hh_x5_j1_bs", "args": ["-hh", "-x5", "-j1", "--blocksize=131072"] },
+      { "id": "hh_x6", "args": ["-hh", "-x6"], "note": "очень медленно" },
+      { "id": "hh_x6_j1", "args": ["-hh", "-x6", "-j1"], "note": "принудительно mid/side joint-stereo" },
+      { "id": "hh_x6_bs", "args": ["-hh", "-x6", "--blocksize=131072"], "note": "блок 131072" },
+      { "id": "hh_x6_j1_bs", "args": ["-hh", "-x6", "-j1", "--blocksize=131072"], "note": "mid/side + блок 131072" }
+    ]
+  },
+  "decode": {
+    "cmd": ["wvunpack", "-y", "{input}", "-o", "{output}"],
+    "output_format": "wav"
+  },
+  "verify": {
+    "kind": "builtin",
+    "cmd": ["wvunpack", "-v", "{input}"]
+  },
+  "cli_check": {
+    "cmd": ["--help"],
+    "expect": ["wavpack [-options] infile", "lossless"]
+  },
+  "tag": {
+    "system": "apev2",
+    "writer": "wavpack",
+    "capabilities": {
+      "text": true,
+      "pictures": true,
+      "lyrics": true,
+      "cue_sheet": true,
+      "replay_gain": true,
+      "chapters": false
+    }
+  },
+  "caps": {
+    "channels": { "min": 1, "max": 256 },
+    "bit_depth": [4, 8, 16, 24, 32],
+    "sample_rate": { "min": 1000, "max": 4000000 }
+  },
+  "notes": "`-m` пишет MD5 исходного PCM (проверка `wvunpack -v`). Теги — APEv2 (картинки через ключ 'Cover Art (Front)'). Режим только lossless; гибрид (-b/-c) не используется. Варианты -j1 (принудительный mid/side joint-stereo) и --blocksize=131072 (блок больше стандартного) на части контента дают меньший размер."
+}
