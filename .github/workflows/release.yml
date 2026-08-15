@@ -15,11 +15,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Установка зависимостей (wine + 32-бит, ffmpeg, p7zip)
+      - name: Установка зависимостей (wine 10, ffmpeg, p7zip)
         run: |
-          sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y wine wine32:i386 ffmpeg p7zip-full
+          sudo apt-get install -y --no-install-recommends wget ca-certificates gnupg2
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -NP /etc/apt/keyrings/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
+          sudo apt-get update
+          sudo apt-get install -y --install-recommends winehq-stable ffmpeg p7zip-full
           wine --version
 
       - name: Инструментарий llvm-mingw

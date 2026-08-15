@@ -25,6 +25,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -32,6 +33,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 FORMATS_DIR = os.path.join(ROOT, "formats")
 BASELINE_DIR = os.path.join(ROOT, ".github", "cli-baselines")
 BIN_DIR = os.path.join(ROOT, "bin")
+
+
+def wine_cmd():
+    # Ubuntu (classic WoW64) кладёт 32-битный лоадер в `wine`, а `wine64` умеет оба;
+    # WineHQ (new WoW64) предоставляет только `wine`.
+    for cand in ("wine64", "wine"):
+        if shutil.which(cand):
+            return cand
+    return "wine"
 
 
 def load_formats():
@@ -58,7 +68,7 @@ def capture(args):
     if sys.platform == "win32":
         cmd = args
     else:
-        cmd = ["wine"] + args
+        cmd = [wine_cmd()] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
