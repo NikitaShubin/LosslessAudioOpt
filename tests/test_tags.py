@@ -303,7 +303,7 @@ def make_jpeg1x1():
     global _JPG_BYTES
     if _JPG_BYTES is None:
         p = os.path.join(FIX, "pix1x1.jpg")
-        ffmpeg(["-f", "lavfi", "-i", "color=black:s=1x1",
+        ffmpeg(["-f", "lavfi", "-i", "color=black:size=1x1",
                 "-frames:v", "1", p], cwd=FIX)
         with open(p, "rb") as f:
             _JPG_BYTES = f.read()
@@ -509,7 +509,7 @@ def gen_fixtures():
             "-i", "aevalsrc=0.5*sin(2*PI*440*t)+0.3*sin(2*PI*880*t)+"
                   "0.2*sin(2*PI*1760*t)+0.1*sin(2*PI*293*t)|"
                   "0.5*sin(2*PI*440*t)+0.3*sin(2*PI*660*t)+"
-                  "0.2*sin(2*PI*1320*t):d=8:s=44100",
+                  "0.2*sin(2*PI*1320*t):duration=8:sample_rate=44100",
             "-ac", "2", "-c:a", "pcm_s16le", mix])
 
     # flac уровня 0 — намеренно крупнее целей (tta/wavpack), чтобы замена
