@@ -303,8 +303,10 @@ def make_jpeg1x1():
     global _JPG_BYTES
     if _JPG_BYTES is None:
         p = os.path.join(FIX, "pix1x1.jpg")
-        ffmpeg(["-f", "lavfi", "-i", "color=black:size=1x1",
-                "-frames:v", "1", p], cwd=FIX)
+        # ffmpeg 6.1 (Ubuntu noble): color не принимает размеры < 2 (1x1 -> 0x0),
+        # поэтому сначала 2x2, затем scale=1:1. Работает и в 6.1, и в 8.x.
+        ffmpeg(["-f", "lavfi", "-i", "color=black:size=2x2",
+                "-vf", "scale=1:1", "-frames:v", "1", p], cwd=FIX)
         with open(p, "rb") as f:
             _JPG_BYTES = f.read()
     return _JPG_BYTES
