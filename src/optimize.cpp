@@ -201,6 +201,29 @@ struct Env {
     int verify_timeout = 600;
 };
 
+// Декод исходника собственным декодером формата (без скачивания: только кэш/PATH).
+// Возвращает true, если out_wav создан; иначе false и out_wav удалён.
+// Для наших форматов родной декодер надёжнее ffmpeg (есть известное расхождение
+// ffmpeg и wvunpack для wavpack 5.9), а некоторые форматы (OptimFROG высоких
+// пресетов) ffmpeg вообще не разбирает — родной декод используется и как фолбэк probe.
+static bool decode_source_native(const config::Format* src_fmt, const std::string& path,
+                                 const std::string& out_wav) {
+    if (!src_fmt) return false;
+    tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
+    if (sst.path.empty()) return false;
+    Env senv;
+    senv.fmt = src_fmt;
+    senv.encoder = sst.path;
+    senv.decoder = decoder_path(*src_fmt, sst.path);
+    std::vector<std::string> sargs =
+        build_cmd(src_fmt->decode_cmd, senv.decoder, path, out_wav, {},
+                  src_fmt->engine_codec, src_fmt->engine_container);
+    proc::Result dr = proc::run(sargs, senv.decode_timeout);
+    bool ok = dr.started && !dr.timed_out && dr.exit_code == 0 && util::file_exists(out_wav);
+    if (!ok) util::remove_file(out_wav);
+    return ok;
+}
+
 // Возвращает пустую строку при успехе, иначе текст ошибки.
 std::string encode_and_validate(const std::string& wav, const std::string& candidate,
                                 const std::vector<std::string>& params, const Env& env) {
@@ -314,8 +337,9 @@ struct FileJob {
     std::vector<json::json> stat_records;
     std::vector<std::string> failures;
     std::vector<std::string> exclusions;
+    int variant_errors = 0;   // операционные сбои вариантов (кодирование/валидация/теги)
+    int tool_errors = 0;      // утилиты форматов недоступны
     report::FileSummary summary;
-    int rc = 0;
 };
 
 struct Runner {
@@ -464,27 +488,44 @@ struct Runner {
             j.summary.status = "error";
             j.summary.detail = i18n::str("ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)");
             status::log(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
-            j.rc = 1;
             return;
         }
 
+        j.ref_wav = util::join_path(tmp, j.tok + "_" + j.base_ne + ".ref.wav");
+        bool src_decoded = false;
+
         media::Probe probe = media::probe_file(j.path, ffprobe);
+        if (!probe.ok) {
+            // ffprobe не смог прочитать файл (напр. OptimFROG высоких пресетов ffmpeg
+            // не разбирает). Пробуем родной декодер формата по расширению: расжимаем в
+            // WAV и пробируем уже WAV — его ffprobe читает всегда.
+            const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
+            if (src_fmt && decode_source_native(src_fmt, j.path, j.ref_wav)) {
+                probe = media::probe_file(j.ref_wav, ffprobe);
+                if (probe.ok) {
+                    probe.format_name = src_fmt->id;
+                    probe.size = util::file_size(j.path);
+                    src_decoded = true;
+                }
+            }
+            if (!probe.ok) {
+                util::remove_file(j.ref_wav);
+                j.summary.path = j.path;
+                j.summary.status = "error";
+                j.summary.detail = probe.error;
+                if (logger) {
+                    logger->event({{"type", "file_done"},
+                                   {"file", j.path},
+                                   {"status", "error"},
+                                   {"reason", probe.error}});
+                }
+                status::error("ERROR " + j.path + " — " + probe.error + "\n");
+                    return;
+            }
+        }
         j.probe = probe;
         if (logger) {
             logger->event({{"type", "file_start"}, {"file", j.path}});
-        }
-        if (!probe.ok) {
-            j.summary.path = j.path;
-            j.summary.status = "skip";
-            j.summary.detail = probe.error;
-            if (logger) {
-                logger->event({{"type", "file_done"},
-                               {"file", j.path},
-                               {"status", "skip"},
-                               {"reason", probe.error}});
-            }
-            status::log("SKIP " + j.path + " — " + probe.error + "\n");
-            return;
         }
         if (probe.has_video) {
             j.summary.path = j.path;
@@ -519,42 +560,27 @@ struct Runner {
         if (bits <= 0) bits = 16;
         j.bits = bits;
 
-        j.ref_wav = util::join_path(tmp, j.tok + "_" + j.base_ne + ".ref.wav");
-        std::string derr;
         // Декод исходника собственным декодером формата: для наших форматов это надёжнее
         // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
-        bool decoded = false;
-        const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
-        if (src_fmt) {
-            // Для декода источника скачивание не запускаем: только кэш/PATH, иначе ffmpeg.
-            tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
-            if (!sst.path.empty()) {
-                Env senv;
-                senv.fmt = src_fmt;
-                senv.encoder = sst.path;
-                senv.decoder = decoder_path(*src_fmt, sst.path);
-                std::vector<std::string> sargs =
-                    build_cmd(src_fmt->decode_cmd, senv.decoder, j.path, j.ref_wav, {},
-                              src_fmt->engine_codec, src_fmt->engine_container);
-                proc::Result dr = proc::run(sargs, senv.decode_timeout);
-                decoded = dr.started && !dr.timed_out && dr.exit_code == 0 &&
-                          util::file_exists(j.ref_wav);
-                if (!decoded) util::remove_file(j.ref_wav);
-            }
+        std::string derr;
+        bool decoded = src_decoded;
+        if (!decoded) {
+            const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
+            if (src_fmt) decoded = decode_source_native(src_fmt, j.path, j.ref_wav);
         }
         if (!decoded) decoded = media::decode_to_wav(j.path, j.ref_wav, ffmpeg, bits, &derr);
         if (!decoded) {
             util::remove_file(j.ref_wav);
             j.summary.path = j.path;
-            j.summary.status = "skip";
+            j.summary.status = "error";
             j.summary.detail = i18n::str("decode to reference WAV: ") + derr;
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
-                               {"status", "skip"},
+                               {"status", "error"},
                                {"reason", j.summary.detail}});
             }
-            status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
+            status::error("ERROR " + j.path + " — " + j.summary.detail + "\n");
             return;
         }
         j.ref_size = util::file_size(j.ref_wav);
@@ -591,6 +617,7 @@ struct Runner {
                                      st.status + ")");
                 j.exclusions.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" +
                                        st.status + ")");
+                j.tool_errors++;
                 continue;
             }
 
@@ -635,6 +662,7 @@ struct Runner {
         auto record_error = [&](const std::string& err) {
             std::lock_guard<std::mutex> lk(*j.m);
             j.failures.push_back(f.id + "/" + v.id + ": " + err);
+            j.variant_errors++;
             rec["status"] = "error";
             rec["error"] = err;
             if (logger) {
@@ -780,21 +808,38 @@ struct Runner {
         double result_pct = -1.0;
 
         if (j.summary.status == "error") {
-            // ошибка уже зафиксирована (ffprobe/ffmpeg, исключение)
+            // ошибка уже зафиксирована (ffprobe/ffmpeg, probe, декод, исключение)
             winner_text = "error";
         } else if (!j.any_passed) {
-            j.summary.status = "skip";
+            // Победителя нет. Операционные сбои (упали все варианты, утилиты недоступны) —
+            // это ошибка файла; «чистый» skip остаётся только для намеренных причин
+            // (нет подходящих кандидатов из-за caps и т.п.).
+            bool hard = j.variant_errors > 0 || j.tool_errors > 0;
             std::string reason =
                 j.failures.empty() ? i18n::str("no suitable candidates") : j.failures[0];
-            j.summary.detail = reason;
-            msg = "SKIP " + j.base + " — " + reason + "\n";
-            winner_text = "skip";
-            if (!opts.no_stats) stats::append_all(records);
-            if (logger) {
-                logger->event({{"type", "file_done"},
-                               {"file", j.path},
-                               {"status", "skip"},
-                               {"reason", reason}});
+            if (hard) {
+                j.summary.status = "error";
+                winner_text = "error";
+                j.summary.detail = reason;
+                if (!opts.no_stats) stats::append_all(records);
+                if (logger) {
+                    logger->event({{"type", "file_done"},
+                                   {"file", j.path},
+                                   {"status", "error"},
+                                   {"reason", reason}});
+                }
+            } else {
+                j.summary.status = "skip";
+                j.summary.detail = reason;
+                msg = "SKIP " + j.base + " — " + reason + "\n";
+                winner_text = "skip";
+                if (!opts.no_stats) stats::append_all(records);
+                if (logger) {
+                    logger->event({{"type", "file_done"},
+                                   {"file", j.path},
+                                   {"status", "skip"},
+                                   {"reason", reason}});
+                }
             }
         } else {
             const Candidate& best = j.best;
@@ -902,7 +947,7 @@ struct Runner {
 
         if (!msg.empty()) status::log(msg);
         status::end_file(j.idx, j.base, winner_text, result_pct);
-        if (j.rc != 0) failed++;
+        if (j.summary.status == "error") failed++;
     }
 
     void worker() {
@@ -930,8 +975,7 @@ struct Runner {
                     j.summary.path = j.path;
                     j.summary.status = "error";
                     j.summary.detail = perr;
-                    j.rc = 1;
-                    status::error("ERROR [" + j.path + "]: " + perr + "\n");
+                            status::error("ERROR [" + j.path + "]: " + perr + "\n");
                 }
                 bool finish_now = false;
                 size_t n_tasks = 0;
@@ -967,8 +1011,8 @@ struct Runner {
                     if (!verr.empty()) {
                         std::lock_guard<std::mutex> jl(*j.m);
                         j.failures.push_back("variant: " + verr);
-                        j.rc = 1;
-                        status::error("ERROR [" + j.path + "]: " + verr + "\n");
+                        j.variant_errors++;
+                                    status::error("ERROR [" + j.path + "]: " + verr + "\n");
                     }
                     j.completed++;
                     done_n = j.completed;
@@ -1136,9 +1180,37 @@ static int restore_one(const std::string& path, const config::Format& target,
         return 1;
     }
 
+    std::string base = util::base_name(path);
+    std::string base_ne = base_no_ext(path);
+    std::string dir = util::dir_name(path);
+    std::string tmp = tmp_dir();
+    util::mkdirs(tmp);
+    std::string tok = tmp_token(path);
+    std::string src_wav = util::join_path(tmp, tok + "_" + base_ne + ".src.wav");
+
     media::Probe probe = media::probe_file(path, ffprobe);
-    if (!probe.ok) {
-        print_locked("SKIP " + path + " — " + probe.error + "\n");
+    bool src_decoded = false;
+    if (!probe.ok && lower_ext(path) != util::to_lower(target.extension)) {
+        // ffprobe не смог прочитать файл (напр. OptimFROG высоких пресетов ffmpeg
+        // не разбирает). Пробуем родной декодер формата по расширению: расжимаем в
+        // WAV и пробируем уже WAV — его ffprobe читает всегда.
+        const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
+        if (src_fmt && src_fmt->id != target.id && decode_source_native(src_fmt, path, src_wav)) {
+            probe = media::probe_file(src_wav, ffprobe);
+            if (probe.ok) {
+                probe.format_name = src_fmt->id;
+                probe.size = util::file_size(path);
+                src_decoded = true;
+            }
+        }
+        if (!probe.ok) {
+            util::remove_file(src_wav);
+            print_locked("ERROR " + path + " — " + probe.error + "\n");
+            return 1;
+        }
+    }
+    if (lower_ext(path) == util::to_lower(target.extension)) {
+        print_locked("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
         return 0;
     }
     if (probe.has_video) {
@@ -1150,17 +1222,6 @@ static int restore_one(const std::string& path, const config::Format& target,
                      i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str()) + "\n");
         return 0;
     }
-    if (lower_ext(path) == util::to_lower(target.extension)) {
-        print_locked("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
-        return 0;
-    }
-
-    std::string base = util::base_name(path);
-    std::string base_ne = base_no_ext(path);
-    std::string dir = util::dir_name(path);
-    std::string tmp = tmp_dir();
-    util::mkdirs(tmp);
-    std::string tok = tmp_token(path);
 
     // Теги: источник — встроенные группы + sidecar (объединение групп).
     tags::TagSet embed_ts = tags::extract_tags(path, probe);
@@ -1176,40 +1237,23 @@ static int restore_one(const std::string& path, const config::Format& target,
 
     // Декод исходника собственным декодером формата: для наших форматов это надёжнее
     // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
-    std::string src_wav = util::join_path(tmp, tok + "_" + base_ne + ".src.wav");
     const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
     std::string dec_err;
-    bool decoded = false;
-    if (src_fmt && src_fmt->id != target.id) {
-        // Для декода источника скачивание не запускаем: только кэш/PATH, иначе ffmpeg.
-        tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
-        if (!sst.path.empty()) {
-            Env senv;
-            senv.fmt = src_fmt;
-            senv.encoder = sst.path;
-            senv.decoder = decoder_path(*src_fmt, sst.path);
-            std::vector<std::string> sargs =
-                build_cmd(src_fmt->decode_cmd, senv.decoder, path, src_wav, {},
-                          src_fmt->engine_codec, src_fmt->engine_container);
-            proc::Result dr = proc::run(sargs, senv.decode_timeout);
-            decoded = dr.started && !dr.timed_out && dr.exit_code == 0 &&
-                      util::file_exists(src_wav);
-            if (!decoded) util::remove_file(src_wav);
-        }
-    }
+    bool decoded = src_decoded;
+    if (!decoded && src_fmt && src_fmt->id != target.id) decoded = decode_source_native(src_fmt, path, src_wav);
     if (!decoded) decoded = media::decode_to_wav(path, src_wav, ffmpeg, bits, &dec_err);
     if (!decoded) {
         util::remove_file(src_wav);
-        print_locked("SKIP " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
-        return 0;
+        print_locked("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
+        return 1;
     }
 
     tool::Status st = tool::ensure(target, !no_download, "[" + target.id + "] ");
     if (st.path.empty()) {
         util::remove_file(src_wav);
-        print_locked(i18n::fmt("SKIP %s — utility %s unavailable (%s)\n", path.c_str(),
+        print_locked(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
                                 target.id.c_str(), st.status.c_str()));
-        return 0;
+        return 1;
     }
 
     Env env;
@@ -1225,14 +1269,14 @@ static int restore_one(const std::string& path, const config::Format& target,
     util::remove_file(src_wav);
     if (!verr.empty()) {
         util::remove_file(candidate);
-        print_locked("SKIP " + path + " — " + verr + "\n");
-        return 0;
+        print_locked("ERROR " + path + " — " + verr + "\n");
+        return 1;
     }
     uint64_t size = util::file_size(candidate);
     if (size == 0) {
         util::remove_file(candidate);
-        print_locked("SKIP " + path + " — " + i18n::str("empty file") + "\n");
-        return 0;
+        print_locked("ERROR " + path + " — " + i18n::str("empty file") + "\n");
+        return 1;
     }
 
     // Теги: план встраивания/сайдкара (восстановление: с мержем групп).
@@ -1255,16 +1299,16 @@ static int restore_one(const std::string& path, const config::Format& target,
     }
     if (!terr.empty()) {
         util::remove_file(candidate);
-        print_locked("SKIP " + path + " — " + i18n::str("tags: ") + terr + "\n");
-        return 0;
+        print_locked("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
+        return 1;
     }
     if (has_tags && ts.present) {
         std::string v2 = tags::validate_groups(candidate, target.id, plan.embed, ffprobe);
         if (!v2.empty()) {
             util::remove_file(candidate);
             if (sidecar) util::remove_file(candidate + ".tags.zip");
-            print_locked("SKIP " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
-            return 0;
+            print_locked("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
+            return 1;
         }
     }
 
@@ -1272,19 +1316,19 @@ static int restore_one(const std::string& path, const config::Format& target,
     std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
     std::string tmp_name = util::join_path(dir, "." + base_ne + ".llao-restore-tmp." + target.extension);
     if (!util::copy_file(candidate, tmp_name)) {
-        print_locked(i18n::fmt("!    %s — could not copy the candidate into the folder\n", base.c_str()));
-        return 0;
+        print_locked(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
+        return 1;
     }
     if (!util::remove_file(path)) {
         util::remove_file(tmp_name);
-        print_locked(i18n::fmt("!    %s — could not replace the file (access denied)\n", base.c_str()));
-        return 0;
+        print_locked(i18n::fmt("ERROR %s — could not replace the file (access denied)\n", path.c_str()));
+        return 1;
     }
     std::error_code ec;
     fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
     if (ec) {
-        print_locked(i18n::fmt("!    %s — could not rename (the .llao-restore-tmp file remains)\n", base.c_str()));
-        return 0;
+        print_locked(i18n::fmt("ERROR %s — could not rename (the .llao-restore-tmp file remains)\n", path.c_str()));
+        return 1;
     }
 
     std::string old_sc = util::join_path(dir, base_ne + ".tags.zip");

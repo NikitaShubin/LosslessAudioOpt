@@ -70,6 +70,9 @@ jobs:
       - name: Тесты переноса тегов
         run: python3 tests/test_tags.py
 
+      - name: Тесты ошибок и честных результатов
+        run: python3 tests/test_errors.py
+
       - name: Сборка релизного архива
         run: |
           set -euo pipefail
