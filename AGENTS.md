@@ -20,7 +20,9 @@
 2. **Вышла новая версия кодека** — `.github/scripts/check_upstream.py --check`
    сверяет версии из `formats/*.json` с актуальными (flac/wavpack — GitHub API,
    tak/optimfrog/monkeys_audio — ручная таблица `UPSTREAM_MANUAL` в скрипте).
-3. **Упали тесты тегов** — `python3 tests/test_tags.py`.
+3. **Упали тесты** — `python3 tests/test_tags.py` (перенос тегов) и
+   `python3 tests/test_errors.py` (ошибки и честные результаты: битые файлы,
+   отсутствующие утилиты, фолбэк native-декода для .ofr).
 
 ### Что делать при красной сборке (порядок разбора)
 
