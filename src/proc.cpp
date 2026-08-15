@@ -98,8 +98,8 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    CloseHandle(hRead);
     reader.join();
+    CloseHandle(hRead);
     res.output = std::move(output);
     return res;
 }
