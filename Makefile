@@ -22,6 +22,7 @@ SRCS := src/main.cpp \
         src/report.cpp \
         src/media.cpp \
         src/tags.cpp \
+        src/status.cpp \
         src/optimize.cpp \
         third_party/miniz/miniz.c
 OBJS := $(SRCS:.cpp=.o)

@@ -14,6 +14,7 @@ struct Options {
     bool allow_lossy = false;          // обрабатывать lossy-входы (mp3, aac, …)
     bool debug = false;                // писать журнал runs/*.jsonl
     bool no_stats = false;             // не накапливать stats.json
+    bool no_status = false;            // без интерактивного статусбара
     std::string report_path;           // путь к итоговому отчёту (пусто = не писать)
 };
 
@@ -24,6 +25,8 @@ struct Candidate {
     uint64_t sidecar = 0;      // размер sidecar (0 если не нужен)
     uint64_t cost = 0;         // файл + sidecar
     bool has_tags = false;
+    std::string path;          // путь к tmp-файлу кандидата
+    size_t order = 0;          // детерминированный порядок (для тай-брейка)
 };
 
 struct FileResult {
