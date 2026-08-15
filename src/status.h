@@ -8,22 +8,15 @@ namespace status {
 // no_status=true — принудительно линейный режим. В противном случае режим
 // определяется автоматически: интерактивный, если stdout — консоль с поддержкой
 // VT-последовательностей, иначе линейный (обычный построчный вывод).
+//
+// Тестовые хуки (переменные окружения):
+//   LLAO_STATUS_FORCE=1 — принудительно включить интерактивный режим
+//                         (например, под wine/PTY);
+//   LLAO_STATUS_SIZE=<W>x<H> — задать размер консоли, если он не определяется.
 void init(size_t total_files, bool no_status);
 
-// true, если активен интерактивный статусбар (перерисовка строк).
+// true, если активен интерактивный статусбар.
 bool interactive();
-
-// Счётчик в начале строки: "[  3/12]".
-std::string counter(size_t idx);
-
-// Имя файла, выровненное по ширине колонки имени (обрезка с многоточием).
-std::string pad_name(const std::string& name);
-
-// Колонка победителя/статуса (фиксированная ширина, обрезка).
-std::string win_col(const std::string& s);
-
-// Колонка процента (6 символов, справа). pct<0 — прочерк.
-std::string pct_col(double pct);
 
 // Печать строки поверх статусбара (обычный вывод, уходит в scrollback).
 void log(const std::string& line);
@@ -31,7 +24,7 @@ void log(const std::string& line);
 // Печать строки в stderr поверх статусбара.
 void error(const std::string& line);
 
-// Установить полосу прогресса для файла idx (label — имя файла).
+// Начать полосу прогресса для файла idx (label — имя файла).
 void begin_file(size_t idx, const std::string& label, size_t total_tasks);
 
 // Обновить прогресс (done из total) с троттлингом.

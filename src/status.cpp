@@ -15,10 +15,11 @@ namespace status {
 
 namespace {
 
-constexpr size_t kNameCol = 40;
-constexpr size_t kWinCol = 20;
 constexpr size_t kPctCol = 6;
 
+// Одна строка статуса = один файл. Во время обработки строка — полоса на всю
+// ширину консоли (зелёная заливка по прогрессу, дальше серый фон, текст поверх).
+// По завершении — простая строка: счётчик, имя файла, победитель, процент.
 struct Row {
     std::string label;
     size_t total = 0;
@@ -32,11 +33,21 @@ std::mutex g_m;
 bool g_init = false;
 bool g_interactive = false;
 size_t g_total = 0;
-std::vector<Row> g_rows;  // индекс = порядковый номер файла
-size_t g_drawn = 0;       // сколько строк статуса нарисовано
+std::vector<Row> g_rows;   // индекс = порядковый номер файла
+size_t g_visible = 0;      // сколько строк статуса занимает блок (растёт к низу)
+bool g_overflow = false;   // блок заполнил почти весь экран — обычный построчный вывод
 std::chrono::steady_clock::time_point g_last;
 DWORD g_orig_mode = 0;
 bool g_orig_mode_valid = false;
+
+int g_width = 80;
+int g_height = 25;
+bool g_size_valid = false;
+
+constexpr std::chrono::milliseconds kTickMin(100);
+
+std::wstring u2w(const std::string& s) { return util::u2w(s); }
+std::string w2u(const std::wstring& s) { return util::w2u(s); }
 
 // Ширина поля счётчика по числу файлов (1..).
 size_t counter_width() {
@@ -48,27 +59,11 @@ size_t counter_width() {
     return w;
 }
 
-std::wstring u2w(const std::string& s) { return util::u2w(s); }
-std::string w2u(const std::wstring& s) { return util::w2u(s); }
-
-// Выравнивание строки по ширине (счёт в широких символах). Слева.
-std::string pad_left(const std::string& s, size_t width) {
-    std::wstring w = u2w(s);
-    if (w.size() >= width) {
-        w = w.substr(0, width);
-        return w2u(w);
-    }
-    return s + std::string(width - w.size(), ' ');
-}
-
-// Выравнивание строки по ширине (счёт в широких символах). Справа.
-std::string pad_right(const std::string& s, size_t width) {
-    std::wstring w = u2w(s);
-    if (w.size() >= width) {
-        w = w.substr(0, width);
-        return w2u(w);
-    }
-    return std::string(width - w.size(), ' ') + s;
+std::string counter(size_t idx) {
+    size_t w = counter_width();
+    char buf[64];
+    snprintf(buf, sizeof(buf), "[%*zu/%zu]", (int)w, idx + 1, g_total);
+    return buf;
 }
 
 std::string truncate(const std::wstring& w, size_t width) {
@@ -77,48 +72,106 @@ std::string truncate(const std::wstring& w, size_t width) {
     return w2u(w.substr(0, width));
 }
 
-// Подняться на начало блока статусных строк и встать на колонку 0.
-void move_to_top() {
-    if (g_drawn == 0) return;
-    out::text(stdout, "\x1b[" + std::to_string(g_drawn) + "A\r");
+std::string pct_col(double pct) {
+    char buf[32];
+    if (pct < 0) return std::string(kPctCol - 1, ' ') + "\xe2\x80\x94";  // —
+    snprintf(buf, sizeof(buf), "%5.1f%%", pct);
+    return std::string(buf);
 }
 
-// Нарисовать блок строк от текущей позиции курсора (очистив снизу).
-void draw_from_cursor() {
-    std::string s;
-    s += "\x1b[0J";
-    for (size_t i = 0; i < g_total; i++) {
-        const Row& r = g_rows[i];
-        if (r.label.empty()) continue;  // файл ещё не начат
-        s += counter(i);
-        s += "  ";
-        s += pad_name(r.label);
-        s += "  ";
-        if (r.finished) {
-            s += pad_left(r.winner, kWinCol);
-            s += " ";
-            s += pct_col(r.pct);
-        } else {
-            size_t filled = r.total > 0 ? (r.done * kWinCol) / r.total : 0;
-            if (filled > kWinCol) filled = kWinCol;
-            s += "\x1b[42m" + std::string(filled, ' ');
-            s += "\x1b[100m" + std::string(kWinCol - filled, ' ');
-            s += "\x1b[0m";
-            s += " ";
-            s += pct_col(100.0 * (double)r.done / (double)(r.total ? r.total : 1));
-        }
-        if (i + 1 < g_total) s += "\n";
+// Текст строки без цвета/фона, обрезанный до W символов.
+std::string row_text(const Row& r, size_t idx, int W) {
+    std::string s = counter(idx) + " " + r.label + "  ";
+    if (r.finished) {
+        s += r.winner + " " + pct_col(r.pct);
+    } else {
+        s += pct_col(100.0 * (double)r.done / (double)(r.total ? r.total : 1));
     }
-    if (!s.empty()) out::text(stdout, s);
-    g_drawn = 0;
-    for (size_t i = 0; i < g_total; i++)
-        if (!g_rows[i].label.empty()) g_drawn++;
+    return truncate(u2w(s), (size_t)W);
+}
+
+// Полоса прогресса на всю ширину W: зелёная заливка (42) до done/total,
+// дальше серый фон (100); текст белым поверх. Текст статичен (кроме процента).
+std::string strip_row(const Row& r, size_t idx, int W) {
+    double f = r.total > 0 ? (double)r.done / (double)r.total : 0.0;
+    int filled = (int)(f * W + 0.5);
+    if (filled > W) filled = W;
+    if (filled < 0) filled = 0;
+    std::wstring body = u2w(row_text(r, idx, W));
+    std::string s;
+    s += "\x1b[42m" + std::string((size_t)filled, ' ');
+    s += "\x1b[100m" + std::string((size_t)(W - filled), ' ');
+    s += "\x1b[0m\r";
+    size_t col = 0;
+    for (wchar_t ch : body) {
+        if (ch == L' ') {
+            col++;
+            continue;
+        }
+        s += col < (size_t)filled ? "\x1b[37;42m" : "\x1b[37;100m";
+        char buf[8];
+        int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, buf, (int)sizeof(buf), nullptr, nullptr);
+        if (n > 0) s.append(buf, (size_t)n);
+        col++;
+    }
+    s += "\x1b[0m";
+    return s;
+}
+
+// Строка результата: без фона, стирает предыдущее содержимое строки.
+std::string finished_row(const Row& r, size_t idx, int W) {
+    return "\x1b[2K" + row_text(r, idx, W);
+}
+
+std::string pos(int row, int col) {
+    return "\x1b[" + std::to_string(row) + ";" + std::to_string(col) + "H";
+}
+
+// Последняя строка scroll-региона лога (низ региона = верх блока статуса).
+int scroll_bottom() {
+    int b = g_height - (int)g_visible;
+    if (b < 1) b = 1;
+    return b;
+}
+
+// Установить scroll-регион [1..scroll_bottom()]: лог скроллится над блоком,
+// блок остаётся закреплённым у низа экрана.
+void set_region() {
+    out::text(stdout, "\x1b[1;" + std::to_string(scroll_bottom()) + "r");
+}
+
+// Перерисовать блок статусных строк и поставить курсор в зону лога.
+void draw_locked() {
+    if (!g_size_valid || g_overflow) return;
+    set_region();
+    int top = g_height - (int)g_visible + 1;
+    for (size_t i = 0; i < g_visible; i++) {
+        const Row& r = g_rows[i];
+        std::string line = pos(top + (int)i, 1);
+        line += r.finished ? finished_row(r, i, g_width) : strip_row(r, i, g_width);
+        out::text(stdout, line);
+    }
+    out::text(stdout, pos(scroll_bottom(), 1));
     g_last = std::chrono::steady_clock::now();
 }
 
-void draw() {
-    move_to_top();
-    draw_from_cursor();
+// Гарантирует, что файл idx попал в блок (строки видны в порядке файлов).
+// Пропущенные файлы приходят сразу в end_file без begin_file.
+void ensure_visible_locked(size_t idx) {
+    while (g_visible <= idx) {
+        if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
+            g_overflow = true;
+            out::text(stdout, "\x1b[r" + pos(g_height, 1));  // обычный скролл
+            return;
+        }
+        g_visible++;
+    }
+}
+
+// Курсор в последнюю строку scroll-региона и вывод строки лога.
+void log_line(const std::string& line) {
+    out::text(stdout, pos(scroll_bottom(), 1));
+    out::text(stdout, line);
 }
 
 }  // namespace
@@ -129,46 +182,50 @@ void init(size_t total_files, bool no_status) {
     g_rows.assign(total_files, Row{});
     g_init = true;
     g_interactive = false;
-    g_drawn = 0;
+    g_visible = 0;
+    g_overflow = false;
+    g_width = 80;
+    g_height = 25;
+    g_size_valid = false;
     if (no_status) return;
 
-    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD mode = 0;
-    if (h == INVALID_HANDLE_VALUE || h == nullptr) return;
-    if (!GetConsoleMode(h, &mode)) return;  // stdout не консоль (pipe/файл)
-    DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-    if (!SetConsoleMode(h, new_mode)) return;  // VT не поддерживается
-    g_orig_mode = mode;
-    g_orig_mode_valid = true;
+    const char* force = getenv("LLAO_STATUS_FORCE");
+    bool forced = force && force[0] == '1';
+    const char* sz = getenv("LLAO_STATUS_SIZE");
+    if (sz && *sz) {
+        int W = 0, H = 0;
+        if (sscanf(sz, "%dx%d", &W, &H) == 2 && W > 0 && H > 0) {
+            g_width = W;
+            g_height = H;
+            g_size_valid = true;
+        }
+    }
+
+    if (!forced) {
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (h == INVALID_HANDLE_VALUE || h == nullptr) return;
+        DWORD mode = 0;
+        if (!GetConsoleMode(h, &mode)) return;  // stdout не консоль (pipe/файл)
+        DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if (!SetConsoleMode(h, new_mode)) return;  // VT не поддерживается
+        g_orig_mode = mode;
+        g_orig_mode_valid = true;
+    }
+
+    if (!g_size_valid) {
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (h != INVALID_HANDLE_VALUE && h != nullptr && GetConsoleScreenBufferInfo(h, &csbi)) {
+            g_width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+            g_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+            g_size_valid = true;
+        }
+    }
+
     g_interactive = true;
 }
 
 bool interactive() { return g_interactive; }
-
-std::string counter(size_t idx) {
-    size_t w = counter_width();
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[%*zu/%zu]", (int)w, idx + 1, g_total);
-    return buf;
-}
-
-std::string pad_name(const std::string& name) {
-    std::wstring w = u2w(name);
-    if (w.size() <= kNameCol) return w2u(w) + std::string(kNameCol - w.size(), ' ');
-    return truncate(w, kNameCol);
-}
-
-std::string win_col(const std::string& s) { return pad_left(s, kWinCol); }
-
-std::string pct_col(double pct) {
-    char buf[32];
-    if (pct < 0) {
-        std::wstring w = u2w("—");
-        return std::string(kPctCol - (w.size() < kPctCol ? w.size() : 0), ' ') + "—";
-    }
-    snprintf(buf, sizeof(buf), "%5.1f%%", pct);
-    return std::string(buf);
-}
 
 void log(const std::string& line) {
     if (!g_interactive) {
@@ -176,9 +233,11 @@ void log(const std::string& line) {
         return;
     }
     std::lock_guard<std::mutex> lk(g_m);
-    move_to_top();
-    out::text(stdout, line);
-    draw_from_cursor();
+    if (!g_size_valid || g_overflow) {
+        out::text(stdout, line);
+        return;
+    }
+    log_line(line);
 }
 
 void error(const std::string& line) {
@@ -187,9 +246,11 @@ void error(const std::string& line) {
         return;
     }
     std::lock_guard<std::mutex> lk(g_m);
-    move_to_top();
-    out::text(stderr, line);
-    draw_from_cursor();
+    if (!g_size_valid || g_overflow) {
+        out::text(stderr, line);
+        return;
+    }
+    log_line(line);
 }
 
 void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
@@ -200,7 +261,13 @@ void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
     g_rows[idx].total = total_tasks;
     g_rows[idx].done = 0;
     g_rows[idx].finished = false;
-    draw();
+    if (!g_size_valid || g_overflow) return;
+    ensure_visible_locked(idx);
+    if (g_overflow) {
+        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
+        return;
+    }
+    draw_locked();
 }
 
 void tick(size_t idx, size_t done) {
@@ -208,10 +275,11 @@ void tick(size_t idx, size_t done) {
     std::lock_guard<std::mutex> lk(g_m);
     if (idx >= g_total) return;
     if (g_rows[idx].label.empty()) return;
+    if (!g_size_valid || g_overflow) return;
     g_rows[idx].done = done;
     auto now = std::chrono::steady_clock::now();
-    if (now - g_last < std::chrono::milliseconds(100)) return;
-    draw();
+    if (now - g_last < kTickMin) return;
+    draw_locked();
 }
 
 void end_file(size_t idx, const std::string& label, const std::string& winner, double pct) {
@@ -222,20 +290,33 @@ void end_file(size_t idx, const std::string& label, const std::string& winner, d
     g_rows[idx].finished = true;
     g_rows[idx].winner = winner;
     g_rows[idx].pct = pct;
-    draw();
+    if (!g_size_valid || g_overflow) return;
+    ensure_visible_locked(idx);
+    if (g_overflow) {
+        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
+        return;
+    }
+    draw_locked();
 }
 
 void shutdown() {
     std::lock_guard<std::mutex> lk(g_m);
     if (!g_interactive) return;
-    out::text(stdout, "\x1b[0m\n");
+    if (g_size_valid && !g_overflow) {
+        out::text(stdout, "\x1b[0m");
+        out::text(stdout, "\x1b[r");                       // весь экран снова скроллится
+        out::text(stdout, pos(g_height, 1));               // курсор вниз
+        out::text(stdout, "\r\n");
+    } else {
+        out::text(stdout, "\x1b[0m\n");
+    }
     if (g_orig_mode_valid) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (h != INVALID_HANDLE_VALUE && h != nullptr)
-            SetConsoleMode(h, g_orig_mode);
+        if (h != INVALID_HANDLE_VALUE && h != nullptr) SetConsoleMode(h, g_orig_mode);
     }
     g_interactive = false;
-    g_drawn = 0;
+    g_visible = 0;
+    g_overflow = false;
 }
 
 }  // namespace status
