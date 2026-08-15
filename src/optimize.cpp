@@ -280,6 +280,7 @@ struct FileJob {
     // --- подготовка (один поток prep, до выпуска задач) ---
     bool prep_ok = false;
     std::string ref_wav;
+    uint64_t ref_size = 0;   // размер эталонного WAV (оценка размера dec.wav задачи)
     int bits = 16;
     media::Probe probe;
     tags::TagSet ts;
@@ -329,13 +330,35 @@ struct Runner {
         return SIZE_MAX;
     }
 
-    // Выпускает задачи головного файла, пока в полёте меньше window.
+    // Задач «в полёте» (выпущено, но не завершено) по всем файлам.
+    size_t in_flight_locked() const {
+        size_t rel = 0, cpl = 0;
+        for (const auto& j : jobs) {
+            rel += j.released;
+            cpl += j.completed;
+        }
+        return rel - cpl;
+    }
+
+    // Лимит tmp: кандидаты + эталонный WAV + dec.wav задач. На больших файлах
+    // окно дополнительно ужимается, чтобы tmp не разрастался с параллельностью.
+    static const uint64_t kMaxTmpBytes = 4ull << 30;  // 4 ГБ
+
+    // Выпускает задачи в строгом порядке, пока суммарно в полёте меньше окна.
+    // Окно ограничено числом потоков и размером эталонного WAV активных файлов.
     void refill_locked() {
-        for (;;) {
+        uint64_t cap = (uint64_t)window;
+        for (size_t i = 0; i < n_files; i++) {
+            const FileJob& j = jobs[i];
+            if (j.done || !j.prep_done) continue;
+            if (j.ref_size > 0)
+                cap = std::min<uint64_t>(cap, std::max<uint64_t>(1, kMaxTmpBytes / j.ref_size));
+            break;  // активен только головной (FIFO) файл
+        }
+        while (in_flight_locked() < cap) {
             size_t h = refill_head_locked();
             if (h == SIZE_MAX) break;
             FileJob& j = jobs[h];
-            if (j.released - j.completed >= (size_t)window) break;
             queue.push_back({h, j.released});
             j.released++;
         }
@@ -483,6 +506,7 @@ struct Runner {
             status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
             return;
         }
+        j.ref_size = util::file_size(j.ref_wav);
 
         // Задачи: формат + вариант. Порядок = детерминированный тай-брейк.
         for (size_t fi = 0; fi < fmts.size(); fi++) {
