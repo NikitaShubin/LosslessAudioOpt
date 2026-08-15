@@ -7,7 +7,8 @@ namespace optimize {
 
 struct Options {
     std::vector<std::string> inputs;   // файлы/папки
-    int jobs = 0;                      // 0 = число ядер
+    double jobs = 2.0;                 // число потоков: целое — как есть, вещественное — множитель ядер
+    bool jobs_float = true;            // jobs задано как множитель (умножать на число ядер)
     std::vector<std::string> formats;  // пусто = все включённые
     bool no_download = false;
     bool dry_run = false;
@@ -45,7 +46,8 @@ int run(const Options& opts);
 
 struct RestoreOptions {
     std::vector<std::string> inputs;   // файлы/папки
-    int jobs = 0;                      // 0 = число ядер
+    double jobs = 2.0;                 // число потоков: целое — как есть, вещественное — множитель ядер
+    bool jobs_float = true;            // jobs задано как множитель (умножать на число ядер)
     std::string to = "flac";           // целевой формат
     std::string variant;               // пусто = последний вариант (максимальное сжатие)
     bool no_download = false;

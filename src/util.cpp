@@ -142,6 +142,24 @@ bool copy_file(const std::string& src, const std::string& dst) {
     return !ec;
 }
 
+uint64_t disk_free_bytes(const std::string& path) {
+    std::wstring wpath = u2w(path.empty() ? "." : path);
+    ULARGE_INTEGER free_avail{}, total{}, free_total{};
+    if (!GetDiskFreeSpaceExW(wpath.c_str(), &free_avail, &total, &free_total)) {
+        // Путь может не существовать (каталог ещё не создан) — пробуем "." .
+        wpath = u2w(".");
+        if (!GetDiskFreeSpaceExW(wpath.c_str(), &free_avail, &total, &free_total)) return 0;
+    }
+    return free_avail.QuadPart;
+}
+
+uint64_t avail_ram_bytes() {
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!GlobalMemoryStatusEx(&ms)) return 0;
+    return ms.ullAvailPhys;
+}
+
 std::string find_in_path(const std::string& name) {
     std::vector<std::string> candidates;
     std::string n = name;

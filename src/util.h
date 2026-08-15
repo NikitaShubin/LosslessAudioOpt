@@ -32,6 +32,12 @@ std::string read_text(const std::string& p);            // пусто при о�
 bool write_text(const std::string& p, const std::string& s);
 bool copy_file(const std::string& src, const std::string& dst);
 
+// Свободное место на диске, содержащем путь (байты; 0 при ошибке).
+// Используется для адаптивного лимита параллелизма (бюджет tmp).
+uint64_t disk_free_bytes(const std::string& path);
+// Доступная физическая память (байты; 0 при ошибке).
+uint64_t avail_ram_bytes();
+
 // Поиск исполняемого файла в PATH (добавляет .exe при необходимости).
 std::string find_in_path(const std::string& name);
 

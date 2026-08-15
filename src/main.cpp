@@ -35,12 +35,13 @@ void usage() {
     out::print("  llao.exe help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n");
     out::print("  llao.exe stats                               show accumulated statistics\n");
     out::print("  llao.exe optimize <file|folder> [...]        main enumeration\n");
-    out::print("             [--jobs=N] [--formats=a,b] [--report=<file|folder>]\n");
+    out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
     out::print("             [--no-status]\n");
     out::print("  llao.exe restore <file|folder> [...]         decode + re-encode to the target format\n");
-    out::print("             [--jobs=N] [--to=flac] [--variant=<id>] [--no-download]\n");
+    out::print("             [--jobs=N|M.F] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
+    out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
     out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
 }
 
@@ -188,7 +189,9 @@ int cmd_optimize(const std::vector<std::string>& args) {
         } else if (!no_more_opts && a == "--no-status") {
             opts.no_status = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
-            opts.jobs = std::stoi(a.substr(7));
+            std::string jv = a.substr(7);
+            opts.jobs = std::stod(jv);
+            opts.jobs_float = jv.find('.') != std::string::npos;
         } else if (!no_more_opts && a == "--jobs") {
             out::error("ERROR: use --jobs=N\n");
             return 2;
@@ -207,7 +210,7 @@ int cmd_optimize(const std::vector<std::string>& args) {
         }
     }
     if (opts.inputs.empty()) {
-        out::error("ERROR: optimize <file|folder> [...] [--jobs=N] [--formats=a,b] "
+        out::error("ERROR: optimize <file|folder> [...] [--jobs=N|M.F] [--formats=a,b] "
                    "[--report=<file|folder>] [--no-download] [--dry-run]\n");
         return 2;
     }
@@ -225,7 +228,9 @@ int cmd_restore(const std::vector<std::string>& args) {
         } else if (!no_more_opts && a == "--allow-lossy") {
             opts.allow_lossy = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
-            opts.jobs = std::stoi(a.substr(7));
+            std::string jv = a.substr(7);
+            opts.jobs = std::stod(jv);
+            opts.jobs_float = jv.find('.') != std::string::npos;
         } else if (!no_more_opts && a == "--jobs") {
             out::error("ERROR: use --jobs=N\n");
             return 2;
@@ -244,7 +249,7 @@ int cmd_restore(const std::vector<std::string>& args) {
         }
     }
     if (opts.inputs.empty()) {
-        out::error("ERROR: restore <file|folder> [...] [--jobs=N] [--to=flac] [--variant=<id>] "
+        out::error("ERROR: restore <file|folder> [...] [--jobs=N|M.F] [--to=flac] [--variant=<id>] "
                    "[--no-download]\n");
         return 2;
     }
