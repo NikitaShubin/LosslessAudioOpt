@@ -10,6 +10,7 @@
 #include "i18n.h"
 #include "out.h"
 #include "proc.h"
+#include "status.h"
 #include "sha256.h"
 #include "util.h"
 
@@ -321,10 +322,10 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
             }
         } catch (const config::Error& exc) {
             st.message = exc.what();
-            out::error("%s%s\n", log_prefix.c_str(), exc.what());
+            status::error(log_prefix + exc.what() + "\n");
         } catch (const std::exception& exc) {
             st.message = exc.what();
-            out::error("%s%s\n", log_prefix.c_str(), exc.what());
+            status::error(log_prefix + exc.what() + "\n");
         }
     }
     st.status = "missing";
