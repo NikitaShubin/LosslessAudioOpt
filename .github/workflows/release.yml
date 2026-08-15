@@ -1,0 +1,112 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Установка зависимостей (wine + 32-бит, ffmpeg, p7zip)
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wine wine32:i386 ffmpeg p7zip-full
+          wine --version
+
+      - name: Инструментарий llvm-mingw
+        run: |
+          curl -sL --retry 3 -o /tmp/llvm-mingw.tar.xz \
+            https://github.com/mstorsjo/llvm-mingw/releases/download/20260616/llvm-mingw-20260616-msvcrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf /tmp/llvm-mingw.tar.xz -C /opt
+          echo "/opt/llvm-mingw-20260616-msvcrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Сборка llao.exe
+        run: make -j"$(nproc)"
+
+      - name: Инициализация wine prefix
+        run: WINEDEBUG=-all wineboot -u 2>/dev/null || true
+
+      - name: Предзагрузка 7-Zip (bin/7z/7z.exe — bootstrap для extract7z)
+        run: |
+          mkdir -p bin/7z
+          curl -sL --retry 3 -o /tmp/7z-sfx.exe https://www.7-zip.org/a/7z2602-x64.exe
+          echo "6745fa76dc2ea031596d8678f6f6b99c3c1b435b4164a63485adbbc7b8d82ef0  /tmp/7z-sfx.exe" | sha256sum -c -
+          7z x -y -o/tmp/7z-full /tmp/7z-sfx.exe >/dev/null
+          cp /tmp/7z-full/7z.exe /tmp/7z-full/7z.dll bin/7z/
+
+      - name: Предзагрузка Monkey's Audio (bin/monkeys_audio/x64.exe — сайт нестабилен)
+        run: |
+          mkdir -p bin/monkeys_audio
+          curl -sL --retry 5 --retry-all-errors --retry-delay 15 --max-time 3600 \
+            -o bin/monkeys_audio/x64.exe https://www.monkeysaudio.com/files/MAC_1325_x64.exe
+          echo "4b93ec94c7229e3340be3259bbaa14a76185e8a33dad1394e708535bee476d1f  bin/monkeys_audio/x64.exe" | sha256sum -c -
+
+      - name: Проверка конфигурации форматов
+        run: WINEDEBUG=-all wine llao.exe check-formats
+
+      - name: Установка кодеков (llao.exe tools)
+        run: WINEDEBUG=-all wine llao.exe tools
+
+      - name: Проверка CLI-эталонов кодеков
+        run: python3 .github/scripts/check_cli_baselines.py --compare
+
+      - name: Проверка актуальности версий кодеков
+        run: python3 .github/scripts/check_upstream.py --check
+
+      - name: Тесты переноса тегов
+        run: python3 tests/test_tags.py
+
+      - name: Сборка релизного архива
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME:-v1.0.0}"
+          DEST="llao-${VER}-win64"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          cp llao.exe llao.json README.md "$DEST/"
+          cp -r formats lang "$DEST/"
+          mkdir -p "$DEST/bin"
+          python3 - "$DEST/bin" <<'PY'
+          import os, shutil, sys
+          dst = sys.argv[1]
+          for fmt in os.listdir('bin'):
+              src = os.path.join('bin', fmt)
+              if not os.path.isdir(src):
+                  continue
+              for root, dirs, files in os.walk(src):
+                  dirs[:] = [d for d in dirs if d != '.download']
+                  for f in files:
+                      if f.lower() == 'ffplay.exe':
+                          continue
+                      rel = os.path.relpath(os.path.join(root, f), 'bin')
+                      out = os.path.join(dst, rel)
+                      os.makedirs(os.path.dirname(out), exist_ok=True)
+                      shutil.copy2(os.path.join(root, f), out)
+          PY
+          # Маркеры .binary -> только имя файла: cached_binary() находит fallback по имени.
+          # ntpath.basename: маркер содержит Windows-путь (D:\...), на Linux os.path.basename
+          # не считает '\' разделителем.
+          python3 - "$DEST/bin" <<'PY'
+          import ntpath, os, sys
+          for root, dirs, files in os.walk(sys.argv[1]):
+              if '.binary' in files:
+                  p = os.path.join(root, '.binary')
+                  name = open(p, encoding='utf-8', errors='replace').read().strip()
+                  open(p, 'w', encoding='utf-8').write(ntpath.basename(name) + '\n')
+          PY
+          (cd "$DEST" && 7z a -tzip -mx=9 -bso0 -bsp0 "../llao-${VER}-win64.zip" .)
+          ls -lh llao-*.zip
+
+      - name: Публикация релиза
+        uses: softprops/action-gh-release@v2
+        with:
+          files: llao-*.zip
+          generate_release_notes: true

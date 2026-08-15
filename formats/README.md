@@ -29,7 +29,7 @@
 | `engine.codec` | string | для `ffmpeg` | Кодек ffmpeg (например `alac`, `tta`, `mp4als`). |
 | `engine.container` | string | для `ffmpeg` | Контейнер (например `m4a`, `tta`). |
 | `downloads[]` | array | да | Способы получения утилиты (по ОС). |
-| `downloads[].os` | string | да | `linux` \| `windows` \| `macos` \| `freebsd` \| `any`. |
+| `downloads[].os` | string | да | `windows` \| `any` (кодеки доступны только в Windows-версиях). |
 | `downloads[].url` | string | да | Прямая ссылка на архив или инсталлятор. |
 | `downloads[].kind` | string | да | `archive` \| `extract7z`. |
 | `downloads[].file_glob` | string | для `archive` | Где в архиве бинарник (glob). |
@@ -91,3 +91,7 @@
 расхождении выдаётся предупреждение «конфиг, возможно, устарел» (работа не блокируется).
 Примеры: FLAC — `["flac - command-line flac encoder/decoder", "version 1.5.0"]`,
 ffmpeg — `["ffmpeg version"]`.
+
+Кроме точечной проверки подстрок, релизный CI сравнивает полный вывод `cli_check` с эталоном
+`.github/cli-baselines/<id>.txt` (`python3 .github/scripts/check_cli_baselines.py --compare`) —
+любое изменение справки кодека блокирует релиз до обновления конфига и эталона (см. AGENTS.md).

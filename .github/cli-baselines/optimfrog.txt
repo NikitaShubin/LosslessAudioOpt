@@ -1,0 +1,97 @@
+
+OptimFROG Lossless Audio Codec (Win/x64) v5.100 [2016-09-02]
+Built on Sep  2 2016 16:53:17 using configuration MSCVER_WIN64_MX64.
+Copyright (C) 1996-2016 Florin Ghido, all rights reserved.
+Visit http://LosslessAudio.org/ for updates and more information.
+@OptimFROG is also on Twitter. E-mail: florin.ghido@gmail.com
+Free for non-commercial and commercial use. However, distribution
+of command-line Encoders with other software may need permission.
+
+
+Usage:
+ofr [command] [options] src1 [--output dst1] src2 [--output dst2] ...
+
+Commands:
+  --encode            encode WAV/RAW file(s) to OFR file(s)
+  --decode            decode OFR file(s) to WAV/RAW file(s)
+  --info              print information about OFR file(s)
+  --verify            quick verify integrity of OFR file(s)
+  --check             check raw PCM input data MD5 of OFR file(s)
+  --help              display detailed parameter reference
+
+Options:
+  --preset level      use compression preset level, defined as
+    0:  1.00x 0.00% # --mode fast --optimize none --no-aca
+    1:  1.02x 0.54% # --mode fast --optimize none --aca
+    2:  1.42x 1.56% # --mode normal --optimize fast --aca
+    3:  2.17x 1.90% # --mode high --optimize fast --aca
+    4:  2.57x 2.45% # --mode turbonew --optimize fast --aca
+    5:  2.90x 2.62% # --mode fastnew --optimize fast --aca
+    6:  3.41x 2.78% # --mode normalnew --optimize fast --aca
+    7:  4.26x 2.94% # --mode highnew-light --optimize fast --aca
+    8:  5.10x 3.06% # --mode extranew-light --optimize fast --aca
+    9:  8.77x 3.33% # --mode bestnew-light --optimize fast --aca
+   10: 11.57x 3.41% # --mode ultranew-light --optimize fast --aca
+  max: 11.68x 3.47% # --mode ultranew-light --aca --acm --optimize best
+
+        first column is average decoder complexity relative to preset 0
+        second column is average compression gain relative to preset 0
+        third column contains the equivalent options for the preset
+
+        all presets also include --seek normal, which is the default
+        +1000 can be added to any preset to activate --acm
+        +2000 can be added to any preset to activate --optimize best
+        preset max is currently equivalent with preset 10 + 1000 + 2000
+        the default preset is 2 and it is implicitly activated
+
+  --mode {fast|normal*|high|turbonew|fastnew|normalnew|highnew-light|
+        extranew-light|bestnew-light|ultranew-light}
+
+        also available are extra, best, ultra, insane, highnew,
+        extranew, bestnew, ultranew, and extrafast, but they are
+        (significantly) less efficient than the above modes
+
+  --silent            be as silent as possible
+  --verbose           be verbose
+  --overwrite         overwrite existing file(s)
+  --time              display elapsed time for every operation
+  --md5               store MD5 of original raw PCM input data
+  --timestamp         set destination file time stamp from source
+  --deleteafter       delete source file after successful operation
+  --selfextract       create self extracting (executable) file
+
+  --incorrectheader   allow incorrect RIFF and data chunk sizes in WAV
+        header, typically 0xFFFFFFFF, and correct them after encoding
+  --writefreshheader  write a fresh standard WAV header at decoding
+  --raw               specify raw input file(s)
+  --channelconfig {MONO|STEREO_LR}
+  --sampletype {UINT8|SINT8|UINT16|SINT16|UINT24|SINT24|UINT32|SINT32}
+  --rate frequency
+  --headersize size   save the first size bytes as header
+  --tailsize size     save the last size bytes (or a few more) as tail
+
+  --seek {fast|normal*|slow|min}
+  --optimize {none|fast*|normal|high|best}
+
+  --maximumcompression    (deprecated option, use --preset max)
+        try to obtain the maximum possible compression
+        * must be used alone, do NOT specify --mode, --seek, --optimize
+        * WARNING: very slow encoding, mainly for benchmark
+        equivalent with --mode ultranew --optimize best --seek slow
+
+  --experimental          (deprecated name, use --advanced-compression)
+  --advanced-compression
+        enable advanced compression, which is stable, but NOT backward
+        compatible with any previous 4.5xx versions
+        * use with any mode for greatly improved compression for some
+        files (on average, 0.60% better compression for Audio CDs)
+        * extranew speed: encoding < 35% slower, decoding < 11% slower
+        * can be also used together with --maximumcompression
+  --advanced-compression-analysis or --aca    (activated by default)
+  --no-advanced-compression-analysis or --no-aca
+        enable or disable advanced compression analysis, which obtains
+        most of the compression improvements of --advanced-compression,
+        while being faster than it at both encoding and decoding
+  --advanced-compression-modeling or --acm
+        enable advanced compression modeling, which further improves
+        compression very slightly, however with slower encoding

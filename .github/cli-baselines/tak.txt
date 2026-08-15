@@ -1,0 +1,50 @@
+Command line error: invalid mode
+TAKC -mode [-p# -fsl# -wm# -md5 -ihs -v -overwrite -fim# -l# -lf# -silent]
+           [-w -lp -tn# -cpu# -tt #] infile [outfile]
+
+-mode      -e encode, -d decode, -t test decode, -te test encode,
+           -fi file information,  -version program version
+-p#        select encoder preset #: 0-4 (fastest to strongest, default is 2).
+           Append E/M (-p2m) to increase the evaluation level to Extra/Max.
+           pMax is a synonym for the strongest setting.
+-fsl#      Set the frame size limit to # samples per channel. Valid values:
+             512, 1024, 2048, 4096, 8192, 16384.
+-wm#       Control saving(encode)/restoring(decode) of wave file meta data:
+             0 = disable
+             1 = enable and use default values for maximum size (default)
+             46 to 1048576 = enable and set maximum size (encoding only)
+-md5       add (encoding) / verify (decoding) MD5 of the raw wave data
+-ihs       ignore (wave) header size entry (pipe encoding only)
+-v         verify encoded frames (when encoding)
+-overwrite overwrite existing output files (without confirmation!)
+-fim#      select file information mode #
+             0 = any information (default)
+             1 = encoder
+             2 = wave meta data
+             3 = MD5
+             4 = compact-formatted
+             5 = compact-raw
+-l#        select log file level #
+             0 = no log file (default)
+             1 = log results
+             Append A (-l1a) to append new results to an existing file.
+-lf#       select log file text format #
+             Ansi  = 8-Bit (Windows codepage) (default)
+             Utf16 = UTF-16 Little endian with BOM
+-silent    silent operation: Write nothing to StdOut/the screen.
+-w         wait for enter key when finished
+-lp        Execute with low priority. Nice for background processing.
+-tn#       Use # threads for encoding (1-4, default is 1).
+-cpu#      Use (up to) the # cpu instruction set optimizations.
+             None  = Use plain Pascal code
+             ASM   = Use some i386 assembler code
+             SSE2  = Use ASM, SSE2
+             SSSE3 = Use ASM, SSE2, SSSE3
+             By default any available instruction set is used.
+-tt #      Add textual tag item #, where # is a key/value pair: "key=value",
+           for instance "TITLE=A nice song". "key=@file" will read the value
+           from the text(!) file "file" in the source directory.
+infile     Specify file or directory (Dir\*) to be processed.
+           - selects StdIn (encoding only, requires outfile specification).
+outfile    Specify output file or directory (Dir\*).
+           - selects StdOut (decoding only, requires infile specification).

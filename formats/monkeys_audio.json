@@ -16,8 +16,8 @@
       "url": "https://monkeysaudio.com/x64",
       "file_glob": null,
       "files": ["MAC.exe", "MACDll64.dll", "MACDll.dll"],
-      "checksum": { "type": "sha256", "value": "091931dc828ade7a7ec3abb380d8612fcc44e956f9ad1b3bec227f8a70c492f1" },
-      "notes": "Официальный инсталлятор Monkey's Audio 13.20 (x64, редирект на MAC_1320_x64.exe). Сначала ищется уже установленная mac.exe (Program Files); иначе из инсталлятора напрямую через 7-Zip (kind=extract7z) извлекаются MAC.exe и MACDll64.dll/MACDll.dll — установка и winamp-плагины не требуются. Если 7-Zip не установлен — поставьте mac.exe вручную, llao найдёт его в Program Files."
+      "checksum": { "type": "sha256", "value": "4b93ec94c7229e3340be3259bbaa14a76185e8a33dad1394e708535bee476d1f" },
+      "notes": "Официальный инсталлятор Monkey's Audio 13.25 (x64, редирект на MAC_1325_x64.exe). Сначала ищется уже установленная mac.exe (Program Files); иначе из инсталлятора напрямую через 7-Zip (kind=extract7z) извлекаются MAC.exe и MACDll64.dll/MACDll.dll — установка и winamp-плагины не требуются. Если 7-Zip не установлен — поставьте mac.exe вручную, llao найдёт его в Program Files."
     }
   ],
   "encode": {
