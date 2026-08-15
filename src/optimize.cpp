@@ -2,8 +2,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -15,6 +20,7 @@
 #include "report.h"
 #include "out.h"
 #include "stats.h"
+#include "status.h"
 #include "tags.h"
 #include "tool.h"
 #include "util.h"
@@ -238,384 +244,673 @@ static std::vector<tags::TagType> native_types(const config::Format& f) {
 }
 
 // ---------------------------------------------------------------------------
-// Обработка одного файла
+// Планировщик: prep (подготовка файла) + варианты (сжатие) в пуле потоков.
+// Очередь строго упорядочена: сначала все варианты файла 0, затем файла 1 и т.д.
+// Окно W = jobs ограничивает число задач одного файла "в полёте", поэтому prep
+// следующего файла начинается, когда у текущего остаётся меньше W вариантов —
+// ядра не простаивают, а tmp не разрастается.
 // ---------------------------------------------------------------------------
 
-int process_one(const std::string& path, const Options& opts,
-                const std::vector<config::Format>& fmts, report::Logger* logger,
-                report::FileSummary* out) {
-    std::string ffprobe = media::find_ffprobe();
-    std::string ffmpeg = media::find_ffmpeg();
-    if (ffprobe.empty() || ffmpeg.empty()) {
-        print_locked(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
-        out->status = "error";
-        out->detail = i18n::str("ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)");
-        return 1;
-    }
+struct FmtPlan {
+    tags::TagPlan plan;
+    uint64_t sidecar_size = 0;  // 0 — sidecar не нужен (или не удался)
+    std::string sidecar_path;   // tmp/<tok>_<base>.<fmt>.tags.zip (общий для формата)
+};
 
-    if (logger) {
-        logger->event({{"type", "file_start"}, {"file", path}});
-    }
+struct TaskDesc {
+    size_t fmt_idx = 0;
+    size_t variant_idx = 0;
+};
 
-    media::Probe probe = media::probe_file(path, ffprobe);
-    if (!probe.ok) {
-        print_locked("SKIP " + path + " — " + probe.error + "\n");
-        out->status = "skip";
-        out->detail = probe.error;
-        if (logger) {
-            logger->event({{"type", "file_done"},
-                           {"file", path},
-                           {"status", "skip"},
-                           {"reason", probe.error}});
-        }
-        return 0;
-    }
-    if (probe.has_video) {
-        print_locked("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
-        out->status = "skip";
-        out->detail = i18n::str("video stream present (not audio)");
-        if (logger) {
-            logger->event({{"type", "file_done"},
-                           {"file", path},
-                           {"status", "skip"},
-                           {"reason", "video stream present"}});
-        }
-        return 0;
-    }
-    if (!probe.is_lossless() && !opts.allow_lossy) {
-        print_locked("SKIP " + path + " — " +
-                     i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str()) + "\n");
-        out->status = "skip";
-        out->detail = i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str());
-        if (logger) {
-            logger->event({{"type", "file_done"},
-                           {"file", path},
-                           {"status", "skip"},
-                           {"reason", "lossy input"}});
-        }
-        return 0;
-    }
+struct FileJob {
+    size_t idx = 0;
+    std::string path;
+    std::string base;
+    std::string base_ne;
+    std::string dir;
+    std::string tok;
 
-    tags::TagSet ts = tags::extract_tags(path, probe);
-    int bits = probe.bits_per_sample;
-    if (bits <= 0) bits = 16;
+    // --- планировщик (под g_qm) ---
+    std::vector<TaskDesc> tasks;
+    size_t released = 0;
+    size_t completed = 0;
+    bool prep_done = false;
+    bool done = false;
 
-    std::string base = util::base_name(path);
-    std::string dir = util::dir_name(path);
-    std::string tmp = tmp_dir();
-    util::mkdirs(tmp);
-    std::string tok = tmp_token(path);
+    // --- подготовка (один поток prep, до выпуска задач) ---
+    bool prep_ok = false;
+    std::string ref_wav;
+    int bits = 16;
+    media::Probe probe;
+    tags::TagSet ts;
+    std::map<std::string, Env> envs;             // fmt_id -> кодер/декодер
+    std::map<std::string, FmtPlan> fmt_plans;    // fmt_id -> план тегов + sidecar
 
-    std::string ref_wav = util::join_path(tmp, tok + "_" + base_no_ext(path) + ".ref.wav");
-    std::string derr;
-    // Декод исходника собственным декодером формата: для наших форматов это надёжнее
-    // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
-    bool decoded = false;
-    const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
-    if (src_fmt) {
-        // Для декода источника скачивание не запускаем: только кэш/PATH, иначе ffmpeg.
-        tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
-        if (!sst.path.empty()) {
-            Env senv;
-            senv.fmt = src_fmt;
-            senv.encoder = sst.path;
-            senv.decoder = decoder_path(*src_fmt, sst.path);
-            std::vector<std::string> sargs =
-                build_cmd(src_fmt->decode_cmd, senv.decoder, path, ref_wav, {},
-                          src_fmt->engine_codec, src_fmt->engine_container);
-            proc::Result dr = proc::run(sargs, senv.decode_timeout);
-            decoded = dr.started && !dr.timed_out && dr.exit_code == 0 &&
-                      util::file_exists(ref_wav);
-            if (!decoded) util::remove_file(ref_wav);
-        }
-    }
-    if (!decoded) decoded = media::decode_to_wav(path, ref_wav, ffmpeg, bits, &derr);
-    if (!decoded) {
-        print_locked("SKIP " + path + " — " + i18n::str("decode to reference WAV: ") + derr + "\n");
-        out->status = "skip";
-        out->detail = i18n::str("decode to reference WAV: ") + derr;
-        if (logger) {
-            logger->event({{"type", "file_done"},
-                           {"file", path},
-                           {"status", "skip"},
-                           {"reason", out->detail}});
-        }
-        return 0;
-    }
-
-    // Кандидаты
-    std::vector<Candidate> passed;
-    std::vector<std::string> failures;
+    // --- результаты (под m) ---
+    std::unique_ptr<std::mutex> m;
+    bool any_passed = false;
+    bool best_valid = false;
+    Candidate best;
+    size_t best_order = SIZE_MAX;
     std::vector<json::json> stat_records;
+    std::vector<std::string> failures;
+    std::vector<std::string> exclusions;
+    report::FileSummary summary;
+    int rc = 0;
+};
 
-    for (const auto& f : fmts) {
-        if (!f.enabled) continue;
-        if (!opts.formats.empty() &&
-            std::find(opts.formats.begin(), opts.formats.end(), f.id) == opts.formats.end())
-            continue;
+struct Runner {
+    const Options* opts = nullptr;
+    const std::vector<config::Format>* fmts = nullptr;
+    report::Logger* logger = nullptr;
+    std::string ffprobe;
+    std::string ffmpeg;
+    std::string tmp;
+    int window = 1;
+    size_t n_files = 0;
 
-        // caps
-        std::string why;
-        if (f.channels_min > 0 && probe.channels < f.channels_min)
-            why = i18n::fmt("channels %d < %d", probe.channels, f.channels_min);
-        else if (f.channels_max > 0 && probe.channels > f.channels_max)
-            why = i18n::fmt("channels %d > %d", probe.channels, f.channels_max);
-        else if (!f.bit_depth.empty() &&
-                 std::find(f.bit_depth.begin(), f.bit_depth.end(), bits) == f.bit_depth.end())
-            why = i18n::fmt("bit depth %d not supported", bits);
-        else if (f.has_sample_rate &&
-                 (probe.sample_rate < f.sample_rate_min || probe.sample_rate > f.sample_rate_max))
-            why = i18n::fmt("sample rate %d Hz out of range", probe.sample_rate);
-        if (!why.empty()) {
-            failures.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
-            out->exclusions.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
-            continue;
+    std::mutex qm;
+    std::condition_variable cv;
+    std::deque<std::pair<size_t, size_t>> queue;  // (job, task_idx)
+    size_t next_prep = 0;
+    bool prep_active = false;
+    size_t total_done = 0;
+    std::vector<FileJob> jobs;
+    std::atomic<int> failed{0};
+
+    bool all_done_locked() const { return total_done == n_files; }
+
+    // Самый ранний не завершённый файл с невыпущенными задачами.
+    size_t refill_head_locked() const {
+        for (size_t i = 0; i < n_files; i++) {
+            const FileJob& j = jobs[i];
+            if (!j.done && j.prep_done && j.released < j.tasks.size()) return i;
+        }
+        return SIZE_MAX;
+    }
+
+    // Выпускает задачи головного файла, пока в полёте меньше window.
+    void refill_locked() {
+        for (;;) {
+            size_t h = refill_head_locked();
+            if (h == SIZE_MAX) break;
+            FileJob& j = jobs[h];
+            if (j.released - j.completed >= (size_t)window) break;
+            queue.push_back({h, j.released});
+            j.released++;
+        }
+    }
+
+    // Prep следующего файла разрешён, когда головной файл полностью выпущен
+    // (у него осталось не более window задач) или все подготовленные файлы готовы.
+    bool prep_allowed_locked() const {
+        if (next_prep >= n_files) return false;
+        if (prep_active) return false;
+        if (next_prep == 0) return true;
+        for (size_t i = 0; i < n_files; i++) {
+            const FileJob& j = jobs[i];
+            if (j.done) continue;
+            if (!j.prep_done) return true;  // самый ранний не подготовлен — его prep следующий
+            return j.released >= j.tasks.size();
+        }
+        return true;
+    }
+
+    enum class WorkKind { None, Prep, Variant };
+    struct Work {
+        WorkKind kind = WorkKind::None;
+        size_t idx = 0;
+        size_t task = 0;
+    };
+
+    // Вызывается под qm.
+    bool take_work_locked(Work* w) {
+        if (!queue.empty()) {
+            auto front = queue.front();
+            queue.pop_front();
+            *w = {WorkKind::Variant, front.first, front.second};
+            return true;
+        }
+        if (prep_allowed_locked()) {
+            size_t i = next_prep++;
+            prep_active = true;
+            *w = {WorkKind::Prep, i, 0};
+            return true;
+        }
+        return false;
+    }
+
+    // --- подготовка файла: проба, теги, эталонный WAV, список задач ---
+    void prep_file(FileJob& j) {
+        const Options& opts = *this->opts;
+        const auto& fmts = *this->fmts;
+
+        if (ffprobe.empty() || ffmpeg.empty()) {
+            j.summary.path = j.path;
+            j.summary.status = "error";
+            j.summary.detail = i18n::str("ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)");
+            status::log(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+            j.rc = 1;
+            return;
         }
 
-        tool::Status st = tool::ensure(f, !opts.no_download, "[" + f.id + "] ");
-        if (st.path.empty()) {
-            failures.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" + st.status + ")");
-            out->exclusions.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" + st.status + ")");
-            continue;
+        media::Probe probe = media::probe_file(j.path, ffprobe);
+        j.probe = probe;
+        if (logger) {
+            logger->event({{"type", "file_start"}, {"file", j.path}});
+        }
+        if (!probe.ok) {
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail = probe.error;
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", probe.error}});
+            }
+            status::log("SKIP " + j.path + " — " + probe.error + "\n");
+            return;
+        }
+        if (probe.has_video) {
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail = i18n::str("video stream present (not audio)");
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", "video stream present"}});
+            }
+            status::log("SKIP " + j.path + " — " + i18n::str("video stream present (not audio)") + "\n");
+            return;
+        }
+        if (!probe.is_lossless() && !opts.allow_lossy) {
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail =
+                i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str());
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", "lossy input"}});
+            }
+            status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
+            return;
         }
 
-        Env env;
-        env.fmt = &f;
-        env.encoder = st.path;
-        env.decoder = decoder_path(f, st.path);
+        j.ts = tags::extract_tags(j.path, probe);
+        int bits = probe.bits_per_sample;
+        if (bits <= 0) bits = 16;
+        j.bits = bits;
 
-        for (const auto& variant : f.variants) {
-            std::string cand_name = tok + "_" + base_no_ext(path) + "." + f.id + "." + variant.id + "." +
-                                    f.extension;
-            std::string candidate = util::join_path(tmp, cand_name);
-            util::remove_file(candidate);
+        j.ref_wav = util::join_path(tmp, j.tok + "_" + j.base_ne + ".ref.wav");
+        std::string derr;
+        // Декод исходника собственным декодером формата: для наших форматов это надёжнее
+        // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
+        bool decoded = false;
+        const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
+        if (src_fmt) {
+            // Для декода источника скачивание не запускаем: только кэш/PATH, иначе ffmpeg.
+            tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
+            if (!sst.path.empty()) {
+                Env senv;
+                senv.fmt = src_fmt;
+                senv.encoder = sst.path;
+                senv.decoder = decoder_path(*src_fmt, sst.path);
+                std::vector<std::string> sargs =
+                    build_cmd(src_fmt->decode_cmd, senv.decoder, j.path, j.ref_wav, {},
+                              src_fmt->engine_codec, src_fmt->engine_container);
+                proc::Result dr = proc::run(sargs, senv.decode_timeout);
+                decoded = dr.started && !dr.timed_out && dr.exit_code == 0 &&
+                          util::file_exists(j.ref_wav);
+                if (!decoded) util::remove_file(j.ref_wav);
+            }
+        }
+        if (!decoded) decoded = media::decode_to_wav(j.path, j.ref_wav, ffmpeg, bits, &derr);
+        if (!decoded) {
+            util::remove_file(j.ref_wav);
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail = i18n::str("decode to reference WAV: ") + derr;
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", j.summary.detail}});
+            }
+            status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
+            return;
+        }
 
-            json::json rec = {
-                {"file", path},
-                {"source_format", probe.format_name},
-                {"codec_name", probe.codec_name},
-                {"source_size", probe.size},
-                {"channels", probe.channels},
-                {"sample_rate", probe.sample_rate},
-                {"bits", bits},
-                {"duration", probe.duration},
-                {"format", f.id},
-                {"variant", variant.id},
-            };
-
-            std::string verr = encode_and_validate(ref_wav, candidate, variant.args, env);
-            if (!verr.empty()) {
-                util::remove_file(candidate);
-                failures.push_back(f.id + "/" + variant.id + ": " + verr);
-                rec["status"] = "error";
-                rec["error"] = verr;
-                if (logger) {
-                    logger->event({{"type", "candidate"},
-                                   {"file", path},
-                                   {"format", f.id},
-                                   {"variant", variant.id},
-                                   {"status", "error"},
-                                   {"error", verr}});
-                }
-                stat_records.push_back(std::move(rec));
+        // Задачи: формат + вариант. Порядок = детерминированный тай-брейк.
+        for (size_t fi = 0; fi < fmts.size(); fi++) {
+            const config::Format& f = fmts[fi];
+            if (!f.enabled) continue;
+            if (!opts.formats.empty() &&
+                std::find(opts.formats.begin(), opts.formats.end(), f.id) == opts.formats.end())
                 continue;
-            }
-            uint64_t size = util::file_size(candidate);
-            if (size == 0) {
-                util::remove_file(candidate);
-                failures.push_back(f.id + "/" + variant.id + ": " + i18n::str("empty file"));
-                rec["status"] = "error";
-                rec["error"] = i18n::str("empty file");
-                stat_records.push_back(std::move(rec));
-                continue;
-            }
 
-            // Теги: план встраивания/сайдкара (сжатие: без мержа групп).
-            Candidate cand;
-            cand.format = f.id;
-            cand.variant = variant.id;
-            cand.size = size;
-            tags::TagPlan plan = tags::plan_tags(ts, native_types(f), f.tag_caps, false);
-            std::string terr;
-            uint64_t sidecar = 0;
-            bool has_tags = false;
-            for (const auto& [gtype, grp] : plan.embed) {
-                terr = tags::write_group(candidate, f.id, gtype, grp);
-                if (!terr.empty()) break;
-            }
-            uint64_t cost = size;
-            if (terr.empty() && !plan.embed.empty()) {
-                size = util::file_size(candidate);
-                has_tags = true;
-                cost = size;
-            }
-            if (terr.empty() && !plan.sidecar.empty()) {
-                sidecar = tags::write_sidecar(candidate, plan.sidecar, &terr);
-                if (terr.empty()) cost = size + sidecar;
-            }
-            cand.size = size;
-            cand.sidecar = sidecar;
-            cand.has_tags = has_tags;
-            cand.cost = cost;
-            if (!terr.empty()) {
-                util::remove_file(candidate);
-                if (cand.sidecar) util::remove_file(candidate + ".tags.zip");
-                failures.push_back(f.id + "/" + variant.id + ": " + i18n::str("tags: ") + terr);
-                rec["status"] = "error";
-                rec["error"] = i18n::str("tags: ") + terr;
-                if (logger) {
-                    logger->event({{"type", "candidate"},
-                                   {"file", path},
-                                   {"format", f.id},
-                                   {"variant", variant.id},
-                                   {"status", "error"},
-                                   {"error", terr}});
-                }
-                stat_records.push_back(std::move(rec));
+            // caps
+            std::string why;
+            if (f.channels_min > 0 && probe.channels < f.channels_min)
+                why = i18n::fmt("channels %d < %d", probe.channels, f.channels_min);
+            else if (f.channels_max > 0 && probe.channels > f.channels_max)
+                why = i18n::fmt("channels %d > %d", probe.channels, f.channels_max);
+            else if (!f.bit_depth.empty() &&
+                     std::find(f.bit_depth.begin(), f.bit_depth.end(), bits) == f.bit_depth.end())
+                why = i18n::fmt("bit depth %d not supported", bits);
+            else if (f.has_sample_rate &&
+                     (probe.sample_rate < f.sample_rate_min || probe.sample_rate > f.sample_rate_max))
+                why = i18n::fmt("sample rate %d Hz out of range", probe.sample_rate);
+            if (!why.empty()) {
+                j.failures.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
+                j.exclusions.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
                 continue;
             }
 
-            // Финальная проверка тегов
-            if (cand.has_tags && ts.present) {
-                std::string verr2 = tags::validate_groups(candidate, f.id, plan.embed, ffprobe);
-                if (!verr2.empty()) {
-                    util::remove_file(candidate);
-                    if (cand.sidecar) util::remove_file(candidate + ".tags.zip");
-                    failures.push_back(f.id + "/" + variant.id + ": " + i18n::str("tag validation: ") + verr2);
-                    rec["status"] = "error";
-                    rec["error"] = i18n::str("tag validation: ") + verr2;
-                    stat_records.push_back(std::move(rec));
-                    continue;
-                }
+            tool::Status st = tool::ensure(f, !opts.no_download, "[" + f.id + "] ");
+            if (st.path.empty()) {
+                j.failures.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" +
+                                     st.status + ")");
+                j.exclusions.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" +
+                                       st.status + ")");
+                continue;
             }
 
-            rec["result_size"] = cand.size;
-            rec["sidecar_size"] = cand.sidecar;
-            rec["cost"] = cand.cost;
-            rec["has_tags"] = cand.has_tags;
-            rec["status"] = "ok";
+            Env env;
+            env.fmt = &f;
+            env.encoder = st.path;
+            env.decoder = decoder_path(f, st.path);
+            j.envs[f.id] = env;
+
+            for (size_t vi = 0; vi < f.variants.size(); vi++) {
+                j.tasks.push_back({fi, vi});
+            }
+        }
+        j.prep_ok = true;
+    }
+
+    // --- один вариант: кодирование, валидация, теги, жадный отбор ---
+    void run_variant(FileJob& j, size_t task_idx) {
+        const TaskDesc& td = j.tasks[task_idx];
+        const config::Format& f = (*fmts)[td.fmt_idx];
+        const config::Variant& v = f.variants[td.variant_idx];
+        const Env& env = j.envs[f.id];
+
+        std::string cand_name = j.tok + "_" + j.base_ne + "." + f.id + "." + v.id + "." +
+                                f.extension;
+        std::string candidate = util::join_path(tmp, cand_name);
+        util::remove_file(candidate);
+
+        json::json rec = {
+            {"file", j.path},
+            {"source_format", j.probe.format_name},
+            {"codec_name", j.probe.codec_name},
+            {"source_size", j.probe.size},
+            {"channels", j.probe.channels},
+            {"sample_rate", j.probe.sample_rate},
+            {"bits", j.bits},
+            {"duration", j.probe.duration},
+            {"format", f.id},
+            {"variant", v.id},
+        };
+
+        auto record_error = [&](const std::string& err) {
+            std::lock_guard<std::mutex> lk(*j.m);
+            j.failures.push_back(f.id + "/" + v.id + ": " + err);
+            rec["status"] = "error";
+            rec["error"] = err;
             if (logger) {
                 logger->event({{"type", "candidate"},
-                               {"file", path},
+                               {"file", j.path},
                                {"format", f.id},
-                               {"variant", variant.id},
-                               {"status", "ok"},
-                               {"size", cand.size},
-                               {"sidecar", cand.sidecar},
-                               {"cost", cand.cost}});
+                               {"variant", v.id},
+                               {"status", "error"},
+                               {"error", err}});
             }
-            stat_records.push_back(std::move(rec));
-            passed.push_back(cand);
+            j.stat_records.push_back(std::move(rec));
+        };
+
+        std::string verr = encode_and_validate(j.ref_wav, candidate, v.args, env);
+        if (!verr.empty()) {
+            util::remove_file(candidate);
+            record_error(verr);
+            return;
         }
-    }
-
-    util::remove_file(ref_wav);
-
-    // Отчёт
-    std::string msg;
-    char buf[512];
-    if (passed.empty()) {
-        snprintf(buf, sizeof(buf), "%s", i18n::fmt("SKIP %s — no suitable candidates", base.c_str()).c_str());
-        msg = buf;
-        if (!failures.empty()) msg += " (" + failures[0] + ")";
-        msg += "\n";
-        print_locked(msg);
-
-        out->path = path;
-        out->status = "skip";
-        out->detail = failures.empty() ? i18n::str("no suitable candidates") : failures[0];
-        if (!opts.no_stats) stats::append_all(stat_records);
-        if (logger) {
-            logger->event({{"type", "file_done"},
-                           {"file", path},
-                           {"status", "skip"},
-                           {"reason", out->detail}});
+        uint64_t size = util::file_size(candidate);
+        if (size == 0) {
+            util::remove_file(candidate);
+            record_error(i18n::str("empty file"));
+            return;
         }
-        return 0;
-    }
 
-    std::sort(passed.begin(), passed.end(),
-              [](const Candidate& a, const Candidate& b) { return a.cost < b.cost; });
-
-    const Candidate& best = passed.front();
-    uint64_t best_cost = best.cost;
-    for (auto& r : stat_records) {
-        if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
-    }
-    if (!opts.no_stats) stats::append_all(stat_records);
-
-    snprintf(buf, sizeof(buf), "%s",
-             i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", base.c_str(),
-                       probe.size / 1048576.0, best_cost / 1048576.0,
-                       100.0 * (1.0 - (double)best_cost / probe.size), best.format.c_str(),
-                       best.variant.c_str()).c_str());
-    msg = buf;
-
-    out->path = path;
-    out->status = "ok";
-    out->original = probe.size;
-    out->best = best_cost;
-    out->savings_pct = 100.0 * (1.0 - (double)best_cost / probe.size);
-    out->best_format = best.format;
-    out->best_variant = best.variant;
-
-    // Замена на месте
-    if (!opts.dry_run && best_cost < probe.size && ts.complete) {
-        std::string ext = fmt_ext(best.format, fmts);
-        std::string src_name =
-            util::join_path(tmp, tok + "_" + base_no_ext(path) + "." + best.format + "." + best.variant + "." +
-                                      ext);
-        std::string new_path = util::join_path(dir, base_no_ext(path) + "." + ext);
-        std::string tmp_name = util::join_path(dir, "." + base_no_ext(path) + ".llao-tmp." + ext);
-        if (util::copy_file(src_name, tmp_name)) {
-            if (util::remove_file(path)) {
-                std::error_code ec;
-                fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
-                if (ec) {
-                    msg += i18n::fmt("      ! could not rename (the file remained in the folder as %s)\n",
-                                      util::base_name(tmp_name).c_str());
-                } else {
-                    if (best.sidecar) {
-                        std::string sc_src = src_name + ".tags.zip";
-                        std::string sc_dst = util::join_path(dir, base_no_ext(path) + ".tags.zip");
-                        if (!util::copy_file(sc_src, sc_dst))
-                            msg += i18n::str("      ! could not copy the sidecar (tags) next to the file\n");
+        // План тегов и sidecar: зависит от (файл, формат), не от варианта.
+        // Sidecar пишется один раз на формат и общий для всех его вариантов.
+        FmtPlan fp;
+        {
+            std::lock_guard<std::mutex> lk(*j.m);
+            auto it = j.fmt_plans.find(f.id);
+            if (it == j.fmt_plans.end()) {
+                fp.plan = tags::plan_tags(j.ts, native_types(f), f.tag_caps, false);
+                if (!fp.plan.sidecar.empty()) {
+                    std::string sc_base = util::join_path(tmp, j.tok + "_" + j.base_ne + "." +
+                                                                f.id);
+                    util::remove_file(sc_base + ".tags.zip");
+                    std::string terr;
+                    fp.sidecar_size = tags::write_sidecar(sc_base, fp.plan.sidecar, &terr);
+                    if (!terr.empty()) {
+                        util::remove_file(sc_base + ".tags.zip");
+                        fp.sidecar_size = 0;
                     }
-                    msg += i18n::str("      -> replaced in place: ") + best.format + "/" + best.variant + "\n";
-                    out->replaced = true;
-                    out->detail = i18n::str("replaced in place: ") + best.format + "/" + best.variant;
+                    fp.sidecar_path = sc_base + ".tags.zip";
                 }
+                j.fmt_plans[f.id] = fp;
             } else {
-                util::remove_file(tmp_name);
-                msg += i18n::str("      ! could not replace the file (access denied)\n");
-                out->detail = i18n::str("could not replace the file (access denied)");
+                fp = it->second;
+            }
+        }
+
+        uint64_t sidecar = fp.sidecar_size;
+        bool has_tags = false;
+        std::string terr;
+        for (const auto& [gtype, grp] : fp.plan.embed) {
+            terr = tags::write_group(candidate, f.id, gtype, grp);
+            if (!terr.empty()) break;
+        }
+        uint64_t cost = size;
+        if (terr.empty() && !fp.plan.embed.empty()) {
+            size = util::file_size(candidate);
+            has_tags = true;
+            cost = size;
+        }
+        if (terr.empty() && sidecar > 0) cost = size + sidecar;
+
+        Candidate cand;
+        cand.format = f.id;
+        cand.variant = v.id;
+        cand.size = size;
+        cand.sidecar = sidecar;
+        cand.has_tags = has_tags;
+        cand.cost = cost;
+        cand.order = task_idx;
+        cand.path = candidate;
+
+        if (!terr.empty()) {
+            util::remove_file(candidate);
+            record_error(i18n::str("tags: ") + terr);
+            return;
+        }
+
+        // Финальная проверка тегов
+        if (cand.has_tags && j.ts.present) {
+            std::string verr2 = tags::validate_groups(candidate, f.id, fp.plan.embed, ffprobe);
+            if (!verr2.empty()) {
+                util::remove_file(candidate);
+                record_error(i18n::str("tag validation: ") + verr2);
+                return;
+            }
+        }
+
+        rec["result_size"] = cand.size;
+        rec["sidecar_size"] = cand.sidecar;
+        rec["cost"] = cand.cost;
+        rec["has_tags"] = cand.has_tags;
+        rec["status"] = "ok";
+        if (logger) {
+            logger->event({{"type", "candidate"},
+                           {"file", j.path},
+                           {"format", f.id},
+                           {"variant", v.id},
+                           {"status", "ok"},
+                           {"size", cand.size},
+                           {"sidecar", cand.sidecar},
+                           {"cost", cand.cost}});
+        }
+
+        // Жадный отбор: лучший держим, проигравших удаляем сразу.
+        {
+            std::lock_guard<std::mutex> lk(*j.m);
+            bool promote = false;
+            if (!j.best_valid) promote = true;
+            else if (cand.cost < j.best.cost) promote = true;
+            else if (cand.cost == j.best.cost && cand.order < j.best_order) promote = true;
+            if (promote) {
+                if (j.best_valid) util::remove_file(j.best.path);
+                j.best = cand;
+                j.best_order = cand.order;
+                j.best_valid = true;
+            } else {
+                util::remove_file(candidate);
+            }
+            j.any_passed = true;
+            j.stat_records.push_back(std::move(rec));
+        }
+    }
+
+    // --- финализация файла: отчёт, замена исходника, чистка tmp ---
+    // Вызывается ровно один раз (потоком, завершившим последнюю задачу).
+    void finalize_file(FileJob& j) {
+        const Options& opts = *this->opts;
+
+        std::lock_guard<std::mutex> lk(*j.m);
+        std::vector<json::json> records = std::move(j.stat_records);
+        j.summary.path = j.path;
+        j.summary.exclusions = j.exclusions;
+
+        std::string msg;
+        char buf[512];
+        std::string winner_text;
+        double result_pct = -1.0;
+
+        if (j.summary.status == "error") {
+            // ошибка уже зафиксирована (ffprobe/ffmpeg, исключение)
+            winner_text = "error";
+        } else if (!j.any_passed) {
+            j.summary.status = "skip";
+            std::string reason =
+                j.failures.empty() ? i18n::str("no suitable candidates") : j.failures[0];
+            j.summary.detail = reason;
+            msg = "SKIP " + j.base + " — " + reason + "\n";
+            winner_text = "skip";
+            if (!opts.no_stats) stats::append_all(records);
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", reason}});
             }
         } else {
-            msg += i18n::str("      ! could not copy the candidate into the file folder\n");
-            out->detail = i18n::str("could not copy the candidate into the file folder");
+            const Candidate& best = j.best;
+            uint64_t best_cost = best.cost;
+            double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
+            for (auto& r : records) {
+                if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
+            }
+            if (!opts.no_stats) stats::append_all(records);
+
+            snprintf(buf, sizeof(buf), "%s",
+                     i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", j.base.c_str(),
+                               j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
+                               best.format.c_str(), best.variant.c_str()).c_str());
+            msg = buf;
+            winner_text = best.format + "/" + best.variant;
+            result_pct = savings;
+
+            j.summary.status = "ok";
+            j.summary.original = j.probe.size;
+            j.summary.best = best_cost;
+            j.summary.savings_pct = savings;
+            j.summary.best_format = best.format;
+            j.summary.best_variant = best.variant;
+
+            // Замена на месте: исходник трогаем только здесь.
+            if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
+                std::string ext = fmt_ext(best.format, *fmts);
+                std::string new_path = util::join_path(j.dir, j.base_ne + "." + ext);
+                std::string tmp_name =
+                    util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
+                if (util::copy_file(best.path, tmp_name)) {
+                    if (util::remove_file(j.path)) {
+                        std::error_code ec;
+                        bool renamed = false;
+                        for (int attempt = 0; attempt < 10 && !renamed; attempt++) {
+                            ec.clear();
+                            fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
+                            if (!ec) {
+                                renamed = true;
+                                break;
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        }
+                        if (!renamed) {
+                            // Пытаемся вернуть исходник на место, чтобы не потерять файл.
+                            util::copy_file(tmp_name, j.path);
+                            msg += i18n::fmt(
+                                "      ! could not rename (the file remained in the folder as %s)\n",
+                                util::base_name(tmp_name).c_str());
+                        } else {
+                            if (best.sidecar > 0) {
+                                auto pit = j.fmt_plans.find(best.format);
+                                std::string sc_src =
+                                    pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                             : best.path + ".tags.zip";
+                                std::string sc_dst =
+                                    util::join_path(j.dir, j.base_ne + ".tags.zip");
+                                if (!util::copy_file(sc_src, sc_dst))
+                                    msg += i18n::str(
+                                        "      ! could not copy the sidecar (tags) next to the file\n");
+                            }
+                            msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
+                                   best.variant + "\n";
+                            j.summary.replaced = true;
+                            j.summary.detail =
+                                i18n::str("replaced in place: ") + best.format + "/" + best.variant;
+                        }
+                    } else {
+                        util::remove_file(tmp_name);
+                        msg += i18n::str("      ! could not replace the file (access denied)\n");
+                        j.summary.detail = i18n::str("could not replace the file (access denied)");
+                    }
+                } else {
+                    msg += i18n::str("      ! could not copy the candidate into the file folder\n");
+                    j.summary.detail =
+                        i18n::str("could not copy the candidate into the file folder");
+                }
+            } else if (best_cost < j.probe.size && !j.ts.complete) {
+                msg += i18n::str("      ! not replaced: the container tags cannot be fully preserved\n");
+                j.summary.detail = i18n::str("container tags cannot be fully preserved — no replacement");
+            } else if (opts.dry_run) {
+                j.summary.detail = i18n::str("dry-run — no replacement");
+            } else {
+                j.summary.detail = i18n::str("size did not decrease — no replacement");
+            }
+
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", j.summary.status},
+                               {"replaced", j.summary.replaced},
+                               {"original", j.probe.size},
+                               {"best", best_cost},
+                               {"format", best.format},
+                               {"variant", best.variant}});
+            }
         }
-    } else if (best_cost < probe.size && !ts.complete) {
-        msg += i18n::str("      ! not replaced: the container tags cannot be fully preserved\n");
-        out->detail = i18n::str("container tags cannot be fully preserved — no replacement");
-    } else if (opts.dry_run) {
-        out->detail = i18n::str("dry-run — no replacement");
-    } else {
-        out->detail = i18n::str("size did not decrease — no replacement");
+
+        // Чистка временных файлов файла.
+        util::remove_file(j.ref_wav);
+        for (const auto& [id, fp] : j.fmt_plans)
+            if (fp.sidecar_size > 0) util::remove_file(fp.sidecar_path);
+        if (j.best_valid) util::remove_file(j.best.path);
+
+        if (!msg.empty()) status::log(msg);
+        status::end_file(j.idx, j.base, winner_text, result_pct);
+        if (j.rc != 0) failed++;
     }
 
-    print_locked(msg);
-    if (logger) {
-        logger->event({{"type", "file_done"},
-                       {"file", path},
-                       {"status", out->status},
-                       {"replaced", out->replaced},
-                       {"original", probe.size},
-                       {"best", best_cost},
-                       {"format", best.format},
-                       {"variant", best.variant}});
+    void worker() {
+        for (;;) {
+            Work w;
+            {
+                std::unique_lock<std::mutex> lk(qm);
+                cv.wait_for(lk, std::chrono::milliseconds(50), [&] {
+                    return !queue.empty() || prep_allowed_locked() || all_done_locked();
+                });
+                if (all_done_locked()) break;
+                if (!take_work_locked(&w)) continue;
+            }
+
+            if (w.kind == WorkKind::Prep) {
+                std::string perr;
+                try {
+                    prep_file(jobs[w.idx]);
+                } catch (const std::exception& exc) {
+                    perr = exc.what();
+                }
+                if (!perr.empty()) {
+                    FileJob& j = jobs[w.idx];
+                    std::lock_guard<std::mutex> jl(*j.m);
+                    j.summary.path = j.path;
+                    j.summary.status = "error";
+                    j.summary.detail = perr;
+                    j.rc = 1;
+                    status::error("ERROR [" + j.path + "]: " + perr + "\n");
+                }
+                bool finish_now = false;
+                size_t n_tasks = 0;
+                {
+                    std::lock_guard<std::mutex> lk(qm);
+                    FileJob& j = jobs[w.idx];
+                    j.prep_done = true;
+                    prep_active = false;
+                    if (j.tasks.empty()) {
+                        j.done = true;
+                        total_done++;
+                        finish_now = true;
+                    } else {
+                        refill_locked();
+                        n_tasks = j.tasks.size();
+                    }
+                    cv.notify_all();
+                }
+                if (!finish_now) status::begin_file(w.idx, jobs[w.idx].base, n_tasks);
+                if (finish_now) finalize_file(jobs[w.idx]);
+            } else {
+                std::string verr;
+                try {
+                    run_variant(jobs[w.idx], w.task);
+                } catch (const std::exception& exc) {
+                    verr = exc.what();
+                }
+                bool last = false;
+                size_t done_n = 0;
+                {
+                    std::lock_guard<std::mutex> lk(qm);
+                    FileJob& j = jobs[w.idx];
+                    if (!verr.empty()) {
+                        std::lock_guard<std::mutex> jl(*j.m);
+                        j.failures.push_back("variant: " + verr);
+                        j.rc = 1;
+                        status::error("ERROR [" + j.path + "]: " + verr + "\n");
+                    }
+                    j.completed++;
+                    done_n = j.completed;
+                    if (j.completed == j.tasks.size()) {
+                        j.done = true;
+                        total_done++;
+                        last = true;
+                    }
+                    refill_locked();
+                    cv.notify_all();
+                }
+                status::tick(w.idx, done_n);
+                if (last) finalize_file(jobs[w.idx]);
+            }
+        }
     }
-    return 0;
-}
+};
 
 }  // namespace
 
@@ -663,9 +958,10 @@ int run(const Options& opts) {
         unsigned hw = std::thread::hardware_concurrency();
         jobs = hw > 0 ? (int)hw : 1;
     }
-    if (jobs > (int)files.size()) jobs = (int)files.size();
+    if (jobs < 1) jobs = 1;
 
-    util::mkdirs(tmp_dir());
+    std::string tmp = tmp_dir();
+    util::mkdirs(tmp);
 
     // Журнал runs/*.jsonl — только в режиме отладки (stats.json накапливается всегда).
     report::Logger logger(opts.debug ? util::join_path(util::exe_dir(), "runs")
@@ -688,53 +984,49 @@ int run(const Options& opts) {
                       {"report", opts.report_path}});
     }
 
-    std::atomic<int> failed{0};
-    std::atomic<size_t> next{0};
-    std::mutex m;
-    size_t done = 0;
-    std::vector<report::FileSummary> summaries;
+    status::init(files.size(), opts.no_status);
+
+    Runner r;
+    r.opts = &opts;
+    r.fmts = &fmts;
+    r.logger = logger.ok() ? &logger : nullptr;
+    r.ffprobe = media::find_ffprobe();
+    r.ffmpeg = media::find_ffmpeg();
+    r.tmp = tmp;
+    r.window = jobs;
+    r.n_files = files.size();
+    r.jobs.resize(files.size());
+    for (size_t i = 0; i < files.size(); i++) {
+        r.jobs[i].idx = i;
+        r.jobs[i].path = files[i];
+        r.jobs[i].base = util::base_name(files[i]);
+        r.jobs[i].base_ne = base_no_ext(files[i]);
+        r.jobs[i].dir = util::dir_name(files[i]);
+        r.jobs[i].tok = tmp_token(files[i]);
+        r.jobs[i].m = std::make_unique<std::mutex>();
+    }
+
     std::vector<std::thread> threads;
-    std::function<void()> worker = [&]() {
-        for (;;) {
-            size_t idx;
-            {
-                std::lock_guard<std::mutex> lk(m);
-                if (next >= files.size()) break;
-                idx = next++;
-            }
-            report::FileSummary fs;
-            int rc = 0;
-            try {
-                rc = process_one(files[idx], opts, fmts, &logger, &fs);
-            } catch (const std::exception& exc) {
-                out::error("ERROR [%s]: %s\n", files[idx].c_str(), exc.what());
-                fs.status = "error";
-                fs.detail = exc.what();
-                rc = 1;
-            }
-            if (rc != 0) failed++;
-            {
-                std::lock_guard<std::mutex> lk(m);
-                done++;
-                summaries.push_back(std::move(fs));
-            }
-        }
-    };
-    for (int i = 0; i < jobs; i++) threads.emplace_back(worker);
+    for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);
     for (auto& t : threads) t.join();
+
+    status::shutdown();
 
     // Убираем временные файлы (эталонные WAV и кандидаты).
     std::error_code ec;
-    for (const auto& e : fs::directory_iterator(fs::u8path(tmp_dir()), ec)) {
+    for (const auto& e : fs::directory_iterator(fs::u8path(tmp), ec)) {
         if (ec) break;
         if (e.is_regular_file()) fs::remove(e.path(), ec);
     }
 
     if (logger.ok()) {
         logger.event({{"type", "run_end"},
-                      {"done", done},
-                      {"failed", failed.load()}});
+                      {"done", r.total_done},
+                      {"failed", r.failed.load()}});
     }
+
+    std::vector<report::FileSummary> summaries;
+    for (auto& j : r.jobs) summaries.push_back(j.summary);
 
     if (!opts.report_path.empty()) {
         std::string rp = opts.report_path;
@@ -756,8 +1048,8 @@ int run(const Options& opts) {
                     t_best > 0 ? 100.0 * (1.0 - (double)t_best / (double)t_orig) : 0.0);
     }
 
-    out::print("Done: %zu files processed, errors: %d\n", done, failed.load());
-    return failed.load() > 0 ? 1 : 0;
+    out::print("Done: %zu files processed, errors: %d\n", r.total_done, r.failed.load());
+    return r.failed.load() > 0 ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ void usage() {
     out::print("  llao.exe optimize <file|folder> [...]        main enumeration\n");
     out::print("             [--jobs=N] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
+    out::print("             [--no-status]\n");
     out::print("  llao.exe restore <file|folder> [...]         decode + re-encode to the target format\n");
     out::print("             [--jobs=N] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
@@ -184,6 +185,8 @@ int cmd_optimize(const std::vector<std::string>& args) {
             opts.debug = true;
         } else if (!no_more_opts && a == "--no-stats") {
             opts.no_stats = true;
+        } else if (!no_more_opts && a == "--no-status") {
+            opts.no_status = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
             opts.jobs = std::stoi(a.substr(7));
         } else if (!no_more_opts && a == "--jobs") {
