@@ -25,6 +25,7 @@ OptimFROG вообще) помечались как SKIP, а операцион�
 import glob
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,11 @@ def run_tool(args, timeout=1200):
                        timeout=timeout, env=env)
     out = (r.stdout or "") + (r.stderr or "")
     return r.returncode, out
+
+
+def has_errors(out, n):
+    """Итоговая строка «errors: N» / «ошибок: N» (язык зависит от локали)."""
+    return bool(re.search(r"(?:errors|ошибок):\s*%d\b" % n, out))
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +122,7 @@ def f1_optimize_garbage(d):
     cp(os.path.join(FIX, "garbage.flac"), os.path.join(d, "bad.flac"))
     rc, out = run_tool(["optimize", d, "--formats=flac", "--jobs=1"])
     assert rc == 1, "ожидался rc=1:\n%s" % out
-    assert "ошибок: 1" in out, "итог должен считать ошибку:\n%s" % out
+    assert has_errors(out, 1), "итог должен считать ошибку:\n%s" % out
 
 
 def f2_restore_garbage(d):
@@ -146,7 +152,7 @@ def f5_corrupt_ofr(d):
     cp(os.path.join(FIX, "corrupt.ofr"), os.path.join(d, "bad.ofr"))
     rc, out = run_tool(["optimize", d, "--formats=flac", "--jobs=1"])
     assert rc == 1, "испорченный ofr должен давать ошибку:\n%s" % out
-    assert "ошибок: 1" in out, "итог должен считать ошибку:\n%s" % out
+    assert has_errors(out, 1), "итог должен считать ошибку:\n%s" % out
     assert "ERROR" in out, "в выводе нет ERROR:\n%s" % out
 
 
@@ -160,7 +166,7 @@ def f6_missing_tool(d):
         rc, out = run_tool(["optimize", d, "--formats=tak", "--no-download",
                             "--jobs=1"])
         assert rc == 1, "отсутствующая утилита должна давать rc=1:\n%s" % out
-        assert "ошибок: 1" in out, "итог должен считать ошибку:\n%s" % out
+        assert has_errors(out, 1), "итог должен считать ошибку:\n%s" % out
 
         rc, out = run_tool(["restore", d, "--to=tak", "--no-download", "--jobs=1"])
         assert rc == 1, "restore без утилиты должен давать rc=1:\n%s" % out
