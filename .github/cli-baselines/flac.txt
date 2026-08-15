@@ -1,0 +1,145 @@
+===============================================================================
+flac - Command-line FLAC encoder/decoder version 1.5.0
+Copyright (C) 2000-2009  Josh Coalson
+Copyright (C) 2011-2025  Xiph.Org Foundation
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program; if not, write to the Free Software Foundation, Inc.,
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+===============================================================================
+Usage:
+
+ Encoding: flac [<general/encoding/format options>] [INPUTFILE [...]]
+ Decoding: flac -d [<general/decoding/format options>] [FLACFILE [...]]
+  Testing: flac -t [<general options>] [FLACFILE [...]]
+Analyzing: flac -a [<general/analysis options>] [FLACFILE [...]]
+
+
+This help text summarizes all available options, for more explanation and
+examples please consult the manual. This manual is often distributed
+alongside the program as a man page or an HTML file. It can also be found
+online at https://xiph.org/flac/documentation_tools_flac.html
+
+General options:
+  -v, --version                Show the flac version number
+  -h, --help                   Show this screen
+  -d, --decode                 Decode (the default behavior is to encode)
+  -t, --test                   As -d except no decoded file is written,
+                               and with some additional checks.
+  -a, --analyze                As -d except an analysis file is written
+  -c, --stdout                 Write output to stdout
+  -f, --force                  Force overwriting of output files
+      --delete-input-file      Deletes after a successful encode/decode
+  -o, --output-name=FILENAME   Force the output file name
+      --output-prefix=STRING   Prepend STRING to output names
+      --preserve-modtime       (default) Output files keep timestamp of input
+      --keep-foreign-metadata  Save/restore WAVE or AIFF non-audio chunks
+      --keep-foreign-metadata-if-present     Save/restore WAVE or AIFF non-audio
+                           but not return an error when no such chunks are found
+      --skip={#|mm:ss.ss}      Skip the given initial samples for each input
+      --until={#|[+|-]mm:ss.ss}     Stop at the given sample for each input file
+      --no-utf8-convert        Do not convert tags from local charset to UTF-8
+  -s, --silent                 Do not write runtime encode/decode statistics
+      --totally-silent         Do not print anything, including errors
+  -w, --warnings-as-errors     Treat all warnings as errors
+
+Decoding options:
+  -F, --decode-through-errors  Continue decoding through stream errors
+      --cue=[#.#][-[#.#]]      Set the beginning and ending cuepoints to decode
+      --decode-chained-stream  Decode all links in a chained Ogg stream, not
+                               just the first one
+
+Encoding options, defaulting to -5, -A "tukey(5e-1)" and one CPU thread:
+  -V, --verify                       Verify a correct encoding
+  -0, --compression-level-0, --fast  Synonymous with -l 0 -b 1152 -r 3
+  -1, --compression-level-1          Synonymous with -l 0 -b 1152 -M -r 3
+  -2, --compression-level-2          Synonymous with -l 0 -b 1152 -m -r 3
+  -3, --compression-level-3          Synonymous with -l 6 -b 4096 -r 4
+  -4, --compression-level-4          Synonymous with -l 8 -b 4096 -M -r 4
+  -5, --compression-level-5          Synonymous with -l 8 -b 4096 -m -r 5
+  -6, --compression-level-6          Synonymous with -l 8 -b 4096 -m -r 6
+                                         -A "subdivide_tukey(2)"
+  -7, --compression-level-7          Synonymous with -l 12 -b 4096 -m -r 6
+                                         -A "subdivide_tukey(2)"
+  -8, --compression-level-8, --best  Synonymous with -l 12 -b 4096 -m -r 6
+                                         -A "subdivide_tukey(3)"
+  -l, --max-lpc-order=#              Max LPC order; 0 => only fixed predictors
+  -b, --blocksize=#                  Specify blocksize in samples
+  -m, --mid-side                     Try mid-side coding for each frame
+  -M, --adaptive-mid-side            Adaptive choice of mid-side coding
+  -r, --rice-partition-order=[#,]#   Set [min,]max residual partition order
+  -A, --apodization="function"       Window audio data with given function(s)
+  -e, --exhaustive-model-search      Do exhaustive model search (expensive!)
+  -q, --qlp-coeff-precision=#        Specify quantization precision in bits
+                                     (default: let encoder decide)
+  -p, --qlp-coeff-precision-search   Exhaustively search LP coeff quantization
+      --lax                          Allow encoder to generate non-Subset files
+      --limit-min-bitrate            Limit minimum bitrate (for streaming)
+  -j, --threads=#                    Set number of encoding threads
+      --ignore-chunk-sizes           Ignore data chunk sizes in WAVE/AIFF files
+      --replay-gain                  Calculate ReplayGain & store in FLAC tags
+      --cuesheet=FILENAME            Import cuesheet & store in CUESHEET block
+      --picture=SPECIFICATION        Import picture & store in PICTURE block
+  -T, --tag=FIELD=VALUE              Add a FLAC tag; may appear multiple times
+      --tag-from-file=FIELD=FILENAME     Like --tag but gets value from file
+  -S, --seekpoint={#|X|#x|#s}        Add seek point(s)
+  -P, --padding=#                    Write a PADDING block of length # bytes
+
+Format options (encoding defaults to FLAC not OGG; decoding defaults to WAVE,
+             chunks found by --keep-foreign-metadata-if-present will override):
+      --ogg                          Use Ogg transport layer, output .oga
+      --serial-number                Ogg serial number to assign (encoding)
+                                     or to select for decoding
+      --force-aiff-format            Decode to AIFF format
+      --force-rf64-format            Decode to RF64 format
+      --force-wave64-format          Decode to Wave64 format
+      --force-legacy-wave-format     Decode to legacy wave format
+      --force-extensible-wave-format Decode to extensible wave format
+      --force-aiff-c-none-format     Decode to AIFF-C NONE format
+      --force-aiff-c-sowt-format     Decode to AIFF-C sowt format
+      --force-raw-format             Treat input or output as raw samples
+raw format options:
+      --sign={signed|unsigned}       Sign of samples (input/output)
+      --endian={big|little}          Byte order for samples (input/output)
+      --channels=#                   Number of channels in raw input
+      --bps=#                        Number of bits per sample in raw input
+      --sample-rate=#                Sample rate in Hz in raw input
+      --input-size=#                 Size in bytes of raw input from stdin
+
+Analysis options:
+      --residual-text          Include residual signal in text output
+      --residual-gnuplot       Generate gnuplot files of residual distribution
+
+Negative options (rightmost applied takes precedence):
+      --no-adaptive-mid-side
+      --no-cued-seekpoints
+      --no-decode-through-errors
+      --no-delete-input-file
+      --no-error-on-compression-fail
+      --no-force
+      --no-preserve-modtime
+      --no-keep-foreign-metadata
+      --no-exhaustive-model-search
+      --no-ignore-chunk-sizes
+      --no-lax
+      --no-mid-side
+      --no-ogg
+      --no-padding
+      --no-qlp-coeff-prec-search
+      --no-replay-gain
+      --no-residual-gnuplot
+      --no-residual-text
+      --no-seektable
+      --no-silent
+      --no-verify
+      --no-warnings-as-errors
