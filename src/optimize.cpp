@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -37,6 +38,23 @@ std::mutex g_print_mutex;
 void print_locked(const std::string& s) {
     std::lock_guard<std::mutex> lk(g_print_mutex);
     out::text(stdout, s);
+}
+
+// Число потоков из опций: целое jobs — как есть, вещественное — множитель числа
+// ядер; 0/отрицательное — авто (2× ядра). Не меньше 1.
+int resolve_jobs(double jobs, bool jobs_float) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw < 1) hw = 1;
+    double n;
+    if (jobs <= 0) {
+        n = hw * 2.0;  // авто
+    } else if (jobs_float) {
+        n = hw * jobs;  // множитель ядер
+    } else {
+        n = jobs;  // точное число потоков
+    }
+    int j = n <= 1.0 ? 1 : (int)(n + 0.5);
+    return j;
 }
 
 bool is_audio_file(const std::string& path) {
@@ -310,6 +328,11 @@ struct Runner {
     int window = 1;
     size_t n_files = 0;
 
+    // --- кэш ресурсов для адаптивного окна (обновляется не чаще 10 с) ---
+    std::chrono::steady_clock::time_point res_last{};
+    uint64_t tmp_budget = 8ull << 30;  // бюджет tmp: min(8 ГБ, свободно/4), не меньше 1 ГБ
+    uint64_t ram_budget = 0;           // бюджет RAM: 50% доступной памяти
+
     std::mutex qm;
     std::condition_variable cv;
     std::deque<std::pair<size_t, size_t>> queue;  // (job, task_idx)
@@ -340,19 +363,47 @@ struct Runner {
         return rel - cpl;
     }
 
-    // Лимит tmp: кандидаты + эталонный WAV + dec.wav задач. На больших файлах
-    // окно дополнительно ужимается, чтобы tmp не разрастался с параллельностью.
-    static const uint64_t kMaxTmpBytes = 4ull << 30;  // 4 ГБ
+    // След одной задачи «в полёте»: dec.wav (~размера эталона) + кандидат (~ref/2).
+    static uint64_t task_footprint(uint64_t ref_size) {
+        return ref_size + ref_size / 2;
+    }
+
+    // Обновляет кэш ресурсов (диск/RAM) не чаще 10 с.
+    void refresh_resources_locked() {
+        auto now = std::chrono::steady_clock::now();
+        if (res_last != std::chrono::steady_clock::time_point{} &&
+            now - res_last < std::chrono::seconds(10))
+            return;
+        uint64_t free = util::disk_free_bytes(tmp);
+        uint64_t b = free / 4;
+        if (b > (8ull << 30)) b = 8ull << 30;       // не больше 8 ГБ
+        if (b < (1ull << 30)) b = 1ull << 30;       // но и не меньше 1 ГБ
+        tmp_budget = b;
+        uint64_t ram = util::avail_ram_bytes();
+        ram_budget = ram > (2ull << 30) ? ram / 2 : 0;  // 50% доступной памяти
+        res_last = now;
+    }
 
     // Выпускает задачи в строгом порядке, пока суммарно в полёте меньше окна.
-    // Окно ограничено числом потоков и размером эталонного WAV активных файлов.
+    // Окно ограничено числом потоков, бюджетом tmp (свободное место на диске)
+    // и бюджетом RAM для активных файлов.
     void refill_locked() {
+        refresh_resources_locked();
         uint64_t cap = (uint64_t)window;
         for (size_t i = 0; i < n_files; i++) {
             const FileJob& j = jobs[i];
             if (j.done || !j.prep_done) continue;
-            if (j.ref_size > 0)
-                cap = std::min<uint64_t>(cap, std::max<uint64_t>(1, kMaxTmpBytes / j.ref_size));
+            if (j.ref_size > 0) {
+                uint64_t foot = task_footprint(j.ref_size);
+                uint64_t by_tmp = tmp_budget / foot;
+                if (by_tmp < 1) by_tmp = 1;
+                cap = std::min<uint64_t>(cap, by_tmp);
+                if (ram_budget > 0) {
+                    uint64_t by_ram = ram_budget / foot;
+                    if (by_ram < 1) by_ram = 1;
+                    cap = std::min<uint64_t>(cap, by_ram);
+                }
+            }
             break;  // активен только головной (FIFO) файл
         }
         while (in_flight_locked() < cap) {
@@ -977,12 +1028,7 @@ int run(const Options& opts) {
         return 1;
     }
 
-    int jobs = opts.jobs;
-    if (jobs <= 0) {
-        unsigned hw = std::thread::hardware_concurrency();
-        jobs = hw > 0 ? (int)hw : 1;
-    }
-    if (jobs < 1) jobs = 1;
+    int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
 
     std::string tmp = tmp_dir();
     util::mkdirs(tmp);
@@ -1303,11 +1349,7 @@ int restore_run(const RestoreOptions& opts) {
         return 1;
     }
 
-    int jobs = opts.jobs;
-    if (jobs <= 0) {
-        unsigned hw = std::thread::hardware_concurrency();
-        jobs = hw > 0 ? (int)hw : 1;
-    }
+    int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
     if (jobs > (int)files.size()) jobs = (int)files.size();
 
     util::mkdirs(tmp_dir());
