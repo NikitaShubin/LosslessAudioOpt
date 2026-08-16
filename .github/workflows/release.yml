@@ -79,7 +79,7 @@ jobs:
           VER="${GITHUB_REF_NAME:-v1.0.0}"
           DEST="llao-${VER}-win64"
           rm -rf "$DEST"; mkdir -p "$DEST"
-          cp llao.exe llao.json README.md "$DEST/"
+          cp llao llao.exe llao.json README.md "$DEST/"
           cp -r formats lang "$DEST/"
           mkdir -p "$DEST/bin"
           python3 - "$DEST/bin" <<'PY'

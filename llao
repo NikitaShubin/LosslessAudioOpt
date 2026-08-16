@@ -1,0 +1,8 @@
+#!/bin/sh
+# LLAO: запуск llao.exe под wine без шума отладчика wine (err:winediag,
+# err:environ и т.п. — вывод wineserver'а идёт в терминал мимо перехвата llao).
+# По умолчанию WINEDEBUG=-all (как в CI-тестах проекта); своё значение сохраняется.
+: "${WINEDEBUG:=-all}"
+export WINEDEBUG
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec wine "$DIR/llao.exe" "$@"
