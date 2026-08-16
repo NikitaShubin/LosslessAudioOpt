@@ -1324,10 +1324,23 @@ static int restore_one(const std::string& path, const config::Format& target,
         print_locked(i18n::fmt("ERROR %s — could not replace the file (access denied)\n", path.c_str()));
         return 1;
     }
+    // Переименование на Windows может короткое время не проходить (антивирус/
+    // индексатор держит файл) — повторяем, как в основном пути оптимизации.
     std::error_code ec;
-    fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
-    if (ec) {
-        print_locked(i18n::fmt("ERROR %s — could not rename (the .llao-restore-tmp file remains)\n", path.c_str()));
+    bool renamed = false;
+    for (int attempt = 0; attempt < 10 && !renamed; attempt++) {
+        ec.clear();
+        fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
+        if (!ec) {
+            renamed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!renamed) {
+        // Данные не потеряны: результат лежит как tmp-файл, его можно переименовать вручную.
+        print_locked(i18n::fmt("ERROR %s — could not rename, the result is saved as %s\n",
+                               path.c_str(), tmp_name.c_str()));
         return 1;
     }
 
