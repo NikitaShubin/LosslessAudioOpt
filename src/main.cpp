@@ -37,12 +37,15 @@ void usage() {
     out::print("  llao.exe optimize <file|folder> [...]        main enumeration\n");
     out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
-    out::print("             [--no-status]\n");
+    out::print("             [--no-status] [--verify=all|winner|none] [--ignore-errors]\n");
     out::print("  llao.exe restore <file|folder> [...]         decode + re-encode to the target format\n");
     out::print("             [--jobs=N|M.F] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
     out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
     out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
+    out::print("  optimize --verify: all = check every candidate (default); winner = check only the\n");
+    out::print("    best by size; none = no verification at all. Any file error aborts the run unless\n");
+    out::print("    --ignore-errors is given (then such files are skipped and the run continues).\n");
 }
 
 int cmd_check_formats() {
@@ -205,6 +208,20 @@ int cmd_optimize(const std::vector<std::string>& args) {
         } else if (!no_more_opts && a == "--report") {
             out::error("ERROR: use --report=<file|folder>\n");
             return 2;
+        } else if (!no_more_opts && a.rfind("--verify=", 0) == 0) {
+            std::string v = a.substr(9);
+            if (v == "all") opts.verify = optimize::Verify::All;
+            else if (v == "winner") opts.verify = optimize::Verify::Winner;
+            else if (v == "none") opts.verify = optimize::Verify::None;
+            else {
+                out::error("ERROR: --verify must be one of: all|winner|none\n");
+                return 2;
+            }
+        } else if (!no_more_opts && a == "--verify") {
+            out::error("ERROR: use --verify=all|winner|none\n");
+            return 2;
+        } else if (!no_more_opts && a == "--ignore-errors") {
+            opts.ignore_errors = true;
         } else {
             opts.inputs.push_back(a);
         }

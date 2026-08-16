@@ -224,9 +224,10 @@ static bool decode_source_native(const config::Format* src_fmt, const std::strin
     return ok;
 }
 
-// Возвращает пустую строку при успехе, иначе текст ошибки.
-std::string encode_and_validate(const std::string& wav, const std::string& candidate,
-                                const std::vector<std::string>& params, const Env& env) {
+// Кодирование кандидата (без валидации). Возвращает пустую строку при успехе,
+// иначе текст ошибки. При успехе candidate существует и непуст.
+std::string encode_candidate(const std::string& wav, const std::string& candidate,
+                             const std::vector<std::string>& params, const Env& env) {
     const config::Format& f = *env.fmt;
     std::vector<std::string> encode_args =
         build_cmd(f.encode_cmd, env.encoder, wav, candidate, params, f.engine_codec,
@@ -240,7 +241,15 @@ std::string encode_and_validate(const std::string& wav, const std::string& candi
                (out.empty() ? "" : ": " + out.substr(0, 2000));
     }
     if (!util::file_exists(candidate)) return i18n::str("encoder did not create the file");
+    return {};
+}
 
+// Полная валидация кандидата: builtin-проверка формата (flac -t и т.п.) + декод
+// и побитовое сравнение PCM с эталонным WAV (потоковое, без загрузки в память).
+// Возвращает пустую строку при успехе, иначе текст ошибки.
+std::string validate_candidate(const std::string& wav, const std::string& candidate,
+                               const Env& env) {
+    const config::Format& f = *env.fmt;
     if (f.verify_kind == "builtin" && !f.verify_cmd.empty()) {
         std::vector<std::string> vargs = build_cmd(f.verify_cmd, env.decoder, candidate, "",
                                                    {}, f.engine_codec, f.engine_container);
@@ -263,7 +272,7 @@ std::string encode_and_validate(const std::string& wav, const std::string& candi
                (out.empty() ? "" : ": " + out.substr(0, 1000));
     }
     std::string perr;
-    bool same = media::wav_pcm_equal(wav, dec_wav, &perr);
+    bool same = media::wav_data_compare(wav, dec_wav, &perr);
     util::remove_file(dec_wav);
     if (!same) return i18n::str("PCM does not match the source: ") + perr;
     return {};
@@ -274,6 +283,15 @@ static std::string fmt_ext(const std::string& id, const std::vector<config::Form
     for (const auto& f : fmts)
         if (f.id == id) return f.extension;
     return id;
+}
+
+// Текстовое имя режима верификации (для stats.json).
+static const char* verify_name(Verify v) {
+    switch (v) {
+        case Verify::All: return "all";
+        case Verify::Winner: return "winner";
+        default: return "none";
+    }
 }
 
 // Нативные типы тегов формата (из tag.system конфига).
@@ -365,6 +383,7 @@ struct Runner {
     size_t total_done = 0;
     std::vector<FileJob> jobs;
     std::atomic<int> failed{0};
+    std::atomic<bool> abort{false};  // при ошибке файла без --ignore-errors: прекращаем прогон
 
     bool all_done_locked() const { return total_done == n_files; }
 
@@ -412,6 +431,7 @@ struct Runner {
     // Окно ограничено числом потоков, бюджетом tmp (свободное место на диске)
     // и бюджетом RAM для активных файлов.
     void refill_locked() {
+        if (abort.load()) return;
         refresh_resources_locked();
         uint64_t cap = (uint64_t)window;
         for (size_t i = 0; i < n_files; i++) {
@@ -442,6 +462,7 @@ struct Runner {
     // Prep следующего файла разрешён, когда головной файл полностью выпущен
     // (у него осталось не более window задач) или все подготовленные файлы готовы.
     bool prep_allowed_locked() const {
+        if (abort.load()) return false;
         if (next_prep >= n_files) return false;
         if (prep_active) return false;
         if (next_prep == 0) return true;
@@ -463,6 +484,7 @@ struct Runner {
 
     // Вызывается под qm.
     bool take_work_locked(Work* w) {
+        if (abort.load()) return false;
         if (!queue.empty()) {
             auto front = queue.front();
             queue.pop_front();
@@ -636,6 +658,7 @@ struct Runner {
 
     // --- один вариант: кодирование, валидация, теги, жадный отбор ---
     void run_variant(FileJob& j, size_t task_idx) {
+        const Options& opts = *this->opts;
         const TaskDesc& td = j.tasks[task_idx];
         const config::Format& f = (*fmts)[td.fmt_idx];
         const config::Variant& v = f.variants[td.variant_idx];
@@ -657,6 +680,7 @@ struct Runner {
             {"duration", j.probe.duration},
             {"format", f.id},
             {"variant", v.id},
+            {"verify", verify_name(opts.verify)},
         };
 
         auto record_error = [&](const std::string& err) {
@@ -676,7 +700,12 @@ struct Runner {
             j.stat_records.push_back(std::move(rec));
         };
 
-        std::string verr = encode_and_validate(j.ref_wav, candidate, v.args, env);
+        // В режиме All каждый кандидат полностью проверяется здесь.
+        // Winner/None — только кодирование; победитель валидируется в finalize_file
+        // (режим Winner) или не проверяется вовсе (None).
+        std::string verr = encode_candidate(j.ref_wav, candidate, v.args, env);
+        if (verr.empty() && opts.verify == Verify::All)
+            verr = validate_candidate(j.ref_wav, candidate, env);
         if (!verr.empty()) {
             util::remove_file(candidate);
             record_error(verr);
@@ -821,6 +850,7 @@ struct Runner {
                 j.summary.status = "error";
                 winner_text = "error";
                 j.summary.detail = reason;
+                status::error("ERROR " + j.path + " — " + reason + "\n");
                 if (!opts.no_stats) stats::append_all(records);
                 if (logger) {
                     logger->event({{"type", "file_done"},
@@ -844,92 +874,135 @@ struct Runner {
         } else {
             const Candidate& best = j.best;
             uint64_t best_cost = best.cost;
-            double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
-            for (auto& r : records) {
-                if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
+
+            // Режим Winner: кандидаты при отборе не проверялись — валидируем победителя
+            // перед заменой. Провал — это ошибка файла (а не «неудачный вариант»): исходник
+            // не заменяется, разбор причин обязателен.
+            std::string winner_fail;
+            if (opts.verify == Verify::Winner) {
+                auto eit = j.envs.find(best.format);
+                std::string werr =
+                    eit == j.envs.end() ? "internal: no Env for " + best.format
+                                        : validate_candidate(j.ref_wav, best.path, eit->second);
+                if (!werr.empty()) {
+                    winner_fail = i18n::fmt("winner %s/%s failed verification: %s",
+                                            best.format.c_str(), best.variant.c_str(),
+                                            werr.c_str());
+                    j.failures.insert(j.failures.begin(), winner_fail);
+                }
             }
-            if (!opts.no_stats) stats::append_all(records);
 
-            snprintf(buf, sizeof(buf), "%s",
-                     i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", j.base.c_str(),
-                               j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
-                               best.format.c_str(), best.variant.c_str()).c_str());
-            msg = buf;
-            winner_text = best.format + "/" + best.variant;
-            result_pct = savings;
+            if (!winner_fail.empty()) {
+                for (auto& r : records) {
+                    if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
+                }
+                if (!opts.no_stats) stats::append_all(records);
+                j.summary.status = "error";
+                winner_text = "error";
+                j.summary.detail = winner_fail;
+                status::error("ERROR " + j.path + " — " + winner_fail + "\n");
+                if (logger) {
+                    logger->event({{"type", "file_done"},
+                                   {"file", j.path},
+                                   {"status", "error"},
+                                   {"reason", winner_fail},
+                                   {"original", j.probe.size},
+                                   {"best", best_cost},
+                                   {"format", best.format},
+                                   {"variant", best.variant}});
+                }
+            } else {
+                double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
+                for (auto& r : records) {
+                    if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
+                }
+                if (!opts.no_stats) stats::append_all(records);
 
-            j.summary.status = "ok";
-            j.summary.original = j.probe.size;
-            j.summary.best = best_cost;
-            j.summary.savings_pct = savings;
-            j.summary.best_format = best.format;
-            j.summary.best_variant = best.variant;
+                snprintf(buf, sizeof(buf), "%s",
+                         i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", j.base.c_str(),
+                                   j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
+                                   best.format.c_str(), best.variant.c_str()).c_str());
+                msg = buf;
+                winner_text = best.format + "/" + best.variant;
+                result_pct = savings;
 
-            // Замена на месте: исходник трогаем только здесь.
-            if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
-                std::string ext = fmt_ext(best.format, *fmts);
-                std::string tmp_name =
-                    util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
-                std::string bak_name =
-                    util::join_path(j.dir, "." + j.base_ne + ".llao-bak." + ext);
-                if (util::copy_file(best.path, tmp_name)) {
-                    // Безопасная замена: оригинал переносится в .bak, кандидат — на место
-                    // оригинала; при сбое — rollback. Перезапись исходника через copy исключена.
-                    util::ReplaceResult rr = util::replace_file(j.path, tmp_name, bak_name);
-                    if (!rr.ok) {
-                        util::remove_file(tmp_name);
-                        if (rr.original_lost) {
-                            msg += i18n::fmt(
-                                "      ! COULD NOT REPLACE the file; the original was NOT "
-                                "restored in place and is saved as %s (%s)\n",
-                                rr.backup.c_str(), rr.error.c_str());
-                            j.summary.detail = i18n::str("could not replace the file");
+                j.summary.status = "ok";
+                j.summary.original = j.probe.size;
+                j.summary.best = best_cost;
+                j.summary.savings_pct = savings;
+                j.summary.best_format = best.format;
+                j.summary.best_variant = best.variant;
+
+                // Замена на месте: исходник трогаем только здесь.
+                if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
+                    std::string ext = fmt_ext(best.format, *fmts);
+                    std::string new_path =
+                        util::join_path(j.dir, j.base_ne + "." + ext);
+                    std::string tmp_name =
+                        util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
+                    std::string bak_name =
+                        util::join_path(j.dir, "." + j.base_ne + ".llao-bak." + ext);
+                    if (util::copy_file(best.path, tmp_name)) {
+                        // Безопасная замена: оригинал переносится в .bak, кандидат — на место
+                        // оригинала (с новым расширением формата); при сбое — rollback.
+                        // Перезапись исходника через copy исключена.
+                        util::ReplaceResult rr =
+                            util::replace_file(j.path, tmp_name, bak_name, new_path);
+                        if (!rr.ok) {
+                            util::remove_file(tmp_name);
+                            if (rr.original_lost) {
+                                msg += i18n::fmt(
+                                    "      ! COULD NOT REPLACE the file; the original was NOT "
+                                    "restored in place and is saved as %s (%s)\n",
+                                    rr.backup.c_str(), rr.error.c_str());
+                                j.summary.detail = i18n::str("could not replace the file");
+                            } else {
+                                msg += i18n::fmt("      ! could not replace the file (%s)\n",
+                                                 rr.error.c_str());
+                                j.summary.detail = i18n::str("could not replace the file");
+                            }
                         } else {
-                            msg += i18n::fmt("      ! could not replace the file (%s)\n",
-                                             rr.error.c_str());
-                            j.summary.detail = i18n::str("could not replace the file");
+                            if (best.sidecar > 0) {
+                                auto pit = j.fmt_plans.find(best.format);
+                                std::string sc_src =
+                                    pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                             : best.path + ".tags.zip";
+                                std::string sc_dst =
+                                    util::join_path(j.dir, j.base_ne + ".tags.zip");
+                                if (!util::copy_file(sc_src, sc_dst))
+                                    msg += i18n::str(
+                                        "      ! could not copy the sidecar (tags) next to the file\n");
+                            }
+                            msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
+                                   best.variant + "\n";
+                            j.summary.replaced = true;
+                            j.summary.detail =
+                                i18n::str("replaced in place: ") + best.format + "/" + best.variant;
                         }
                     } else {
-                        if (best.sidecar > 0) {
-                            auto pit = j.fmt_plans.find(best.format);
-                            std::string sc_src =
-                                pit != j.fmt_plans.end() ? pit->second.sidecar_path
-                                                         : best.path + ".tags.zip";
-                            std::string sc_dst =
-                                util::join_path(j.dir, j.base_ne + ".tags.zip");
-                            if (!util::copy_file(sc_src, sc_dst))
-                                msg += i18n::str(
-                                    "      ! could not copy the sidecar (tags) next to the file\n");
-                        }
-                        msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
-                               best.variant + "\n";
-                        j.summary.replaced = true;
+                        msg += i18n::str("      ! could not copy the candidate into the file folder\n");
                         j.summary.detail =
-                            i18n::str("replaced in place: ") + best.format + "/" + best.variant;
+                            i18n::str("could not copy the candidate into the file folder");
                     }
+                } else if (best_cost < j.probe.size && !j.ts.complete) {
+                    msg += i18n::str("      ! not replaced: the container tags cannot be fully preserved\n");
+                    j.summary.detail = i18n::str("container tags cannot be fully preserved — no replacement");
+                } else if (opts.dry_run) {
+                    j.summary.detail = i18n::str("dry-run — no replacement");
                 } else {
-                    msg += i18n::str("      ! could not copy the candidate into the file folder\n");
-                    j.summary.detail =
-                        i18n::str("could not copy the candidate into the file folder");
+                    j.summary.detail = i18n::str("size did not decrease — no replacement");
                 }
-            } else if (best_cost < j.probe.size && !j.ts.complete) {
-                msg += i18n::str("      ! not replaced: the container tags cannot be fully preserved\n");
-                j.summary.detail = i18n::str("container tags cannot be fully preserved — no replacement");
-            } else if (opts.dry_run) {
-                j.summary.detail = i18n::str("dry-run — no replacement");
-            } else {
-                j.summary.detail = i18n::str("size did not decrease — no replacement");
-            }
 
-            if (logger) {
-                logger->event({{"type", "file_done"},
-                               {"file", j.path},
-                               {"status", j.summary.status},
-                               {"replaced", j.summary.replaced},
-                               {"original", j.probe.size},
-                               {"best", best_cost},
-                               {"format", best.format},
-                               {"variant", best.variant}});
+                if (logger) {
+                    logger->event({{"type", "file_done"},
+                                   {"file", j.path},
+                                   {"status", j.summary.status},
+                                   {"replaced", j.summary.replaced},
+                                   {"original", j.probe.size},
+                                   {"best", best_cost},
+                                   {"format", best.format},
+                                   {"variant", best.variant}});
+                }
             }
         }
 
@@ -941,7 +1014,16 @@ struct Runner {
 
         if (!msg.empty()) status::log(msg);
         status::end_file(j.idx, j.base, winner_text, result_pct);
-        if (j.summary.status == "error") failed++;
+        if (j.summary.status == "error") {
+            if (opts.ignore_errors) {
+                // Игнорируем ошибку: файл помечается skip, прогон продолжается.
+                j.summary.status = "skip";
+                if (j.summary.detail.empty()) j.summary.detail = i18n::str("error ignored");
+            } else {
+                failed++;
+                abort = true;
+            }
+        }
     }
 
     void worker() {
@@ -953,6 +1035,7 @@ struct Runner {
                     return !queue.empty() || prep_allowed_locked() || all_done_locked();
                 });
                 if (all_done_locked()) break;
+                if (abort.load()) break;
                 if (!take_work_locked(&w)) continue;
             }
 
@@ -1089,6 +1172,8 @@ int run(const Options& opts) {
                       {"jobs", jobs},
                       {"files", files.size()},
                       {"dry_run", opts.dry_run},
+                      {"verify", verify_name(opts.verify)},
+                      {"ignore_errors", opts.ignore_errors},
                       {"report", opts.report_path}});
     }
 
@@ -1157,6 +1242,11 @@ int run(const Options& opts) {
     }
 
     out::print("Done: %zu files processed, errors: %d\n", r.total_done, r.failed.load());
+    if (r.failed.load() > 0 && !opts.ignore_errors) {
+        out::error("Aborted: %d file(s) failed. Fix the issues above or re-run with "
+                   "--ignore-errors to skip such files.\n",
+                   r.failed.load());
+    }
     return r.failed.load() > 0 ? 1 : 0;
 }
 
@@ -1259,7 +1349,9 @@ static int restore_one(const std::string& path, const config::Format& target,
     std::string candidate = util::join_path(tmp, cand_name);
     util::remove_file(candidate);
 
-    std::string verr = encode_and_validate(src_wav, candidate, variant.args, env);
+    // Restore всегда выполняет полную проверку кандидата (единственный вариант).
+    std::string verr = encode_candidate(src_wav, candidate, variant.args, env);
+    if (verr.empty()) verr = validate_candidate(src_wav, candidate, env);
     util::remove_file(src_wav);
     if (!verr.empty()) {
         util::remove_file(candidate);
@@ -1306,27 +1398,19 @@ static int restore_one(const std::string& path, const config::Format& target,
         }
     }
 
-    // Замена на месте (безопасная: оригинал временно переносится в .bak; при сбое
-    // переноса кандидата выполняется rollback, потеря исходника исключена).
-    std::string tmp_name = util::join_path(dir, "." + base_ne + ".llao-restore-tmp." + target.extension);
-    std::string bak_name = util::join_path(dir, "." + base_ne + ".llao-restore-bak." + target.extension);
-    if (!util::copy_file(candidate, tmp_name)) {
+    // Новый файл в целевом формате создаётся рядом с исходником; источник удаляется
+    // только после полной записи нового файла. Потеря данных исключена: даже если
+    // удаление не пройдёт, останутся оба файла (replace_file на месте здесь не подходит —
+    // restore меняет имя файла, а не содержимое).
+    std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
+    if (!util::copy_file(candidate, new_path)) {
         print_locked(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
         return 1;
     }
-    util::ReplaceResult rr = util::replace_file(path, tmp_name, bak_name);
-    if (!rr.ok) {
-        util::remove_file(tmp_name);
-        if (rr.original_lost) {
-            print_locked(i18n::fmt(
-                "ERROR %s — could not replace the file and the original was NOT restored; "
-                "it is saved as %s (%s)\n",
-                path.c_str(), rr.backup.c_str(), rr.error.c_str()));
-        } else {
-            print_locked(i18n::fmt("ERROR %s — could not replace the file (%s)\n",
-                                   path.c_str(), rr.error.c_str()));
-        }
-        return 1;
+    if (!util::remove_file(path)) {
+        print_locked(i18n::fmt("WARNING %s — the new file is saved as %s, but the old file "
+                               "could not be removed and is left in place\n",
+                               path.c_str(), new_path.c_str()));
     }
 
     std::string old_sc = util::join_path(dir, base_ne + ".tags.zip");

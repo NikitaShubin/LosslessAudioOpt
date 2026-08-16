@@ -1,5 +1,8 @@
 #include "media.h"
 
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <set>
 
 #include "config.h"
@@ -13,21 +16,6 @@ namespace json = nlohmann;
 
 static uint32_t rd32le(const uint8_t* p) {
     return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-// Смещение и размер data-чанка WAV (0,0 если не найден).
-static std::pair<uint64_t, uint64_t> wav_data_chunk(const std::vector<uint8_t>& d) {
-    if (d.size() < 12 || memcmp(d.data(), "RIFF", 4) != 0 ||
-        memcmp(d.data() + 8, "WAVE", 4) != 0)
-        return {0, 0};
-    uint64_t o = 12;
-    while (o + 8 <= d.size()) {
-        uint32_t sz = rd32le(d.data() + o + 4);
-        if (memcmp(d.data() + o, "data", 4) == 0) return {o + 8, sz};
-        if (sz == 0) break;
-        o += 8 + sz + (sz & 1);
-    }
-    return {0, 0};
 }
 
 bool codec_is_lossless(const std::string& codec_name) {
@@ -163,15 +151,45 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
     return true;
 }
 
-bool wav_pcm_equal(const std::string& a, const std::string& b, std::string* err) {
-    auto da = util::read_file(a);
-    auto db = util::read_file(b);
-    if (da.empty() || db.empty()) {
-        *err = i18n::str("could not read the WAV for comparison");
+// Поиск data-чанка WAV: возвращает смещение данных и их размер. Файл читается
+// потоково; возвращает false, если WAV-заголовок не найден или data-чанка нет.
+static bool wav_data_chunk_stream(std::ifstream& f, uint64_t* off, uint64_t* sz) {
+    char hdr[12];
+    f.seekg(0);
+    f.read(hdr, 12);
+    if (f.gcount() != 12 || memcmp(hdr, "RIFF", 4) != 0 ||
+        memcmp(hdr + 8, "WAVE", 4) != 0)
+        return false;
+    uint64_t o = 12;
+    while (true) {
+        char ch[8];
+        f.clear();
+        f.seekg((std::streamoff)o);
+        f.read(ch, 8);
+        if (f.gcount() != 8) return false;
+        uint32_t chsz = rd32le((uint8_t*)ch + 4);
+        if (memcmp(ch, "data", 4) == 0) {
+            *off = o + 8;
+            *sz = chsz;
+            return true;
+        }
+        if (chsz == 0) return false;
+        o += 8 + chsz + (chsz & 1);
+    }
+}
+
+bool wav_data_compare(const std::string& a, const std::string& b, std::string* err) {
+    std::ifstream fa(std::filesystem::u8path(a), std::ios::binary);
+    std::ifstream fb(std::filesystem::u8path(b), std::ios::binary);
+    if (!fa || !fb) {
+        *err = i18n::str("could not open the WAV for comparison");
         return false;
     }
-    auto [ao, asz] = wav_data_chunk(da);
-    auto [bo, bsz] = wav_data_chunk(db);
+    uint64_t ao = 0, asz = 0, bo = 0, bsz = 0;
+    if (!wav_data_chunk_stream(fa, &ao, &asz) || !wav_data_chunk_stream(fb, &bo, &bsz)) {
+        *err = i18n::str("could not find the data chunk in the WAV");
+        return false;
+    }
     if (asz == 0 || bsz == 0) {
         *err = i18n::str("could not find the data chunk in the WAV");
         return false;
@@ -181,13 +199,28 @@ bool wav_pcm_equal(const std::string& a, const std::string& b, std::string* err)
                           std::to_string(asz).c_str(), std::to_string(bsz).c_str());
         return false;
     }
-    if (ao + asz > da.size() || bo + bsz > db.size()) {
-        *err = i18n::str("corrupted WAV (data chunk extends beyond the file)");
-        return false;
-    }
-    if (memcmp(da.data() + ao, db.data() + bo, asz) != 0) {
-        *err = i18n::str("PCM data does not match");
-        return false;
+    fa.clear();
+    fb.clear();
+    fa.seekg((std::streamoff)ao);
+    fb.seekg((std::streamoff)bo);
+    constexpr size_t kChunk = 1u << 20;  // 1 МБ
+    std::vector<char> ba(kChunk), bb(kChunk);
+    uint64_t left = asz;
+    while (left > 0) {
+        size_t n = left < kChunk ? (size_t)left : kChunk;
+        fa.read(ba.data(), (std::streamsize)n);
+        size_t ga = (size_t)fa.gcount();
+        fb.read(bb.data(), (std::streamsize)n);
+        size_t gb = (size_t)fb.gcount();
+        if (ga != n || gb != n) {
+            *err = i18n::str("corrupted WAV (data chunk extends beyond the file)");
+            return false;
+        }
+        if (memcmp(ba.data(), bb.data(), n) != 0) {
+            *err = i18n::str("PCM data does not match");
+            return false;
+        }
+        left -= n;
     }
     return true;
 }

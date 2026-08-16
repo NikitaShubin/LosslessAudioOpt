@@ -5,6 +5,13 @@
 
 namespace optimize {
 
+// Режим верификации кандидатов.
+enum class Verify {
+    All,     // полная проверка каждого кандидата (builtin + декод + PCM)
+    Winner,  // проверяется только победитель по cost, перед заменой
+    None,    // никакой проверки, замена сразу
+};
+
 struct Options {
     std::vector<std::string> inputs;   // файлы/папки
     double jobs = 2.0;                 // число потоков: целое — как есть, вещественное — множитель ядер
@@ -17,6 +24,8 @@ struct Options {
     bool no_stats = false;             // не накапливать stats.json
     bool no_status = false;            // без интерактивного статусбара
     std::string report_path;           // путь к итоговому отчёту (пусто = не писать)
+    Verify verify = Verify::All;       // режим верификации кандидатов
+    bool ignore_errors = false;        // ошибки файлов помечать skip, прогон не прерывать
 };
 
 struct Candidate {
