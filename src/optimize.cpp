@@ -379,7 +379,7 @@ struct Runner {
     std::condition_variable cv;
     std::deque<std::pair<size_t, size_t>> queue;  // (job, task_idx)
     size_t next_prep = 0;
-    bool prep_active = false;
+    int prep_active = 0;  // число выполняющихся prep (могут идти параллельно)
     size_t total_done = 0;
     std::vector<FileJob> jobs;
     std::atomic<int> failed{0};
@@ -459,19 +459,15 @@ struct Runner {
         }
     }
 
-    // Prep следующего файла разрешён, когда головной файл полностью выпущен
-    // (у него осталось не более window задач) или все подготовленные файлы готовы.
+    // Prep следующего файла: файлы готовятся строго по порядку (next_prep++),
+    // параллельно — не больше числа потоков и не больше оставшихся файлов
+    // (формула min(jobs, num_tracks)). Задачи выпускаются только из prep_done
+    // файлов и строго FIFO по индексу, поэтому порядок обработки не меняется.
     bool prep_allowed_locked() const {
         if (abort.load()) return false;
         if (next_prep >= n_files) return false;
-        if (prep_active) return false;
-        if (next_prep == 0) return true;
-        for (size_t i = 0; i < n_files; i++) {
-            const FileJob& j = jobs[i];
-            if (j.done) continue;
-            if (!j.prep_done) return true;  // самый ранний не подготовлен — его prep следующий
-            return j.released >= j.tasks.size();
-        }
+        if (prep_active >= window) return false;
+        if (prep_active >= (int)(n_files - next_prep)) return false;
         return true;
     }
 
@@ -493,7 +489,7 @@ struct Runner {
         }
         if (prep_allowed_locked()) {
             size_t i = next_prep++;
-            prep_active = true;
+            prep_active++;
             *w = {WorkKind::Prep, i, 0};
             return true;
         }
@@ -1060,7 +1056,7 @@ struct Runner {
                     std::lock_guard<std::mutex> lk(qm);
                     FileJob& j = jobs[w.idx];
                     j.prep_done = true;
-                    prep_active = false;
+                    if (prep_active > 0) prep_active--;
                     if (j.tasks.empty()) {
                         j.done = true;
                         total_done++;
