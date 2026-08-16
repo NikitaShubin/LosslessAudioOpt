@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Установка зависимостей (wine 10, ffmpeg, p7zip)
         run: |
@@ -114,7 +114,7 @@ jobs:
           ls -lh llao-*.zip
 
       - name: Публикация релиза
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: llao-*.zip
           generate_release_notes: true
