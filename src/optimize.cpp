@@ -5,7 +5,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
-#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -377,7 +376,6 @@ struct Runner {
 
     std::mutex qm;
     std::condition_variable cv;
-    std::deque<std::pair<size_t, size_t>> queue;  // (job, task_idx)
     size_t next_prep = 0;
     int prep_active = 0;  // число выполняющихся prep (могут идти параллельно)
     size_t total_done = 0;
@@ -387,13 +385,14 @@ struct Runner {
 
     bool all_done_locked() const { return total_done == n_files; }
 
-    // Самый ранний не завершённый файл с невыпущенными задачами.
-    size_t refill_head_locked() const {
+    // Есть ли хоть один готовый файл с невыпущенными задачами (для cv-предиката;
+    // бюджеты окна проверяет сам take_work_locked).
+    bool variant_pending_locked() const {
         for (size_t i = 0; i < n_files; i++) {
             const FileJob& j = jobs[i];
-            if (!j.done && j.prep_done && j.released < j.tasks.size()) return i;
+            if (!j.done && j.prep_done && j.released < j.tasks.size()) return true;
         }
-        return SIZE_MAX;
+        return false;
     }
 
     // Задач «в полёте» (выпущено, но не завершено) по всем файлам.
@@ -427,42 +426,28 @@ struct Runner {
         res_last = now;
     }
 
-    // Выпускает задачи в строгом порядке, пока суммарно в полёте меньше окна.
-    // Окно ограничено числом потоков, бюджетом tmp (свободное место на диске)
-    // и бюджетом RAM для активных файлов.
-    void refill_locked() {
-        if (abort.load()) return;
-        refresh_resources_locked();
+    // Окно (лимит «в полёте») для одного файла: число потоков, бюджет tmp
+    // (свободное место на диске) и бюджет RAM по следу задачи.
+    uint64_t file_cap_locked(const FileJob& j) const {
         uint64_t cap = (uint64_t)window;
-        for (size_t i = 0; i < n_files; i++) {
-            const FileJob& j = jobs[i];
-            if (j.done || !j.prep_done) continue;
-            if (j.ref_size > 0) {
-                uint64_t foot = task_footprint(j.ref_size);
-                uint64_t by_tmp = tmp_budget / foot;
-                if (by_tmp < 1) by_tmp = 1;
-                cap = std::min<uint64_t>(cap, by_tmp);
-                if (ram_budget > 0) {
-                    uint64_t by_ram = ram_budget / foot;
-                    if (by_ram < 1) by_ram = 1;
-                    cap = std::min<uint64_t>(cap, by_ram);
-                }
+        if (j.ref_size > 0) {
+            uint64_t foot = task_footprint(j.ref_size);
+            uint64_t by_tmp = tmp_budget / foot;
+            if (by_tmp < 1) by_tmp = 1;
+            cap = std::min<uint64_t>(cap, by_tmp);
+            if (ram_budget > 0) {
+                uint64_t by_ram = ram_budget / foot;
+                if (by_ram < 1) by_ram = 1;
+                cap = std::min<uint64_t>(cap, by_ram);
             }
-            break;  // активен только головной (FIFO) файл
         }
-        while (in_flight_locked() < cap) {
-            size_t h = refill_head_locked();
-            if (h == SIZE_MAX) break;
-            FileJob& j = jobs[h];
-            queue.push_back({h, j.released});
-            j.released++;
-        }
+        return cap;
     }
 
     // Prep следующего файла: файлы готовятся строго по порядку (next_prep++),
     // параллельно — не больше числа потоков и не больше оставшихся файлов
-    // (формула min(jobs, num_tracks)). Задачи выпускаются только из prep_done
-    // файлов и строго FIFO по индексу, поэтому порядок обработки не меняется.
+    // (формула min(jobs, num_tracks)). Prep идёт в фоне, чтобы ядра не простаивали
+    // в ожидании распаковки; выпуск вариантов — всегда по приоритету файлов.
     bool prep_allowed_locked() const {
         if (abort.load()) return false;
         if (next_prep >= n_files) return false;
@@ -478,13 +463,23 @@ struct Runner {
         size_t task = 0;
     };
 
-    // Вызывается под qm.
+    // Вызывается под qm. Свободный воркер берёт очередной незанятый вариант
+    // самого раннего готового файла (строгий приоритет по индексу: даже если
+    // более поздний файл распаковался раньше, как только более ранний готов —
+    // его варианты обрабатываются в первую очередь). Задачи не выпускаются,
+    // пока не освободится место в окне (лимиты потоков/диска/RAM). Когда
+    // варианты брать нечего — берётся prep следующего файла.
     bool take_work_locked(Work* w) {
         if (abort.load()) return false;
-        if (!queue.empty()) {
-            auto front = queue.front();
-            queue.pop_front();
-            *w = {WorkKind::Variant, front.first, front.second};
+        refresh_resources_locked();
+        size_t in_flight = in_flight_locked();
+        for (size_t i = 0; i < n_files; i++) {
+            const FileJob& j = jobs[i];
+            if (j.done || !j.prep_done) continue;
+            if (j.released >= j.tasks.size()) continue;
+            if (in_flight >= file_cap_locked(j)) break;  // окно занято — варианты не выпускаем
+            *w = {WorkKind::Variant, i, j.released};
+            jobs[i].released++;
             return true;
         }
         if (prep_allowed_locked()) {
@@ -945,7 +940,11 @@ struct Runner {
                         util::ReplaceResult rr =
                             util::replace_file(j.path, tmp_name, bak_name, new_path);
                         if (!rr.ok) {
-                            util::remove_file(tmp_name);
+                            if (!util::remove_file(tmp_name))
+                                msg += i18n::fmt(
+                                    "      ! could not remove the temporary candidate "
+                                    "(%s); it was left in place\n",
+                                    tmp_name.c_str());
                             if (rr.original_lost) {
                                 msg += i18n::fmt(
                                     "      ! COULD NOT REPLACE the file; the original was NOT "
@@ -1028,7 +1027,8 @@ struct Runner {
             {
                 std::unique_lock<std::mutex> lk(qm);
                 cv.wait_for(lk, std::chrono::milliseconds(50), [&] {
-                    return !queue.empty() || prep_allowed_locked() || all_done_locked();
+                    return variant_pending_locked() || prep_allowed_locked() ||
+                           all_done_locked();
                 });
                 if (all_done_locked()) break;
                 if (abort.load()) break;
@@ -1062,7 +1062,6 @@ struct Runner {
                         total_done++;
                         finish_now = true;
                     } else {
-                        refill_locked();
                         n_tasks = j.tasks.size();
                     }
                     cv.notify_all();
@@ -1094,7 +1093,6 @@ struct Runner {
                         total_done++;
                         last = true;
                     }
-                    refill_locked();
                     cv.notify_all();
                 }
                 status::tick(w.idx, done_n);

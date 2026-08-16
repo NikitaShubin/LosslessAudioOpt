@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include <system_error>
+
 #include <nlohmann/json.hpp>
 
 namespace util {
@@ -64,6 +66,13 @@ std::string find_in_path(const std::string& name);
 
 // Текущая ОС для выбора записей downloads[].
 std::string current_os();  // "windows" | "linux" | ...
+
+// Читаемое описание ошибки std::filesystem для вывода пользователю.
+// ec.message() у strerror возвращает байты в ANSI-кодовой странице системы
+// (на русской Windows — CP1251); llao хранит строки в UTF-8, поэтому байты
+// перекодируются из GetACP() в UTF-8. При невозможности перекодировки —
+// фолбэк на санитизированный исходный текст.
+std::string ec_text(const std::error_code& ec);
 
 // Проверяет, что файл — Windows PE (первые байты MZ). Нужно, чтобы под wine
 // не подхватить Linux ELF-бинарник вместо Windows-версии.
