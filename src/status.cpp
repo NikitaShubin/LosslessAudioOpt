@@ -43,6 +43,7 @@ bool g_orig_mode_valid = false;
 int g_width = 80;
 int g_height = 25;
 bool g_size_valid = false;
+bool g_size_forced = false;  // размер задан через LLAO_STATUS_SIZE — не обновлять
 
 constexpr std::chrono::milliseconds kTickMin(100);
 
@@ -93,7 +94,8 @@ std::string row_text(const Row& r, size_t idx, int W) {
 // Полоса прогресса на всю ширину W: зелёная заливка (42) до done/total,
 // дальше серый фон (100); текст белым поверх. Текст статичен (кроме процента).
 // Пробелы в тексте пишутся как обычные символы (а не пропускаются): иначе курсор
-// не продвигается и текст склеивается без пробелов.
+// не продвигается и текст склеивается без пробелов. Строка предварительно
+// стирается (\x1b[2K), чтобы не наслаиваться на лог/старую полосу.
 std::string strip_row(const Row& r, size_t idx, int W) {
     double f = r.total > 0 ? (double)r.done / (double)r.total : 0.0;
     int filled = (int)(f * W + 0.5);
@@ -101,6 +103,7 @@ std::string strip_row(const Row& r, size_t idx, int W) {
     if (filled < 0) filled = 0;
     std::wstring body = u2w(row_text(r, idx, W));
     std::string s;
+    s += "\x1b[2K";
     s += "\x1b[42m" + std::string((size_t)filled, ' ');
     s += "\x1b[100m" + std::string((size_t)(W - filled), ' ');
     s += "\x1b[0m\r";
@@ -135,8 +138,43 @@ void set_region() {
     out::text(stdout, "\x1b[1;" + std::to_string(scroll_bottom()) + "r");
 }
 
-// Перерисовать блок статусных строк и поставить курсор в зону лога.
-void draw_locked() {
+// Обновляет размер окна консоли. Возвращает true, если размер изменился
+// (или изменилось состояние overflow). Размер, заданный через LLAO_STATUS_SIZE,
+// не обновляется.
+void redraw_all_locked();  // определена ниже, нужна refresh_and_resize_locked()
+
+bool refresh_size_locked() {
+    if (g_size_forced) return false;
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (h == INVALID_HANDLE_VALUE || h == nullptr ||
+        !GetConsoleScreenBufferInfo(h, &csbi))
+        return false;
+    int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    int hh = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    if (w == g_width && hh == g_height) return false;
+    g_width = w;
+    g_height = hh;
+    if ((int)g_visible >= g_height - 1) g_overflow = true;
+    return true;
+}
+
+// Проверяет размер окна; при изменении — полностью перерисовывает блок
+// (или переводит в обычный построчный вывод, если блок не влезает).
+bool refresh_and_resize_locked() {
+    if (!refresh_size_locked()) return false;
+    if (g_overflow) {
+        // Блок перестал помещаться — очищаем экран от старого блока.
+        out::text(stdout, "\x1b[2J" + pos(1, 1));
+    } else {
+        redraw_all_locked();
+    }
+    return true;
+}
+
+// Полная перерисовка блока статусных строк и курсор в зону лога.
+// Вызывается при resize окна и при изменении состава/высоты блока.
+void redraw_all_locked() {
     if (!g_size_valid || g_overflow) return;
     set_region();
     int top = g_height - (int)g_visible + 1;
@@ -150,13 +188,26 @@ void draw_locked() {
     g_last = std::chrono::steady_clock::now();
 }
 
+// Перерисовка одной строки блока (обычный тик прогресса) + курсор в зону лога.
+void draw_row_locked(size_t idx) {
+    if (!g_size_valid || g_overflow) return;
+    if (idx >= g_visible) return;
+    const Row& r = g_rows[idx];
+    int top = g_height - (int)g_visible + 1;
+    std::string line = pos(top + (int)idx, 1);
+    line += r.finished ? finished_row(r, idx, g_width) : strip_row(r, idx, g_width);
+    line += pos(scroll_bottom(), 1);
+    out::text(stdout, line);
+    g_last = std::chrono::steady_clock::now();
+}
+
 // Гарантирует, что файл idx попал в блок (строки видны в порядке файлов).
 // Пропущенные файлы приходят сразу в end_file без begin_file.
 void ensure_visible_locked(size_t idx) {
     while (g_visible <= idx) {
         if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
             g_overflow = true;
-            out::text(stdout, "\x1b[r" + pos(g_height, 1));  // обычный скролл
+            out::text(stdout, "\x1b[2J" + pos(1, 1));  // очистить мусор старого блока
             return;
         }
         g_visible++;
@@ -182,6 +233,7 @@ void init(size_t total_files, bool no_status) {
     g_width = 80;
     g_height = 25;
     g_size_valid = false;
+    g_size_forced = false;
     if (no_status) return;
 
     const char* force = getenv("LLAO_STATUS_FORCE");
@@ -193,6 +245,7 @@ void init(size_t total_files, bool no_status) {
             g_width = W;
             g_height = H;
             g_size_valid = true;
+            g_size_forced = true;
         }
     }
 
@@ -232,6 +285,11 @@ void log(const std::string& line) {
         out::text(stdout, line);
         return;
     }
+    refresh_and_resize_locked();
+    if (g_overflow) {
+        out::text(stdout, line);
+        return;
+    }
     log_line(line);
 }
 
@@ -242,6 +300,11 @@ void error(const std::string& line) {
     }
     std::lock_guard<std::mutex> lk(g_m);
     if (!g_size_valid || g_overflow) {
+        out::text(stderr, line);
+        return;
+    }
+    refresh_and_resize_locked();
+    if (g_overflow) {
         out::text(stderr, line);
         return;
     }
@@ -257,12 +320,17 @@ void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
     g_rows[idx].done = 0;
     g_rows[idx].finished = false;
     if (!g_size_valid || g_overflow) return;
+    refresh_and_resize_locked();
+    if (g_overflow) {
+        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
+        return;
+    }
     ensure_visible_locked(idx);
     if (g_overflow) {
         out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
         return;
     }
-    draw_locked();
+    redraw_all_locked();  // блок вырос — перерисовываем целиком
 }
 
 void tick(size_t idx, size_t done) {
@@ -272,9 +340,11 @@ void tick(size_t idx, size_t done) {
     if (g_rows[idx].label.empty()) return;
     if (!g_size_valid || g_overflow) return;
     g_rows[idx].done = done;
+    refresh_and_resize_locked();  // при resize уже полностью перерисован
+    if (g_overflow) return;
     auto now = std::chrono::steady_clock::now();
     if (now - g_last < kTickMin) return;
-    draw_locked();
+    draw_row_locked(idx);
 }
 
 void end_file(size_t idx, const std::string& label, const std::string& winner, double pct) {
@@ -286,12 +356,17 @@ void end_file(size_t idx, const std::string& label, const std::string& winner, d
     g_rows[idx].winner = winner;
     g_rows[idx].pct = pct;
     if (!g_size_valid || g_overflow) return;
+    refresh_and_resize_locked();
+    if (g_overflow) {
+        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
+        return;
+    }
     ensure_visible_locked(idx);
     if (g_overflow) {
         out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
         return;
     }
-    draw_locked();
+    draw_row_locked(idx);
 }
 
 void shutdown() {
