@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <system_error>
+#include <thread>
 
 namespace fs = std::filesystem;
 
@@ -140,6 +141,51 @@ bool copy_file(const std::string& src, const std::string& dst) {
     std::error_code ec;
     fs::copy_file(fs::u8path(src), fs::u8path(dst), fs::copy_options::overwrite_existing, ec);
     return !ec;
+}
+
+ReplaceResult replace_file(const std::string& original, const std::string& tmp,
+                           const std::string& backup) {
+    ReplaceResult res;
+    auto rename_retry = [](const std::string& from, const std::string& to) -> std::string {
+        std::error_code ec;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            ec.clear();
+            fs::rename(fs::u8path(from), fs::u8path(to), ec);
+            if (!ec) return {};
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        return ec.message();
+    };
+
+    // Зачищаем свой же backup от прерванного предыдущего запуска.
+    std::error_code ec;
+    fs::remove(fs::u8path(backup), ec);
+
+    std::string err = rename_retry(original, backup);
+    if (!err.empty()) {
+        res.error = "could not move the original to " + base_name(backup) + ": " + err;
+        return res;
+    }
+
+    err = rename_retry(tmp, original);
+    if (!err.empty()) {
+        std::string rb = rename_retry(backup, original);
+        if (!rb.empty()) {
+            res.original_lost = true;
+            res.backup = backup;
+            res.error = "could not move the candidate in place (" + err +
+                        ") AND the rollback failed (" + rb + "); the original is saved as " +
+                        backup;
+        } else {
+            res.error = "could not move the candidate in place (" + err +
+                        "); the original was restored";
+        }
+        return res;
+    }
+
+    res.ok = true;
+    fs::remove(fs::u8path(backup), ec);  // неудача удаления некритична
+    return res;
 }
 
 uint64_t disk_free_bytes(const std::string& path) {
