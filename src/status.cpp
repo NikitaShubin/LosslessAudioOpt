@@ -92,6 +92,8 @@ std::string row_text(const Row& r, size_t idx, int W) {
 
 // Полоса прогресса на всю ширину W: зелёная заливка (42) до done/total,
 // дальше серый фон (100); текст белым поверх. Текст статичен (кроме процента).
+// Пробелы в тексте пишутся как обычные символы (а не пропускаются): иначе курсор
+// не продвигается и текст склеивается без пробелов.
 std::string strip_row(const Row& r, size_t idx, int W) {
     double f = r.total > 0 ? (double)r.done / (double)r.total : 0.0;
     int filled = (int)(f * W + 0.5);
@@ -102,18 +104,11 @@ std::string strip_row(const Row& r, size_t idx, int W) {
     s += "\x1b[42m" + std::string((size_t)filled, ' ');
     s += "\x1b[100m" + std::string((size_t)(W - filled), ' ');
     s += "\x1b[0m\r";
-    size_t col = 0;
-    for (wchar_t ch : body) {
-        if (ch == L' ') {
-            col++;
-            continue;
-        }
-        s += col < (size_t)filled ? "\x1b[37;42m" : "\x1b[37;100m";
-        char buf[8];
-        int n = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, buf, (int)sizeof(buf), nullptr, nullptr);
-        if (n > 0) s.append(buf, (size_t)n);
-        col++;
-    }
+    // Текст поверх заливки: одна смена цвета на границе заполнения, все символы
+    // (включая пробелы) пишутся — иначе пробелы пропадают и процент «прилипает».
+    size_t split = body.size() < (size_t)filled ? body.size() : (size_t)filled;
+    if (split > 0) s += "\x1b[37;42m" + w2u(body.substr(0, split));
+    if (split < body.size()) s += "\x1b[37;100m" + w2u(body.substr(split));
     s += "\x1b[0m";
     return s;
 }
