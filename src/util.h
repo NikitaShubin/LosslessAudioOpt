@@ -32,6 +32,22 @@ std::string read_text(const std::string& p);            // пусто при о�
 bool write_text(const std::string& p, const std::string& s);
 bool copy_file(const std::string& src, const std::string& dst);
 
+// Безопасная замена файла на месте.
+struct ReplaceResult {
+    bool ok = false;               // файл успешно заменён (original теперь = tmp)
+    bool original_lost = false;    // оригинал НЕ восстановлен, лежит в backup
+    std::string backup;            // путь, где лежит оригинал (при original_lost)
+    std::string error;             // описание причины (при !ok)
+};
+
+// Заменяет original на tmp, никогда не перезаписывая содержимое существующих
+// файлов через копирование: original переносится в backup, затем tmp переносится
+// на место original (fs::rename с повторами — антивирус/индексатор могут
+// короткое время держать файл). При сбое второго шага выполняется rollback
+// (backup возвращается в original). original и tmp должны лежать на одном томе.
+ReplaceResult replace_file(const std::string& original, const std::string& tmp,
+                           const std::string& backup);
+
 // Свободное место на диске, содержащем путь (байты; 0 при ошибке).
 // Используется для адаптивного лимита параллелизма (бюджет tmp).
 uint64_t disk_free_bytes(const std::string& path);

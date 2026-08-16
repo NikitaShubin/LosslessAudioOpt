@@ -868,50 +868,44 @@ struct Runner {
             // Замена на месте: исходник трогаем только здесь.
             if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
                 std::string ext = fmt_ext(best.format, *fmts);
-                std::string new_path = util::join_path(j.dir, j.base_ne + "." + ext);
                 std::string tmp_name =
                     util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
+                std::string bak_name =
+                    util::join_path(j.dir, "." + j.base_ne + ".llao-bak." + ext);
                 if (util::copy_file(best.path, tmp_name)) {
-                    if (util::remove_file(j.path)) {
-                        std::error_code ec;
-                        bool renamed = false;
-                        for (int attempt = 0; attempt < 10 && !renamed; attempt++) {
-                            ec.clear();
-                            fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
-                            if (!ec) {
-                                renamed = true;
-                                break;
-                            }
-                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        }
-                        if (!renamed) {
-                            // Пытаемся вернуть исходник на место, чтобы не потерять файл.
-                            util::copy_file(tmp_name, j.path);
+                    // Безопасная замена: оригинал переносится в .bak, кандидат — на место
+                    // оригинала; при сбое — rollback. Перезапись исходника через copy исключена.
+                    util::ReplaceResult rr = util::replace_file(j.path, tmp_name, bak_name);
+                    if (!rr.ok) {
+                        util::remove_file(tmp_name);
+                        if (rr.original_lost) {
                             msg += i18n::fmt(
-                                "      ! could not rename (the file remained in the folder as %s)\n",
-                                util::base_name(tmp_name).c_str());
+                                "      ! COULD NOT REPLACE the file; the original was NOT "
+                                "restored in place and is saved as %s (%s)\n",
+                                rr.backup.c_str(), rr.error.c_str());
+                            j.summary.detail = i18n::str("could not replace the file");
                         } else {
-                            if (best.sidecar > 0) {
-                                auto pit = j.fmt_plans.find(best.format);
-                                std::string sc_src =
-                                    pit != j.fmt_plans.end() ? pit->second.sidecar_path
-                                                             : best.path + ".tags.zip";
-                                std::string sc_dst =
-                                    util::join_path(j.dir, j.base_ne + ".tags.zip");
-                                if (!util::copy_file(sc_src, sc_dst))
-                                    msg += i18n::str(
-                                        "      ! could not copy the sidecar (tags) next to the file\n");
-                            }
-                            msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
-                                   best.variant + "\n";
-                            j.summary.replaced = true;
-                            j.summary.detail =
-                                i18n::str("replaced in place: ") + best.format + "/" + best.variant;
+                            msg += i18n::fmt("      ! could not replace the file (%s)\n",
+                                             rr.error.c_str());
+                            j.summary.detail = i18n::str("could not replace the file");
                         }
                     } else {
-                        util::remove_file(tmp_name);
-                        msg += i18n::str("      ! could not replace the file (access denied)\n");
-                        j.summary.detail = i18n::str("could not replace the file (access denied)");
+                        if (best.sidecar > 0) {
+                            auto pit = j.fmt_plans.find(best.format);
+                            std::string sc_src =
+                                pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                         : best.path + ".tags.zip";
+                            std::string sc_dst =
+                                util::join_path(j.dir, j.base_ne + ".tags.zip");
+                            if (!util::copy_file(sc_src, sc_dst))
+                                msg += i18n::str(
+                                    "      ! could not copy the sidecar (tags) next to the file\n");
+                        }
+                        msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
+                               best.variant + "\n";
+                        j.summary.replaced = true;
+                        j.summary.detail =
+                            i18n::str("replaced in place: ") + best.format + "/" + best.variant;
                     }
                 } else {
                     msg += i18n::str("      ! could not copy the candidate into the file folder\n");
@@ -1312,35 +1306,26 @@ static int restore_one(const std::string& path, const config::Format& target,
         }
     }
 
-    // Замена на месте.
-    std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
+    // Замена на месте (безопасная: оригинал временно переносится в .bak; при сбое
+    // переноса кандидата выполняется rollback, потеря исходника исключена).
     std::string tmp_name = util::join_path(dir, "." + base_ne + ".llao-restore-tmp." + target.extension);
+    std::string bak_name = util::join_path(dir, "." + base_ne + ".llao-restore-bak." + target.extension);
     if (!util::copy_file(candidate, tmp_name)) {
         print_locked(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
         return 1;
     }
-    if (!util::remove_file(path)) {
+    util::ReplaceResult rr = util::replace_file(path, tmp_name, bak_name);
+    if (!rr.ok) {
         util::remove_file(tmp_name);
-        print_locked(i18n::fmt("ERROR %s — could not replace the file (access denied)\n", path.c_str()));
-        return 1;
-    }
-    // Переименование на Windows может короткое время не проходить (антивирус/
-    // индексатор держит файл) — повторяем, как в основном пути оптимизации.
-    std::error_code ec;
-    bool renamed = false;
-    for (int attempt = 0; attempt < 10 && !renamed; attempt++) {
-        ec.clear();
-        fs::rename(fs::u8path(tmp_name), fs::u8path(new_path), ec);
-        if (!ec) {
-            renamed = true;
-            break;
+        if (rr.original_lost) {
+            print_locked(i18n::fmt(
+                "ERROR %s — could not replace the file and the original was NOT restored; "
+                "it is saved as %s (%s)\n",
+                path.c_str(), rr.backup.c_str(), rr.error.c_str()));
+        } else {
+            print_locked(i18n::fmt("ERROR %s — could not replace the file (%s)\n",
+                                   path.c_str(), rr.error.c_str()));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (!renamed) {
-        // Данные не потеряны: результат лежит как tmp-файл, его можно переименовать вручную.
-        print_locked(i18n::fmt("ERROR %s — could not rename, the result is saved as %s\n",
-                               path.c_str(), tmp_name.c_str()));
         return 1;
     }
 
