@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -45,6 +46,12 @@ int g_height = 25;
 bool g_size_valid = false;
 bool g_size_forced = false;  // размер задан через LLAO_STATUS_SIZE — не обновлять
 
+// Позиция последнего отрисованного блока статуса: при перерисовке (resize,
+// рост блока) старая область стирается целиком, иначе на экране остаются
+// копии старого блока.
+int g_drawn_top = 0;
+size_t g_drawn_rows = 0;
+
 constexpr std::chrono::milliseconds kTickMin(100);
 
 std::wstring u2w(const std::string& s) { return util::u2w(s); }
@@ -71,6 +78,14 @@ std::string truncate(const std::wstring& w, size_t width) {
     if (w.size() <= width) return w2u(w);
     if (width >= 3) return w2u(w.substr(0, width - 3) + L"...");
     return w2u(w.substr(0, width));
+}
+
+// Обрезка строки с сохранением хвоста: при превышении ширины голова заменяется
+// на "…", а важная часть (причина ошибки, результат) остаётся видимой.
+std::string truncate_tail(const std::wstring& w, size_t width) {
+    if (w.size() <= width) return w2u(w);
+    if (width >= 2) return w2u(L"…" + w.substr(w.size() - (width - 1)));
+    return w2u(w.substr(w.size() - width));
 }
 
 std::string pct_col(double pct) {
@@ -164,12 +179,32 @@ bool refresh_size_locked() {
 bool refresh_and_resize_locked() {
     if (!refresh_size_locked()) return false;
     if (g_overflow) {
-        // Блок перестал помещаться — очищаем экран от старого блока.
+        // Блок перестал помещаться — сбрасываем scroll-регион на весь экран
+        // (иначе \x1b[2J очистит только старый регион) и полностью очищаемся.
+        out::text(stdout, "\x1b[0m" + pos(1, 1));
+        out::text(stdout, "\x1b[r");
         out::text(stdout, "\x1b[2J" + pos(1, 1));
+        g_drawn_top = 0;
+        g_drawn_rows = 0;
     } else {
         redraw_all_locked();
     }
     return true;
+}
+
+// Стирает строки, в которых раньше находился блок статуса: объединение старой
+// области (g_drawn_top..g_drawn_rows) и новой (top..top+g_visible). Без этого
+// при resize и при росте блока старые строки остаются на экране «копиями».
+void erase_block_area_locked(int top) {
+    int lo = top;
+    int hi = top + (int)g_visible;
+    if (g_drawn_rows > 0) {
+        lo = std::min(lo, g_drawn_top);
+        hi = std::max(hi, g_drawn_top + (int)g_drawn_rows);
+    }
+    if (lo < 1) lo = 1;
+    if (hi > g_height + 1) hi = g_height + 1;
+    for (int r = lo; r < hi; r++) out::text(stdout, pos(r, 1) + "\x1b[2K");
 }
 
 // Полная перерисовка блока статусных строк и курсор в зону лога.
@@ -178,6 +213,7 @@ void redraw_all_locked() {
     if (!g_size_valid || g_overflow) return;
     set_region();
     int top = g_height - (int)g_visible + 1;
+    erase_block_area_locked(top);
     for (size_t i = 0; i < g_visible; i++) {
         const Row& r = g_rows[i];
         std::string line = pos(top + (int)i, 1);
@@ -185,6 +221,8 @@ void redraw_all_locked() {
         out::text(stdout, line);
     }
     out::text(stdout, pos(scroll_bottom(), 1));
+    g_drawn_top = top;
+    g_drawn_rows = g_visible;
     g_last = std::chrono::steady_clock::now();
 }
 
@@ -207,17 +245,35 @@ void ensure_visible_locked(size_t idx) {
     while (g_visible <= idx) {
         if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
             g_overflow = true;
-            out::text(stdout, "\x1b[2J" + pos(1, 1));  // очистить мусор старого блока
+            // Полный сброс: регион, цвета, очистка (как в refresh_and_resize_locked).
+            out::text(stdout, "\x1b[0m" + pos(1, 1));
+            out::text(stdout, "\x1b[r");
+            out::text(stdout, "\x1b[2J" + pos(1, 1));
+            g_drawn_top = 0;
+            g_drawn_rows = 0;
             return;
         }
         g_visible++;
     }
 }
 
-// Курсор в последнюю строку scroll-региона и вывод строки лога.
-void log_line(const std::string& line) {
-    out::text(stdout, pos(scroll_bottom(), 1));
-    out::text(stdout, line);
+// Курсор в последнюю строку scroll-региона и вывод строк лога. Многострочный
+// текст разбивается на строки; каждая строка стирается и обрезается до ширины
+// окна (длинная строка не должна переноситься в зону блока статуса), после
+// чего регион прокручивается.
+void log_line(const std::string& text) {
+    size_t start = 0;
+    while (start <= text.size()) {
+        size_t end = text.find('\n', start);
+        std::string line =
+            text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        out::text(stdout, pos(scroll_bottom(), 1));
+        out::text(stdout, "\x1b[2K");
+        out::text(stdout, truncate_tail(u2w(line), (size_t)g_width));
+        if (end == std::string::npos) break;
+        out::text(stdout, "\r\n");
+        start = end + 1;
+    }
 }
 
 }  // namespace
@@ -271,6 +327,14 @@ void init(size_t total_files, bool no_status) {
     }
 
     g_interactive = true;
+
+    // Весь псевдографический интерфейс живёт в альтернативном буфере экрана:
+    // исходный экран (с командной строкой и прежним выводом) сохраняется
+    // и восстанавливается в shutdown() — как у mc/opencode.
+    out::text(stdout, "\x1b[?1049h");
+    out::text(stdout, "\x1b[2J" + pos(1, 1));
+    g_drawn_top = 0;
+    g_drawn_rows = 0;
 }
 
 bool interactive() { return g_interactive; }
@@ -372,14 +436,12 @@ void end_file(size_t idx, const std::string& label, const std::string& winner, d
 void shutdown() {
     std::lock_guard<std::mutex> lk(g_m);
     if (!g_interactive) return;
+    out::text(stdout, "\x1b[0m");
     if (g_size_valid && !g_overflow) {
-        out::text(stdout, "\x1b[0m");
-        out::text(stdout, "\x1b[r");                       // весь экран снова скроллится
-        out::text(stdout, pos(g_height, 1));               // курсор вниз
-        out::text(stdout, "\r\n");
-    } else {
-        out::text(stdout, "\x1b[0m\n");
+        out::text(stdout, "\x1b[r");      // весь экран снова скроллится
+        out::text(stdout, "\x1b[2J");     // очистить альтернативный буфер
     }
+    out::text(stdout, "\x1b[?1049l");     // вернуться к исходному экрану
     if (g_orig_mode_valid) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (h != INVALID_HANDLE_VALUE && h != nullptr) SetConsoleMode(h, g_orig_mode);
@@ -387,6 +449,8 @@ void shutdown() {
     g_interactive = false;
     g_visible = 0;
     g_overflow = false;
+    g_drawn_top = 0;
+    g_drawn_rows = 0;
 }
 
 }  // namespace status

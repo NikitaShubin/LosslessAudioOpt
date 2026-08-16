@@ -96,7 +96,32 @@ bool mkdirs(const std::string& p) {
 
 bool remove_file(const std::string& p) {
     std::error_code ec;
-    return fs::remove(fs::u8path(p), ec) && !ec;
+    fs::remove(fs::u8path(p), ec);
+    if (!ec) return true;
+    // Антивирус/индексатор могут короткое время удерживать свежезаписанный
+    // файл (ERROR_SHARING_VIOLATION); повторяем с нарастающей паузой.
+    for (int attempt = 0; attempt < 6; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150 * (attempt + 1)));
+        ec.clear();
+        fs::remove(fs::u8path(p), ec);
+        if (!ec) return true;
+    }
+    return false;
+}
+
+// Перекодирует ANSI-байты (кодовая страница cp) в UTF-8; пустая строка при ошибке.
+std::string ansi_to_utf8(const std::string& s, UINT cp) {
+    std::wstring w = utf8_to_cp(s, cp);
+    return w.empty() ? std::string() : utf8_from_cp(w, CP_UTF8);
+}
+
+std::string ec_text(const std::error_code& ec) {
+    if (!ec) return {};
+    std::string m = ec.message();
+    if (m.empty()) return m;
+    std::string conv = ansi_to_utf8(m, GetACP());
+    if (!conv.empty()) return conv;
+    return sanitize_utf8(m);
 }
 
 uint64_t file_size(const std::string& p) {
@@ -148,13 +173,19 @@ ReplaceResult replace_file(const std::string& original, const std::string& tmp,
     ReplaceResult res;
     auto rename_retry = [](const std::string& from, const std::string& to) -> std::string {
         std::error_code ec;
-        for (int attempt = 0; attempt < 10; attempt++) {
+        // Внешний процесс (обычно антивирус real-time scan) может удерживать
+        // свежезаписанный файл несколько секунд — ретраи с нарастающей паузой
+        // суммарно ~12 с, иначе rename срывается с ERROR_SHARING_VIOLATION.
+        for (int attempt = 0; attempt < 15; attempt++) {
             ec.clear();
             fs::rename(fs::u8path(from), fs::u8path(to), ec);
             if (!ec) return {};
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (attempt < 8)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+            else
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
-        return ec.message();
+        return ec_text(ec);
     };
 
     // Зачищаем свой же backup от прерванного предыдущего запуска.
