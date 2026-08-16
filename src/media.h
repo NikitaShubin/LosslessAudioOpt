@@ -44,8 +44,9 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
 std::string find_ffprobe();
 std::string find_ffmpeg();
 
-// Сравнение PCM-данных двух WAV-файлов (по содержимому data-чанка, заголовки
-// игнорируются). Возвращает true при побитовом совпадении; err — текст ошибки.
-bool wav_pcm_equal(const std::string& a, const std::string& b, std::string* err);
+// Потоковое сравнение PCM-данных двух WAV-файлов (по содержимому data-чанка,
+// заголовки игнорируются). Возвращает true при побитовом совпадении; err —
+// текст ошибки. Файлы читаются блоками, целиком в память не загружаются.
+bool wav_data_compare(const std::string& a, const std::string& b, std::string* err);
 
 }  // namespace media

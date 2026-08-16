@@ -144,7 +144,7 @@ bool copy_file(const std::string& src, const std::string& dst) {
 }
 
 ReplaceResult replace_file(const std::string& original, const std::string& tmp,
-                           const std::string& backup) {
+                           const std::string& backup, const std::string& final_name) {
     ReplaceResult res;
     auto rename_retry = [](const std::string& from, const std::string& to) -> std::string {
         std::error_code ec;
@@ -161,13 +161,15 @@ ReplaceResult replace_file(const std::string& original, const std::string& tmp,
     std::error_code ec;
     fs::remove(fs::u8path(backup), ec);
 
+    const std::string target = final_name.empty() ? original : final_name;
+
     std::string err = rename_retry(original, backup);
     if (!err.empty()) {
         res.error = "could not move the original to " + base_name(backup) + ": " + err;
         return res;
     }
 
-    err = rename_retry(tmp, original);
+    err = rename_retry(tmp, target);
     if (!err.empty()) {
         std::string rb = rename_retry(backup, original);
         if (!rb.empty()) {

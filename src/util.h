@@ -45,8 +45,13 @@ struct ReplaceResult {
 // на место original (fs::rename с повторами — антивирус/индексатор могут
 // короткое время держать файл). При сбое второго шага выполняется rollback
 // (backup возвращается в original). original и tmp должны лежать на одном томе.
+// Если final_name задан (не пуст), tmp переносится под этим именем — это смена
+// имени/расширения файла (например src.flac -> src.tta); имя final_name не должно
+// совпадать с существующим файлом. При final_name == original поведение —
+// замена содержимого на месте.
 ReplaceResult replace_file(const std::string& original, const std::string& tmp,
-                           const std::string& backup);
+                           const std::string& backup,
+                           const std::string& final_name = std::string());
 
 // Свободное место на диске, содержащем путь (байты; 0 при ошибке).
 // Используется для адаптивного лимита параллелизма (бюджет tmp).
