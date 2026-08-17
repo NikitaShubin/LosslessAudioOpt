@@ -16,6 +16,23 @@
 
 namespace {
 
+volatile LONG g_ctrl_count = 0;
+
+// Обработчик Ctrl+C/Ctrl+Break. Первое нажатие — аккуратная остановка:
+// proc::cancel() останавливает воркеры и завершает текущие кодеры, программа
+// сама завершится с кодом 130. Второе нажатие — принудительный выход.
+BOOL WINAPI ctrl_handler(DWORD type) {
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
+        if (InterlockedIncrement(&g_ctrl_count) == 1) {
+            proc::cancel();
+        } else {
+            ExitProcess(130);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
 std::vector<std::string> wide_argv() {
     int argc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -278,6 +295,7 @@ int cmd_restore(const std::vector<std::string>& args) {
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+    SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
     try {
         auto args = wide_argv();
