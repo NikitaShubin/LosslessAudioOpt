@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "out.h"
@@ -37,9 +39,22 @@ size_t g_total = 0;
 std::vector<Row> g_rows;   // индекс = порядковый номер файла
 size_t g_visible = 0;      // сколько строк статуса занимает блок (растёт к низу)
 bool g_overflow = false;   // блок заполнил почти весь экран — обычный построчный вывод
-std::chrono::steady_clock::time_point g_last;
+bool g_overflow_handled = false;  // сброс переполнения уже выполнен (см. render_pass)
 DWORD g_orig_mode = 0;
 bool g_orig_mode_valid = false;
+
+// Отдельный поток отрисовки: воркеры только меняют состояние и будят его.
+// Раньше каждый begin_file вызывал redraw_all_locked() синхронно в воркере,
+// и стартовый рывок N файлов превращался в N*(N+1)/2 перерисовок блока,
+// блокируя обработку на десятки секунд.
+std::thread g_render_thread;
+std::condition_variable g_cv;
+bool g_render_stop = false;
+bool g_pending = false;            // есть накопленная работа для потока отрисовки
+std::vector<bool> g_dirty;         // какие строки нужно перерисовать
+std::vector<size_t> g_pending_ensure;  // файлы, которые нужно ввести в блок
+std::vector<std::string> g_pending_log;  // строки лога, ожидающие вывода
+bool g_block_grew = false;         // блок вырос — нужна полная перерисовка
 
 int g_width = 80;
 int g_height = 25;
@@ -52,7 +67,14 @@ bool g_size_forced = false;  // размер задан через LLAO_STATUS_S
 int g_drawn_top = 0;
 size_t g_drawn_rows = 0;
 
-constexpr std::chrono::milliseconds kTickMin(100);
+// Пауза для сбора пачки обновлений: воркеры будят поток отрисовки, он ждёт
+// ещё kDebounce, чтобы нарисовать всё разом (а не по одному тику на файл).
+constexpr std::chrono::milliseconds kDebounce(50);
+
+// Период опроса размера окна. Ресайз замечается и без обновлений от воркеров:
+// иначе, пока нет тиков прогресса (идёт долгий вариант), изменение размера
+// окна не перерисовывало бы статусбар до следующего обновления.
+constexpr std::chrono::milliseconds kResizePoll(200);
 
 std::wstring u2w(const std::string& s) { return util::u2w(s); }
 std::string w2u(const std::wstring& s) { return util::w2u(s); }
@@ -156,8 +178,6 @@ void set_region() {
 // Обновляет размер окна консоли. Возвращает true, если размер изменился
 // (или изменилось состояние overflow). Размер, заданный через LLAO_STATUS_SIZE,
 // не обновляется.
-void redraw_all_locked();  // определена ниже, нужна refresh_and_resize_locked()
-
 bool refresh_size_locked() {
     if (g_size_forced) return false;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -170,24 +190,16 @@ bool refresh_size_locked() {
     if (w == g_width && hh == g_height) return false;
     g_width = w;
     g_height = hh;
-    if ((int)g_visible >= g_height - 1) g_overflow = true;
-    return true;
-}
-
-// Проверяет размер окна; при изменении — полностью перерисовывает блок
-// (или переводит в обычный построчный вывод, если блок не влезает).
-bool refresh_and_resize_locked() {
-    if (!refresh_size_locked()) return false;
-    if (g_overflow) {
-        // Блок перестал помещаться — сбрасываем scroll-регион на весь экран
-        // (иначе \x1b[2J очистит только старый регион) и полностью очищаемся.
-        out::text(stdout, "\x1b[0m" + pos(1, 1));
-        out::text(stdout, "\x1b[r");
-        out::text(stdout, "\x1b[2J" + pos(1, 1));
-        g_drawn_top = 0;
-        g_drawn_rows = 0;
+    if ((int)g_visible >= g_height - 1) {
+        g_overflow = true;
+        g_overflow_handled = false;
     } else {
-        redraw_all_locked();
+        if (g_overflow) {
+            // Окно снова выросло и блок помещается — возвращаем статусбар
+            // (иначе после переполнения он бы не появлялся даже при развороте).
+            g_overflow = false;
+        }
+        g_block_grew = true;  // новые размеры — все строки пересчитать
     }
     return true;
 }
@@ -223,7 +235,6 @@ void redraw_all_locked() {
     out::text(stdout, pos(scroll_bottom(), 1));
     g_drawn_top = top;
     g_drawn_rows = g_visible;
-    g_last = std::chrono::steady_clock::now();
 }
 
 // Перерисовка одной строки блока (обычный тик прогресса) + курсор в зону лога.
@@ -236,21 +247,110 @@ void draw_row_locked(size_t idx) {
     line += r.finished ? finished_row(r, idx, g_width) : strip_row(r, idx, g_width);
     line += pos(scroll_bottom(), 1);
     out::text(stdout, line);
-    g_last = std::chrono::steady_clock::now();
 }
 
-// Гарантирует, что файл idx попал в блок (строки видны в порядке файлов).
-// Пропущенные файлы приходят сразу в end_file без begin_file.
-void ensure_visible_locked(size_t idx) {
-    while (g_visible <= idx) {
-        if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
-            g_overflow = true;
-            // Полный сброс: регион, цвета, очистка (как в refresh_and_resize_locked).
+// Вывод накопленных строк лога в зону прокрутки над блоком.
+void log_line(const std::string& text);   // определена ниже
+void ensure_visible_locked(size_t idx);   // определена ниже
+
+void flush_log_locked() {
+    for (auto& line : g_pending_log) log_line(line);
+    g_pending_log.clear();
+}
+
+// Один проход отрисовки (вызывается только из потока отрисовки под g_m):
+// применяет накопленные изменения минимальным числом операций записи.
+void render_pass_locked() {
+    // Ресайз окна обрабатывается только здесь: GetConsoleScreenBufferInfo
+    // не вызывается в воркерах.
+    refresh_size_locked();
+
+    if (!g_size_valid) {
+        for (auto& line : g_pending_log) out::text(stdout, line);
+        g_pending_log.clear();
+        g_pending_ensure.clear();
+        std::fill(g_dirty.begin(), g_dirty.end(), false);
+        g_block_grew = false;
+        return;
+    }
+
+    // Новые файлы должны попасть в блок (строки добавляются к низу).
+    if (!g_overflow) {
+        for (size_t idx : g_pending_ensure) {
+            ensure_visible_locked(idx);
+            if (g_overflow) break;
+        }
+    }
+
+    if (g_overflow) {
+        // Блок не помещается — обычный построчный вывод.
+        if (!g_overflow_handled) {
+            // Сброс scroll-региона на весь экран (иначе \x1b[2J очистит
+            // только старый регион) и полная очистка.
             out::text(stdout, "\x1b[0m" + pos(1, 1));
             out::text(stdout, "\x1b[r");
             out::text(stdout, "\x1b[2J" + pos(1, 1));
             g_drawn_top = 0;
             g_drawn_rows = 0;
+            g_overflow_handled = true;
+        }
+        for (size_t idx : g_pending_ensure)
+            out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
+        for (auto& line : g_pending_log) out::text(stdout, line);
+        g_pending_ensure.clear();
+        g_pending_log.clear();
+        std::fill(g_dirty.begin(), g_dirty.end(), false);
+        g_block_grew = false;
+        return;
+    }
+
+    if (g_block_grew) {
+        redraw_all_locked();
+        g_block_grew = false;
+        std::fill(g_dirty.begin(), g_dirty.end(), false);
+        g_pending_ensure.clear();
+        flush_log_locked();
+        return;
+    }
+
+    // Обычный тик: перерисовываем только изменённые строки.
+    for (size_t i = 0; i < g_rows.size(); i++) {
+        if (g_dirty[i]) draw_row_locked(i);
+    }
+    std::fill(g_dirty.begin(), g_dirty.end(), false);
+    g_pending_ensure.clear();
+    flush_log_locked();
+}
+
+// Поток отрисовки. Спящий до появления работы; после пробуждения ждёт ещё
+// kDebounce, чтобы собрать пачку обновлений (например, 11 begin_file подряд)
+// в одну отрисовку вместо синхронных перерисовок в воркерах. Параллельно с
+// ожиданием работы каждые kResizePoll опрашивает размер окна: ресайз
+// перерисовывает статусбар сразу, не дожидаясь следующего тика прогресса.
+void render_loop() {
+    std::unique_lock<std::mutex> lk(g_m);
+    while (true) {
+        g_cv.wait_for(lk, kResizePoll, [&] { return g_render_stop || g_pending; });
+        if (g_render_stop) break;
+        if (!g_pending && refresh_size_locked()) g_pending = true;
+        if (!g_pending) continue;
+        g_cv.wait_for(lk, kDebounce);  // собрать пачку
+        if (g_render_stop) break;
+        render_pass_locked();
+        g_pending = false;
+    }
+    // Финальный сброс накопленного перед восстановлением буфера экрана.
+    render_pass_locked();
+}
+
+// Гарантирует, что файл idx попал в блок (строки видны в порядке файлов).
+// Пропущенные файлы приходят сразу в end_file без begin_file. Выполняется
+// только в потоке отрисовки; сам вывод при переполнении делает render_pass.
+void ensure_visible_locked(size_t idx) {
+    while (g_visible <= idx) {
+        if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
+            g_overflow = true;
+            g_overflow_handled = false;
             return;
         }
         g_visible++;
@@ -286,6 +386,8 @@ void init(size_t total_files, bool no_status) {
     g_interactive = false;
     g_visible = 0;
     g_overflow = false;
+    g_overflow_handled = false;
+    g_block_grew = false;
     g_width = 80;
     g_height = 25;
     g_size_valid = false;
@@ -335,6 +437,12 @@ void init(size_t total_files, bool no_status) {
     out::text(stdout, "\x1b[2J" + pos(1, 1));
     g_drawn_top = 0;
     g_drawn_rows = 0;
+
+    // Вся отрисовка — в отдельном потоке; воркеры его только будят.
+    g_dirty.assign(g_total, false);
+    g_render_stop = false;
+    g_pending = false;
+    g_render_thread = std::thread(render_loop);
 }
 
 bool interactive() { return g_interactive; }
@@ -345,16 +453,9 @@ void log(const std::string& line) {
         return;
     }
     std::lock_guard<std::mutex> lk(g_m);
-    if (!g_size_valid || g_overflow) {
-        out::text(stdout, line);
-        return;
-    }
-    refresh_and_resize_locked();
-    if (g_overflow) {
-        out::text(stdout, line);
-        return;
-    }
-    log_line(line);
+    g_pending_log.push_back(line);
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 void error(const std::string& line) {
@@ -363,16 +464,9 @@ void error(const std::string& line) {
         return;
     }
     std::lock_guard<std::mutex> lk(g_m);
-    if (!g_size_valid || g_overflow) {
-        out::text(stderr, line);
-        return;
-    }
-    refresh_and_resize_locked();
-    if (g_overflow) {
-        out::text(stderr, line);
-        return;
-    }
-    log_line(line);
+    g_pending_log.push_back(line);
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
@@ -383,18 +477,11 @@ void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
     g_rows[idx].total = total_tasks;
     g_rows[idx].done = 0;
     g_rows[idx].finished = false;
-    if (!g_size_valid || g_overflow) return;
-    refresh_and_resize_locked();
-    if (g_overflow) {
-        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
-        return;
-    }
-    ensure_visible_locked(idx);
-    if (g_overflow) {
-        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
-        return;
-    }
-    redraw_all_locked();  // блок вырос — перерисовываем целиком
+    g_dirty[idx] = true;
+    g_pending_ensure.push_back(idx);
+    g_block_grew = true;
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 void tick(size_t idx, size_t done) {
@@ -402,13 +489,10 @@ void tick(size_t idx, size_t done) {
     std::lock_guard<std::mutex> lk(g_m);
     if (idx >= g_total) return;
     if (g_rows[idx].label.empty()) return;
-    if (!g_size_valid || g_overflow) return;
     g_rows[idx].done = done;
-    refresh_and_resize_locked();  // при resize уже полностью перерисован
-    if (g_overflow) return;
-    auto now = std::chrono::steady_clock::now();
-    if (now - g_last < kTickMin) return;
-    draw_row_locked(idx);
+    g_dirty[idx] = true;
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 void end_file(size_t idx, const std::string& label, const std::string& winner, double pct) {
@@ -419,23 +503,22 @@ void end_file(size_t idx, const std::string& label, const std::string& winner, d
     g_rows[idx].finished = true;
     g_rows[idx].winner = winner;
     g_rows[idx].pct = pct;
-    if (!g_size_valid || g_overflow) return;
-    refresh_and_resize_locked();
-    if (g_overflow) {
-        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
-        return;
-    }
-    ensure_visible_locked(idx);
-    if (g_overflow) {
-        out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
-        return;
-    }
-    draw_row_locked(idx);
+    g_dirty[idx] = true;
+    g_pending_ensure.push_back(idx);
+    g_block_grew = true;
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 void shutdown() {
-    std::lock_guard<std::mutex> lk(g_m);
+    std::unique_lock<std::mutex> lk(g_m);
     if (!g_interactive) return;
+    g_render_stop = true;
+    g_cv.notify_all();
+    lk.unlock();
+    // Ждём, пока поток отрисовки сбросит накопленный лог и завершится.
+    if (g_render_thread.joinable()) g_render_thread.join();
+    lk.lock();
     out::text(stdout, "\x1b[0m");
     if (g_size_valid && !g_overflow) {
         out::text(stdout, "\x1b[r");      // весь экран снова скроллится
