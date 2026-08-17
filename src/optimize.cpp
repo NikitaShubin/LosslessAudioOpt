@@ -445,14 +445,16 @@ struct Runner {
     }
 
     // Prep следующего файла: файлы готовятся строго по порядку (next_prep++),
-    // параллельно — не больше числа потоков и не больше оставшихся файлов
-    // (формула min(jobs, num_tracks)). Prep идёт в фоне, чтобы ядра не простаивали
-    // в ожидании распаковки; выпуск вариантов — всегда по приоритету файлов.
+    // параллельно — не больше числа потоков (window). Распаковка начинается
+    // сразу, как только окно освобождается, а не привязана к числу ещё не
+    // запущенных файлов: при window >= n_files все файлы готовятся одновременно.
+    // Prep идёт в фоне, чтобы ядра не простаивали в ожидании распаковки;
+    // выпуск вариантов — всегда по приоритету файлов.
     bool prep_allowed_locked() const {
         if (abort.load()) return false;
+        if (proc::cancelled()) return false;
         if (next_prep >= n_files) return false;
         if (prep_active >= window) return false;
-        if (prep_active >= (int)(n_files - next_prep)) return false;
         return true;
     }
 
@@ -496,6 +498,7 @@ struct Runner {
         const Options& opts = *this->opts;
         const auto& fmts = *this->fmts;
 
+        if (proc::cancelled()) return;
         if (ffprobe.empty() || ffmpeg.empty()) {
             j.summary.path = j.path;
             j.summary.status = "error";
@@ -655,6 +658,8 @@ struct Runner {
         const config::Variant& v = f.variants[td.variant_idx];
         const Env& env = j.envs[f.id];
 
+        if (proc::cancelled()) return;
+
         std::string cand_name = j.tok + "_" + j.base_ne + "." + f.id + "." + v.id + "." +
                                 f.extension;
         std::string candidate = util::join_path(tmp, cand_name);
@@ -697,6 +702,10 @@ struct Runner {
         std::string verr = encode_candidate(j.ref_wav, candidate, v.args, env);
         if (verr.empty() && opts.verify == Verify::All)
             verr = validate_candidate(j.ref_wav, candidate, env);
+        if (proc::cancelled()) {
+            util::remove_file(candidate);
+            return;
+        }
         if (!verr.empty()) {
             util::remove_file(candidate);
             record_error(verr);
@@ -940,21 +949,28 @@ struct Runner {
                         util::ReplaceResult rr =
                             util::replace_file(j.path, tmp_name, bak_name, new_path);
                         if (!rr.ok) {
-                            if (!util::remove_file(tmp_name))
+                            // Замена сорвалась — это ошибка файла: считается в failed
+                            // и останавливает прогон (см. ниже, блок по status == "error").
+                            j.summary.status = "error";
+                            winner_text = "error";
+                            if (!util::remove_file(tmp_name)) {
                                 msg += i18n::fmt(
                                     "      ! could not remove the temporary candidate "
                                     "(%s); it was left in place\n",
                                     tmp_name.c_str());
+                            }
                             if (rr.original_lost) {
                                 msg += i18n::fmt(
                                     "      ! COULD NOT REPLACE the file; the original was NOT "
                                     "restored in place and is saved as %s (%s)\n",
                                     rr.backup.c_str(), rr.error.c_str());
                                 j.summary.detail = i18n::str("could not replace the file");
+                                j.summary.replacement_error = rr.error;
                             } else {
                                 msg += i18n::fmt("      ! could not replace the file (%s)\n",
                                                  rr.error.c_str());
                                 j.summary.detail = i18n::str("could not replace the file");
+                                j.summary.replacement_error = rr.error;
                             }
                         } else {
                             if (best.sidecar > 0) {
@@ -975,6 +991,10 @@ struct Runner {
                                 i18n::str("replaced in place: ") + best.format + "/" + best.variant;
                         }
                     } else {
+                        // Кандидата не удалось даже скопировать в папку файла —
+                        // это ошибка файла (см. блок по status == "error").
+                        j.summary.status = "error";
+                        winner_text = "error";
                         msg += i18n::str("      ! could not copy the candidate into the file folder\n");
                         j.summary.detail =
                             i18n::str("could not copy the candidate into the file folder");
@@ -993,6 +1013,7 @@ struct Runner {
                                    {"file", j.path},
                                    {"status", j.summary.status},
                                    {"replaced", j.summary.replaced},
+                                   {"replacement_error", j.summary.replacement_error},
                                    {"original", j.probe.size},
                                    {"best", best_cost},
                                    {"format", best.format},
@@ -1027,10 +1048,10 @@ struct Runner {
             {
                 std::unique_lock<std::mutex> lk(qm);
                 cv.wait_for(lk, std::chrono::milliseconds(50), [&] {
-                    return variant_pending_locked() || prep_allowed_locked() ||
-                           all_done_locked();
+                    return proc::cancelled() || variant_pending_locked() ||
+                           prep_allowed_locked() || all_done_locked();
                 });
-                if (all_done_locked()) break;
+                if (proc::cancelled() || all_done_locked()) break;
                 if (abort.load()) break;
                 if (!take_work_locked(&w)) continue;
             }
@@ -1042,6 +1063,7 @@ struct Runner {
                 } catch (const std::exception& exc) {
                     perr = exc.what();
                 }
+                if (proc::cancelled()) break;  // отмена — счётчики не трогаем, tmp почистит main
                 if (!perr.empty()) {
                     FileJob& j = jobs[w.idx];
                     std::lock_guard<std::mutex> jl(*j.m);
@@ -1067,7 +1089,7 @@ struct Runner {
                     cv.notify_all();
                 }
                 if (!finish_now) status::begin_file(w.idx, jobs[w.idx].base, n_tasks);
-                if (finish_now) finalize_file(jobs[w.idx]);
+                if (finish_now && !proc::cancelled()) finalize_file(jobs[w.idx]);
             } else {
                 std::string verr;
                 try {
@@ -1075,6 +1097,7 @@ struct Runner {
                 } catch (const std::exception& exc) {
                     verr = exc.what();
                 }
+                if (proc::cancelled()) break;  // отмена — счётчики не трогаем
                 bool last = false;
                 size_t done_n = 0;
                 {
@@ -1096,7 +1119,7 @@ struct Runner {
                     cv.notify_all();
                 }
                 status::tick(w.idx, done_n);
-                if (last) finalize_file(jobs[w.idx]);
+                if (last && !proc::cancelled()) finalize_file(jobs[w.idx]);
             }
         }
     }
@@ -1199,6 +1222,23 @@ int run(const Options& opts) {
 
     status::shutdown();
 
+    if (proc::cancelled()) {
+        out::print("%s", i18n::str("Interrupted by user\n").c_str());
+    }
+
+    // Сводка по файлам, которые не удалось заменить. Печатается после shutdown(),
+    // когда альтернативный буфер уже восстановлен — иначе текст пропадёт при
+    // прерывании/изменении размера окна.
+    {
+        bool any = false;
+        for (auto& j : r.jobs) {
+            if (j.summary.replacement_error.empty()) continue;
+            if (!any) out::print("%s", i18n::str("Replacement failed:\n").c_str());
+            out::print("  %s — %s\n", j.path.c_str(), j.summary.replacement_error.c_str());
+            any = true;
+        }
+    }
+
     // Убираем временные файлы (эталонные WAV и кандидаты).
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(fs::u8path(tmp), ec)) {
@@ -1223,6 +1263,8 @@ int run(const Options& opts) {
         }
         report::write_report(rp, summaries);
     }
+
+    if (proc::cancelled()) return 130;
 
     uint64_t t_orig = 0, t_best = 0;
     for (const auto& fs : summaries) {

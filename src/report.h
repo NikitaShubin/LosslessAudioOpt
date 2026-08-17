@@ -40,6 +40,7 @@ struct FileSummary {
     std::string status;   // ok | skip | error
     std::string detail;   // причина skip/error или строка о победителе
     bool replaced = false;
+    std::string replacement_error;  // текст ошибки замены на месте (если не удалась)
     uint64_t original = 0;
     uint64_t best = 0;
     double savings_pct = 0;
