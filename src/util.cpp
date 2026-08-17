@@ -4,7 +4,6 @@
 
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <system_error>
 #include <thread>
 
@@ -130,24 +129,59 @@ uint64_t file_size(const std::string& p) {
     return ec ? 0 : (uint64_t)sz;
 }
 
+namespace {
+// Открывает файл НЕнаследуемым дескриптором с FILE_SHARE_DELETE. CreateFileW без
+// SECURITY_ATTRIBUTES создаёт не-наследуемые хендлы, поэтому кодеки-потомки
+// (спавн с bInheritHandles=TRUE) не могут унаследовать наши файловые дескрипторы
+// и держать транзитные .llao-tmp. FILE_SHARE_DELETE дополнительно гарантирует,
+// что переименование/удаление не срывается даже если файл кто-то держит.
+HANDLE open_shared(const std::string& p, DWORD access, DWORD creation) {
+    return CreateFileW(util::u2w(p).c_str(), access,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       creation, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+}  // namespace
+
 std::vector<uint8_t> read_file(const std::string& p) {
     std::vector<uint8_t> data;
-    std::ifstream f(fs::u8path(p), std::ios::binary);
-    if (!f) return data;
-    f.seekg(0, std::ios::end);
-    std::streamoff len = f.tellg();
-    f.seekg(0, std::ios::beg);
-    if (len < 0) return data;
-    data.resize((size_t)len);
-    if (len > 0) f.read((char*)data.data(), len);
+    HANDLE h = open_shared(p, GENERIC_READ, OPEN_EXISTING);
+    if (h == INVALID_HANDLE_VALUE) return data;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0) {
+        CloseHandle(h);
+        return data;
+    }
+    data.resize((size_t)sz.QuadPart);
+    DWORD total = 0;
+    while (total < data.size()) {
+        DWORD rd = 0;
+        DWORD chunk = (DWORD)std::min<size_t>(data.size() - total, 0x7FFFFFFF);
+        if (!ReadFile(h, data.data() + total, chunk, &rd, nullptr) || rd == 0) {
+            data.clear();
+            break;
+        }
+        total += rd;
+    }
+    CloseHandle(h);
     return data;
 }
 
 bool write_file(const std::string& p, const std::vector<uint8_t>& data) {
-    std::ofstream f(fs::u8path(p), std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    if (!data.empty()) f.write((const char*)data.data(), (std::streamsize)data.size());
-    return f.good();
+    HANDLE h = open_shared(p, GENERIC_WRITE, CREATE_ALWAYS);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    DWORD total = 0;
+    while (total < data.size()) {
+        DWORD wr = 0;
+        DWORD chunk = (DWORD)std::min<size_t>(data.size() - total, 0x7FFFFFFF);
+        if (!WriteFile(h, data.data() + total, chunk, &wr, nullptr) || wr == 0) {
+            ok = false;
+            break;
+        }
+        total += wr;
+    }
+    if (!CloseHandle(h)) ok = false;
+    return ok;
 }
 
 std::string read_text(const std::string& p) {
@@ -156,16 +190,36 @@ std::string read_text(const std::string& p) {
 }
 
 bool write_text(const std::string& p, const std::string& s) {
-    std::ofstream f(fs::u8path(p), std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f.write(s.data(), (std::streamsize)s.size());
-    return f.good();
+    return write_file(p, std::vector<uint8_t>(s.begin(), s.end()));
 }
 
 bool copy_file(const std::string& src, const std::string& dst) {
-    std::error_code ec;
-    fs::copy_file(fs::u8path(src), fs::u8path(dst), fs::copy_options::overwrite_existing, ec);
-    return !ec;
+    HANDLE hs = open_shared(src, GENERIC_READ, OPEN_EXISTING);
+    if (hs == INVALID_HANDLE_VALUE) return false;
+    HANDLE hd = open_shared(dst, GENERIC_WRITE, CREATE_ALWAYS);
+    if (hd == INVALID_HANDLE_VALUE) {
+        CloseHandle(hs);
+        return false;
+    }
+    std::vector<char> buf(1 << 16);
+    bool ok = true;
+    for (;;) {
+        DWORD rd = 0;
+        if (!ReadFile(hs, buf.data(), (DWORD)buf.size(), &rd, nullptr) || rd == 0) break;
+        DWORD off = 0;
+        while (off < rd) {
+            DWORD wr = 0;
+            if (!WriteFile(hd, buf.data() + off, rd - off, &wr, nullptr) || wr == 0) {
+                ok = false;
+                break;
+            }
+            off += wr;
+        }
+        if (!ok) break;
+    }
+    CloseHandle(hs);
+    if (!CloseHandle(hd)) ok = false;
+    return ok;
 }
 
 ReplaceResult replace_file(const std::string& original, const std::string& tmp,
