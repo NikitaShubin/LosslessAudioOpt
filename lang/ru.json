@@ -215,5 +215,7 @@
     "no binary matching '%s' found in the archive": "в архиве не найден бинарник по шаблону '%s'",
     "expected options not found in the utility output: ": "в выводе утилиты не найдены ожидаемые опции: ",
     " — the config may be outdated": " — конфиг, возможно, устарел",
-    "MB": "МБ"
+    "MB": "МБ",
+    "Interrupted by user\n": "Прервано пользователем (Ctrl+C)\n",
+    "Replacement failed:\n": "Не удалось заменить файл:\n"
 }
