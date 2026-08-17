@@ -21,7 +21,8 @@ void init(size_t total_files, bool no_status);
 // true, если активен интерактивный статусбар.
 bool interactive();
 
-// Строки создаются на все файлы сразу; label — имя файла (без пути).
+// Строки создаются на все файлы сразу; label — имя файла, обычно путь
+// относительно заданного в параметрах корня (может содержать слэши).
 void begin_file(size_t idx, const std::string& label);
 
 // Файл взят в prep — помечается «активным» (за ним следует вьюпорт).
@@ -33,8 +34,9 @@ void set_tasks(size_t idx, size_t total);
 // Смена состояния варианта task_idx (см. TaskState).
 void task(size_t idx, size_t task_idx, TaskState st);
 
-// Файл обработан: полоса остаётся с финальными цветами сегментов.
-void end_file(size_t idx);
+// Файл обработан успешно: полоса остаётся с финальными цветами сегментов,
+// pct — процент выигрыша в сжатии (для отображения справа).
+void end_file(size_t idx, double pct);
 
 // Файл не конвертирован (skip): полоса целиком тускло-серая.
 void mark_skip(size_t idx);

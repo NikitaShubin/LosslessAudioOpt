@@ -23,13 +23,16 @@ namespace {
 // ---------------------------------------------------------------------------
 // Палитра (индексы ANSI 256-палитры)
 // ---------------------------------------------------------------------------
-constexpr uint8_t kPendingBg = 236;  // тёмно-серый — задача ждёт
-constexpr uint8_t kRunningBg = 44;   // голубой — задача выполняется сейчас
-constexpr uint8_t kOkBg = 28;        // зелёный — выполнено успешно
-constexpr uint8_t kFailedBg = 196;   // красный — ошибка
-constexpr uint8_t kSkipBg = 240;     // средне-серый — файл не конвертирован
-constexpr uint8_t kTextFg = 15;      // ярко-белый текст на полосе
-constexpr uint8_t kFooterFg = 7;     // обычный белый текст футера
+constexpr uint8_t kPendingBg = 236;    // тёмно-серый — задача ждёт
+constexpr uint8_t kRunningBg = 208;    // оранжевый — задача выполняется сейчас
+constexpr uint8_t kOkBg = 27;          // синий — задача выполнена успешно
+constexpr uint8_t kFailedBg = 196;     // красный — ошибка
+constexpr uint8_t kSkipBg = 240;       // средне-серый — файл не конвертирован
+constexpr uint8_t kDoneBg = 28;        // зелёный — файл обработан успешно (вся строка)
+constexpr uint8_t kPreppingBg = 130;   // тёмно-оранжевый — файл распаковывается (вся строка)
+constexpr uint8_t kNotStartedBg = 0;   // чёрный — файл ещё не начат
+constexpr uint8_t kTextFg = 15;        // ярко-белый текст на полосе
+constexpr uint8_t kFooterFg = 7;       // обычный белый текст футера
 constexpr uint8_t kFooterBg = 0;
 
 // Состояние сегмента полосы (одного варианта).
@@ -38,11 +41,16 @@ enum class Seg { Pending, Running, Ok, Failed };
 // Целое-состояние строки, заменяющее раскраску сегментов.
 enum class Whole { None, Skip, Error };
 
+// Режим полосы: Progress — сегменты упорядочены по состоянию (слева синие
+// готовые, затем оранжевый активный, красные ошибки, серые ожидающие), так
+// что полоса растёт слева направо; Mosaic — исходная позиционная раскраска.
+enum class BarMode { Progress, Mosaic };
+
 // Одна строка статуса = один файл. Во время обработки строка — полоса на всю
-// ширину консоли, разбитая на сегменты (по одному на вариант): зелёный —
-// выполнено, голубой — выполняется сейчас, красный — ошибка, тёмно-серый —
-// ожидание. По завершении полоса сохраняет финальные цвета; для skip/error
-// вся полоса красится целиком.
+// ширину консоли, разбитая на сегменты (по одному на вариант): синий —
+// выполнено, оранжевый — выполняется сейчас, красный — ошибка, тёмно-серый —
+// ожидание. По завершении строка красится целиком: зелёный — успех, серый —
+// skip, красный — ошибка. Во время prep — тёмно-оранжевая, до prep — чёрная.
 struct Row {
     std::string label;
     bool has_tasks = false;
@@ -51,6 +59,8 @@ struct Row {
     bool done = false;
     Whole whole = Whole::None;
     bool active = false;  // prep или есть Running-задача (для автоследования)
+    bool prepping = false;  // файл находится в фазе подготовки (распаковки)
+    double win_pct = 0.0;   // процент выигрыша в сжатии готового файла
 };
 
 std::mutex g_m;
@@ -81,6 +91,13 @@ bool g_size_forced = false;  // размер задан через LLAO_STATUS_S
 // Любая ручная прокрутка (клавиатура/мышь) отключает автоследование g_follow.
 int g_scroll = 0;
 bool g_follow = true;  // следовать за активной полосой
+
+// Горизонтальный сдвиг строк списка (←/→): смещает видимую часть длинных имён
+// файлов. Не влияет на автоследование.
+int g_hscroll = 0;
+
+// Режим полосы: прогрессбар по умолчанию, Tab переключает на мозаику.
+BarMode g_mode = BarMode::Progress;
 
 DWORD g_orig_mode = 0;
 bool g_orig_mode_valid = false;
@@ -116,6 +133,27 @@ std::wstring fit(const std::wstring& w, size_t width) {
     return w.substr(0, width);
 }
 
+// Обрезка строки с учётом горизонтального сдвига hscroll. Сдвиг 0 — голова
+// + многоточие в конце; сдвиг > 0 — многоточие в начале (путь неполный) и
+// либо весь хвост, либо хвост + многоточие в конце.
+std::wstring fit_scroll(const std::wstring& w, size_t width, int hscroll) {
+    if (width == 0) return L"";
+    if (w.size() <= width) return w;
+    if (width < 3) return w.substr(0, width);
+    if (hscroll <= 0) return w.substr(0, width - 3) + L"...";
+    size_t start = (size_t)hscroll;
+    if (start > w.size()) start = w.size();
+    std::wstring out = L"...";
+    size_t avail = width - 3;  // место под ведущее многоточие
+    if (w.size() - start <= avail) {
+        out += w.substr(start);
+        return out;
+    }
+    out += w.substr(start, avail);
+    out += L"...";
+    return out;
+}
+
 uint8_t seg_bg(Seg s) {
     switch (s) {
         case Seg::Running: return kRunningBg;
@@ -125,40 +163,83 @@ uint8_t seg_bg(Seg s) {
     }
 }
 
-// Цвет фона колонки col полосы строки r (ширина полосы W). Сегмент,
-// покрывающий колонку, вычисляется пропорционально: задача t занимает
-// колонки [t*W/total, (t+1)*W/total). Если сегментов больше ширины — часть
-// задач не получит колонки (это ок: полоса остаётся читаемой).
+// Цвет фона колонки col полосы строки r (ширина полосы W).
+// В режиме Mosaic сегмент, покрывающий колонку, вычисляется пропорционально:
+// задача t занимает колонки [t*W/total, (t+1)*W/total). В режиме Progress
+// полоса упорядочена по состоянию: синие (готово) слева, затем оранжевый
+// (активная), красные (ошибки), серые (ожидание) — так полоса растёт слева
+// направо. Если сегментов больше ширины — часть задач не получит колонки
+// (это ок: полоса остаётся читаемой).
 uint8_t col_bg(const Row& r, size_t col, size_t W) {
     switch (r.whole) {
         case Whole::Skip: return kSkipBg;
         case Whole::Error: return kFailedBg;
         case Whole::None:
-            if (!r.has_tasks || r.total == 0) return kPendingBg;
+            if (r.done) return kDoneBg;
+            if (r.prepping) return kPreppingBg;
+            if (!r.has_tasks || r.total == 0) return kNotStartedBg;
             {
+                if (g_mode == BarMode::Mosaic) {
+                    size_t t = (size_t)((uint64_t)col * r.total / W);
+                    if (t >= r.segs.size()) t = r.segs.size() - 1;
+                    return seg_bg(r.segs[t]);
+                }
+                // Progress: упорядоченная полоса.
+                size_t n_ok = 0, n_run = 0, n_fail = 0;
+                for (Seg s : r.segs) {
+                    if (s == Seg::Ok) n_ok++;
+                    else if (s == Seg::Running) n_run++;
+                    else if (s == Seg::Failed) n_fail++;
+                }
                 size_t t = (size_t)((uint64_t)col * r.total / W);
-                if (t >= r.segs.size()) t = r.segs.size() - 1;
-                return seg_bg(r.segs[t]);
+                if (t < n_ok) return kOkBg;
+                t -= n_ok;
+                if (t < n_run) return kRunningBg;
+                t -= n_run;
+                if (t < n_fail) return kFailedBg;
+                return kPendingBg;
             }
     }
     return kPendingBg;
 }
 
-// Текст строки: счётчик, имя файла и процент выполнения во время обработки.
-std::wstring row_text(const Row& r, size_t idx) {
-    std::string s = counter(idx) + " " + r.label;
+// Процент строки (см. определение ниже).
+std::wstring row_pct(const Row& r);
+
+// Текст строки: счётчик + имя файла (с учётом горизонтального сдвига). Процент
+// формируется отдельно (row_pct) и выравнивается по правому краю в paint_row.
+std::wstring row_label(const Row& r, size_t idx) {
+    std::wstring s = u2w(counter(idx)) + L" ";
+    int W = g_width;
+    std::wstring pct = row_pct(r);
+    int left_w = W - (int)pct.size();
+    if (left_w <= 0) left_w = W;
+    int label_w = left_w - (int)s.size();
+    if (label_w > 0) s += fit_scroll(u2w(r.label), (size_t)label_w, g_hscroll);
+    else s = fit(s, (size_t)left_w);
+    return s;
+}
+
+// Процент строки (без ведущего пробела): ход выполнения во время обработки,
+// у готового файла — выигрыш в сжатии; пусто для не-начатых/skip/error.
+std::wstring row_pct(const Row& r) {
+    if (r.done && r.whole == Whole::None) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%5.1f%%", r.win_pct);
+        return u2w(buf);
+    }
     if (r.has_tasks && !r.done && r.total > 0) {
         size_t finished = 0;
         for (Seg sg : r.segs)
             if (sg == Seg::Ok || sg == Seg::Failed) finished++;
         char buf[32];
-        snprintf(buf, sizeof(buf), "  %5.1f%%", 100.0 * (double)finished / (double)r.total);
-        s += buf;
+        snprintf(buf, sizeof(buf), "%5.1f%%", 100.0 * (double)finished / (double)r.total);
+        return u2w(buf);
     }
-    return u2w(s);
+    return L"";
 }
 
-// Рисует строку файла idx на экранной строке y.
+// Рисует строку файла idx на экранной строке y. Процент — строго у правого края.
 void paint_row(size_t idx, int y) {
     const Row& r = g_rows[idx];
     int W = g_width;
@@ -166,9 +247,25 @@ void paint_row(size_t idx, int y) {
         screen::Cell cell = {L' ', kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
         g_screen.cell(y, c) = cell;
     }
-    std::wstring txt = fit(row_text(r, idx), (size_t)W);
-    for (int c = 0; c < (int)txt.size() && c < W; c++) {
-        g_screen.cell(y, c) = {txt[(size_t)c], kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
+    std::wstring label = row_label(r, idx);
+    std::wstring pct = row_pct(r);
+    int pct_w = (int)pct.size();
+    int left_w = W - pct_w;
+    if (left_w <= 0) {
+        left_w = W;
+        pct_w = 0;
+    }
+    int lw = (int)label.size();
+    if (lw > left_w) lw = left_w;
+    for (int c = 0; c < lw; c++) {
+        g_screen.cell(y, c) = {label[(size_t)c], kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
+    }
+    if (pct_w > 0) {
+        int x0 = W - pct_w;
+        for (int c = 0; c < pct_w; c++) {
+            g_screen.cell(y, x0 + c) = {pct[(size_t)c], kTextFg,
+                                        col_bg(r, (size_t)(x0 + c), (size_t)W), true};
+        }
     }
 }
 
@@ -211,7 +308,10 @@ void compose_frame() {
     if (g_follow) {
         foot += " · " + i18n::str("follow");
     } else {
-        foot += " · " + i18n::str("manual") + " · " + i18n::str("arrow keys scroll, F — follow");
+        foot += " · " + i18n::str("manual");
+        // Подсказка по навигации полезна только если список не помещается в окно.
+        if (g_total > (size_t)vis && vis > 0)
+            foot += " · " + i18n::str("arrow keys scroll, F — follow");
     }
     std::wstring wf = u2w(foot);
     for (int c = 0; c < (int)wf.size() && c < g_width; c++)
@@ -274,8 +374,13 @@ bool handle_input_locked() {
                 case VK_NEXT: g_scroll += vis; g_follow = false; break;
                 case VK_HOME: g_scroll = 0; g_follow = false; break;
                 case VK_END: g_scroll = max_scroll; g_follow = false; break;
+                case VK_LEFT: g_hscroll--; break;
+                case VK_RIGHT: g_hscroll++; break;
                 case VK_SPACE:
                 case 'F': g_follow = !g_follow; break;
+                case VK_TAB:
+                    g_mode = g_mode == BarMode::Progress ? BarMode::Mosaic : BarMode::Progress;
+                    break;
                 default: continue;
             }
             changed = true;
@@ -290,6 +395,8 @@ bool handle_input_locked() {
         }
     }
     clamp_scroll(g_scroll);
+    if (g_hscroll < 0) g_hscroll = 0;
+    if (g_hscroll > 4096) g_hscroll = 4096;
     return changed;
 }
 
@@ -328,6 +435,8 @@ void init(size_t total_files, bool no_status) {
     g_interactive = false;
     g_scroll = 0;
     g_follow = true;
+    g_hscroll = 0;
+    g_mode = BarMode::Progress;
     g_width = 80;
     g_height = 25;
     g_size_forced = false;
@@ -432,6 +541,8 @@ void begin_file(size_t idx, const std::string& label) {
     r.done = false;
     r.whole = Whole::None;
     r.active = false;
+    r.prepping = false;
+    r.win_pct = 0.0;
     wake();
 }
 
@@ -440,6 +551,7 @@ void prep(size_t idx) {
     std::lock_guard<std::mutex> lk(g_m);
     if (idx >= g_total) return;
     g_rows[idx].active = true;
+    g_rows[idx].prepping = true;
     wake();
 }
 
@@ -450,6 +562,7 @@ void set_tasks(size_t idx, size_t total) {
     Row& r = g_rows[idx];
     r.total = total;
     r.has_tasks = true;
+    r.prepping = false;
     r.segs.assign(total, Seg::Pending);
     wake();
 }
@@ -468,12 +581,14 @@ void task(size_t idx, size_t task_idx, TaskState st) {
     wake();
 }
 
-void end_file(size_t idx) {
+void end_file(size_t idx, double pct) {
     if (!g_interactive) return;
     std::lock_guard<std::mutex> lk(g_m);
     if (idx >= g_total) return;
     g_rows[idx].done = true;
     g_rows[idx].active = false;
+    g_rows[idx].prepping = false;
+    g_rows[idx].win_pct = pct;
     wake();
 }
 
@@ -535,6 +650,8 @@ void shutdown() {
     g_interactive = false;
     g_scroll = 0;
     g_follow = true;
+    g_hscroll = 0;
+    g_mode = BarMode::Progress;
     g_orig_mode_valid = false;
     g_orig_in_mode_valid = false;
 }

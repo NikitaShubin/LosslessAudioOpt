@@ -68,9 +68,16 @@ bool is_audio_file(const std::string& path) {
     return exts.count(ext.substr(dot + 1)) != 0;
 }
 
-void collect_files(const std::string& p, std::vector<std::string>& out, std::string* err) {
+// Собранный файл: полный путь + путь относительно заданного в параметрах корня
+// (для файла-аргумента — просто имя). rel используется в статусбаре.
+struct FileItem {
+    std::string path;
+    std::string rel;
+};
+
+void collect_files(const std::string& p, std::vector<FileItem>& out, std::string* err) {
     if (util::file_exists(p)) {
-        if (is_audio_file(p)) out.push_back(p);
+        if (is_audio_file(p)) out.push_back({p, util::base_name(p)});
         return;
     }
     if (!util::dir_exists(p)) {
@@ -82,7 +89,11 @@ void collect_files(const std::string& p, std::vector<std::string>& out, std::str
         if (ec) break;
         if (e.is_regular_file()) {
             std::string f = e.path().u8string();
-            if (is_audio_file(f)) out.push_back(f);
+            if (is_audio_file(f)) {
+                std::string rel = fs::relative(fs::u8path(f), fs::u8path(p), ec).u8string();
+                if (ec || rel.empty()) rel = util::base_name(f);
+                out.push_back({f, rel});
+            }
         }
     }
 }
@@ -327,6 +338,7 @@ struct FileJob {
     size_t idx = 0;
     std::string path;
     std::string base;
+    std::string rel;   // путь относительно корня параметров (для статусбара)
     std::string base_ne;
     std::string dir;
     std::string tok;
@@ -663,6 +675,11 @@ struct Runner {
 
         if (proc::cancelled()) return VariantOutcome::Cancelled;
 
+        // CPU-снимок в начале задачи: разность на момент записи rec — затраты на
+        // этот вариант (внешние процессы через proc::run + собственный поток),
+        // не зависящие от планировщика/приоритета окна.
+        uint64_t cpu0 = proc::child_cpu_ms() + proc::thread_cpu_ms();
+
         std::string cand_name = j.tok + "_" + j.base_ne + "." + f.id + "." + v.id + "." +
                                 f.extension;
         std::string candidate = util::join_path(tmp, cand_name);
@@ -688,13 +705,15 @@ struct Runner {
             j.variant_errors++;
             rec["status"] = "error";
             rec["error"] = err;
+            rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
             if (logger) {
                 logger->event({{"type", "candidate"},
                                {"file", j.path},
                                {"format", f.id},
                                {"variant", v.id},
                                {"status", "error"},
-                               {"error", err}});
+                               {"error", err},
+                               {"cpu_ms", rec["cpu_ms"]}});
             }
             j.stat_records.push_back(std::move(rec));
         };
@@ -793,6 +812,7 @@ struct Runner {
         rec["cost"] = cand.cost;
         rec["has_tags"] = cand.has_tags;
         rec["status"] = "ok";
+        rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
         if (logger) {
             logger->event({{"type", "candidate"},
                            {"file", j.path},
@@ -801,7 +821,8 @@ struct Runner {
                            {"status", "ok"},
                            {"size", cand.size},
                            {"sidecar", cand.sidecar},
-                           {"cost", cand.cost}});
+                           {"cost", cand.cost},
+                           {"cpu_ms", rec["cpu_ms"]}});
         }
 
         // Жадный отбор: лучший держим, проигравших удаляем сразу.
@@ -1025,7 +1046,7 @@ struct Runner {
         if (!msg.empty()) status::log(msg);
         if (j.summary.status == "error") status::mark_error(j.idx);
         else if (j.summary.status == "skip") status::mark_skip(j.idx);
-        else status::end_file(j.idx);
+        else status::end_file(j.idx, j.summary.savings_pct);
         if (j.summary.status == "error") {
             if (opts.ignore_errors) {
                 // Игнорируем ошибку: файл помечается skip, прогон продолжается.
@@ -1155,16 +1176,19 @@ int run(const Options& opts) {
         });
     }
 
-    std::vector<std::string> files;
+    std::vector<FileItem> items;
     for (const auto& p : opts.inputs) {
         std::string err;
-        collect_files(p, files, &err);
+        collect_files(p, items, &err);
         if (!err.empty()) out::error("WARNING: %s\n", err.c_str());
     }
-    if (files.empty()) {
+    if (items.empty()) {
         out::error("ERROR: no audio files found\n");
         return 1;
     }
+    std::vector<std::string> files;
+    files.reserve(items.size());
+    for (const auto& it : items) files.push_back(it.path);
 
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
 
@@ -1214,12 +1238,13 @@ int run(const Options& opts) {
         r.jobs[i].idx = i;
         r.jobs[i].path = files[i];
         r.jobs[i].base = util::base_name(files[i]);
+        r.jobs[i].rel = items[i].rel;
         r.jobs[i].base_ne = base_no_ext(files[i]);
         r.jobs[i].dir = util::dir_name(files[i]);
         r.jobs[i].tok = tmp_token(files[i]);
         r.jobs[i].m = std::make_unique<std::mutex>();
     }
-    for (size_t i = 0; i < files.size(); i++) status::begin_file(i, r.jobs[i].base);
+    for (size_t i = 0; i < files.size(); i++) status::begin_file(i, r.jobs[i].rel);
 
     std::vector<std::thread> threads;
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);
@@ -1505,16 +1530,19 @@ int restore_run(const RestoreOptions& opts) {
         return 1;
     }
 
-    std::vector<std::string> files;
+    std::vector<FileItem> items;
     for (const auto& p : opts.inputs) {
         std::string err;
-        collect_files(p, files, &err);
+        collect_files(p, items, &err);
         if (!err.empty()) out::error("WARNING: %s\n", err.c_str());
     }
-    if (files.empty()) {
+    if (items.empty()) {
         out::error("ERROR: no audio files found\n");
         return 1;
     }
+    std::vector<std::string> files;
+    files.reserve(items.size());
+    for (const auto& it : items) files.push_back(it.path);
 
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
     if (jobs > (int)files.size()) jobs = (int)files.size();
