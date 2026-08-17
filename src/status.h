@@ -4,7 +4,10 @@
 
 namespace status {
 
-// Инициализация: вызывается один раз перед началом обработки файлов.
+// Состояние отдельного варианта (сегмента полосы файла).
+enum class TaskState { Running, Ok, Failed };
+
+// Инициализация: вызывается один раз перед началом обработки.
 // no_status=true — принудительно линейный режим. В противном случае режим
 // определяется автоматически: интерактивный, если stdout — консоль с поддержкой
 // VT-последовательностей, иначе линейный (обычный построчный вывод).
@@ -18,24 +21,35 @@ void init(size_t total_files, bool no_status);
 // true, если активен интерактивный статусбар.
 bool interactive();
 
-// Печать строки поверх статусбара (обычный вывод, уходит в scrollback).
+// Строки создаются на все файлы сразу; label — имя файла (без пути).
+void begin_file(size_t idx, const std::string& label);
+
+// Файл взят в prep — помечается «активным» (за ним следует вьюпорт).
+void prep(size_t idx);
+
+// После prep: число вариантов файла = число сегментов полосы.
+void set_tasks(size_t idx, size_t total);
+
+// Смена состояния варианта task_idx (см. TaskState).
+void task(size_t idx, size_t task_idx, TaskState st);
+
+// Файл обработан: полоса остаётся с финальными цветами сегментов.
+void end_file(size_t idx);
+
+// Файл не конвертирован (skip): полоса целиком тускло-серая.
+void mark_skip(size_t idx);
+
+// Файл завершился ошибкой: полоса целиком красная.
+void mark_error(size_t idx);
+
+// Печать строки. В интерактивном режиме подавляется (на экране только полосы);
+// в линейном — обычный построчный вывод.
 void log(const std::string& line);
 
-// Печать строки в stderr поверх статусбара.
+// То же в stderr.
 void error(const std::string& line);
 
-// Начать полосу прогресса для файла idx (label — имя файла).
-void begin_file(size_t idx, const std::string& label, size_t total_tasks);
-
-// Обновить прогресс (done из total) с троттлингом.
-void tick(size_t idx, size_t done);
-
-// Завершить файл: полоса заменяется строкой результата.
-// label — имя файла, winner — текст колонки победителя, pct — процент (pct<0 — прочерк).
-void end_file(size_t idx, const std::string& label, const std::string& winner, double pct);
-
 // Финал: сбросить цвета, восстановить режим консоли, курсор в конец.
-// Строки результатов остаются на экране.
 void shutdown();
 
 }  // namespace status

@@ -320,6 +320,9 @@ struct TaskDesc {
     size_t variant_idx = 0;
 };
 
+// Итог одного варианта: успех, ошибка или отмена (для статусбара).
+enum class VariantOutcome { Ok, Failed, Cancelled };
+
 struct FileJob {
     size_t idx = 0;
     std::string path;
@@ -651,14 +654,14 @@ struct Runner {
     }
 
     // --- один вариант: кодирование, валидация, теги, жадный отбор ---
-    void run_variant(FileJob& j, size_t task_idx) {
+    VariantOutcome run_variant(FileJob& j, size_t task_idx) {
         const Options& opts = *this->opts;
         const TaskDesc& td = j.tasks[task_idx];
         const config::Format& f = (*fmts)[td.fmt_idx];
         const config::Variant& v = f.variants[td.variant_idx];
         const Env& env = j.envs[f.id];
 
-        if (proc::cancelled()) return;
+        if (proc::cancelled()) return VariantOutcome::Cancelled;
 
         std::string cand_name = j.tok + "_" + j.base_ne + "." + f.id + "." + v.id + "." +
                                 f.extension;
@@ -704,18 +707,18 @@ struct Runner {
             verr = validate_candidate(j.ref_wav, candidate, env);
         if (proc::cancelled()) {
             util::remove_file(candidate);
-            return;
+            return VariantOutcome::Cancelled;
         }
         if (!verr.empty()) {
             util::remove_file(candidate);
             record_error(verr);
-            return;
+            return VariantOutcome::Failed;
         }
         uint64_t size = util::file_size(candidate);
         if (size == 0) {
             util::remove_file(candidate);
             record_error(i18n::str("empty file"));
-            return;
+            return VariantOutcome::Failed;
         }
 
         // План тегов и sidecar: зависит от (файл, формат), не от варианта.
@@ -772,7 +775,7 @@ struct Runner {
         if (!terr.empty()) {
             util::remove_file(candidate);
             record_error(i18n::str("tags: ") + terr);
-            return;
+            return VariantOutcome::Failed;
         }
 
         // Финальная проверка тегов
@@ -781,7 +784,7 @@ struct Runner {
             if (!verr2.empty()) {
                 util::remove_file(candidate);
                 record_error(i18n::str("tag validation: ") + verr2);
-                return;
+                return VariantOutcome::Failed;
             }
         }
 
@@ -819,6 +822,7 @@ struct Runner {
             j.any_passed = true;
             j.stat_records.push_back(std::move(rec));
         }
+        return VariantOutcome::Ok;
     }
 
     // --- финализация файла: отчёт, замена исходника, чистка tmp ---
@@ -833,12 +837,9 @@ struct Runner {
 
         std::string msg;
         char buf[512];
-        std::string winner_text;
-        double result_pct = -1.0;
 
         if (j.summary.status == "error") {
             // ошибка уже зафиксирована (ffprobe/ffmpeg, probe, декод, исключение)
-            winner_text = "error";
         } else if (!j.any_passed) {
             // Победителя нет. Операционные сбои (упали все варианты, утилиты недоступны) —
             // это ошибка файла; «чистый» skip остаётся только для намеренных причин
@@ -848,7 +849,6 @@ struct Runner {
                 j.failures.empty() ? i18n::str("no suitable candidates") : j.failures[0];
             if (hard) {
                 j.summary.status = "error";
-                winner_text = "error";
                 j.summary.detail = reason;
                 status::error("ERROR " + j.path + " — " + reason + "\n");
                 if (!opts.no_stats) stats::append_all(records);
@@ -862,7 +862,6 @@ struct Runner {
                 j.summary.status = "skip";
                 j.summary.detail = reason;
                 msg = "SKIP " + j.base + " — " + reason + "\n";
-                winner_text = "skip";
                 if (!opts.no_stats) stats::append_all(records);
                 if (logger) {
                     logger->event({{"type", "file_done"},
@@ -898,7 +897,6 @@ struct Runner {
                 }
                 if (!opts.no_stats) stats::append_all(records);
                 j.summary.status = "error";
-                winner_text = "error";
                 j.summary.detail = winner_fail;
                 status::error("ERROR " + j.path + " — " + winner_fail + "\n");
                 if (logger) {
@@ -923,8 +921,6 @@ struct Runner {
                                    j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
                                    best.format.c_str(), best.variant.c_str()).c_str());
                 msg = buf;
-                winner_text = best.format + "/" + best.variant;
-                result_pct = savings;
 
                 j.summary.status = "ok";
                 j.summary.original = j.probe.size;
@@ -952,7 +948,6 @@ struct Runner {
                             // Замена сорвалась — это ошибка файла: считается в failed
                             // и останавливает прогон (см. ниже, блок по status == "error").
                             j.summary.status = "error";
-                            winner_text = "error";
                             if (!util::remove_file(tmp_name)) {
                                 msg += i18n::fmt(
                                     "      ! could not remove the temporary candidate "
@@ -994,7 +989,6 @@ struct Runner {
                         // Кандидата не удалось даже скопировать в папку файла —
                         // это ошибка файла (см. блок по status == "error").
                         j.summary.status = "error";
-                        winner_text = "error";
                         msg += i18n::str("      ! could not copy the candidate into the file folder\n");
                         j.summary.detail =
                             i18n::str("could not copy the candidate into the file folder");
@@ -1029,7 +1023,9 @@ struct Runner {
         if (j.best_valid) util::remove_file(j.best.path);
 
         if (!msg.empty()) status::log(msg);
-        status::end_file(j.idx, j.base, winner_text, result_pct);
+        if (j.summary.status == "error") status::mark_error(j.idx);
+        else if (j.summary.status == "skip") status::mark_skip(j.idx);
+        else status::end_file(j.idx);
         if (j.summary.status == "error") {
             if (opts.ignore_errors) {
                 // Игнорируем ошибку: файл помечается skip, прогон продолжается.
@@ -1054,9 +1050,12 @@ struct Runner {
                 if (proc::cancelled() || all_done_locked()) break;
                 if (abort.load()) break;
                 if (!take_work_locked(&w)) continue;
+                if (w.kind == WorkKind::Variant)
+                    status::task(w.idx, w.task, status::TaskState::Running);
             }
 
             if (w.kind == WorkKind::Prep) {
+                status::prep(w.idx);
                 std::string perr;
                 try {
                     prep_file(jobs[w.idx]);
@@ -1088,18 +1087,21 @@ struct Runner {
                     }
                     cv.notify_all();
                 }
-                if (!finish_now) status::begin_file(w.idx, jobs[w.idx].base, n_tasks);
+                if (!finish_now) status::set_tasks(w.idx, n_tasks);
                 if (finish_now && !proc::cancelled()) finalize_file(jobs[w.idx]);
             } else {
                 std::string verr;
+                VariantOutcome oc = VariantOutcome::Failed;
                 try {
-                    run_variant(jobs[w.idx], w.task);
+                    oc = run_variant(jobs[w.idx], w.task);
                 } catch (const std::exception& exc) {
                     verr = exc.what();
                 }
                 if (proc::cancelled()) break;  // отмена — счётчики не трогаем
+                status::task(w.idx, w.task,
+                             oc == VariantOutcome::Ok ? status::TaskState::Ok
+                                                       : status::TaskState::Failed);
                 bool last = false;
-                size_t done_n = 0;
                 {
                     std::lock_guard<std::mutex> lk(qm);
                     FileJob& j = jobs[w.idx];
@@ -1110,7 +1112,6 @@ struct Runner {
                                     status::error("ERROR [" + j.path + "]: " + verr + "\n");
                     }
                     j.completed++;
-                    done_n = j.completed;
                     if (j.completed == j.tasks.size()) {
                         j.done = true;
                         total_done++;
@@ -1118,7 +1119,6 @@ struct Runner {
                     }
                     cv.notify_all();
                 }
-                status::tick(w.idx, done_n);
                 if (last && !proc::cancelled()) finalize_file(jobs[w.idx]);
             }
         }
@@ -1168,6 +1168,11 @@ int run(const Options& opts) {
 
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
 
+    // Статусбар входит в альтернативный буфер: всё, что печатается после init(),
+    // в интерактивном режиме попадает на экран статусбара, поэтому init вызываем
+    // до вывода диагностики, а сами диагностические строки — только в линейном режиме.
+    status::init(files.size(), opts.no_status);
+
     std::string tmp = tmp_dir();
     util::mkdirs(tmp);
 
@@ -1176,13 +1181,14 @@ int run(const Options& opts) {
                                      : std::string());
     if (opts.debug) {
         if (logger.ok()) {
-            out::print("Log: %s\n", logger.path().c_str());
+            if (!status::interactive()) out::print("Log: %s\n", logger.path().c_str());
         } else {
             out::error("WARNING: could not open the JSONL log (runs/)\n");
         }
     }
 
-    out::print("Files: %zu, threads: %d\n", files.size(), jobs);
+    if (!status::interactive())
+        out::print("Files: %zu, threads: %d\n", files.size(), jobs);
 
     if (logger.ok()) {
         logger.event({{"type", "run_start"},
@@ -1193,8 +1199,6 @@ int run(const Options& opts) {
                       {"ignore_errors", opts.ignore_errors},
                       {"report", opts.report_path}});
     }
-
-    status::init(files.size(), opts.no_status);
 
     Runner r;
     r.opts = &opts;
@@ -1215,6 +1219,7 @@ int run(const Options& opts) {
         r.jobs[i].tok = tmp_token(files[i]);
         r.jobs[i].m = std::make_unique<std::mutex>();
     }
+    for (size_t i = 0; i < files.size(); i++) status::begin_file(i, r.jobs[i].base);
 
     std::vector<std::thread> threads;
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);

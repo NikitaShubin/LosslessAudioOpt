@@ -11,73 +11,80 @@
 #include <thread>
 #include <vector>
 
+#include "i18n.h"
 #include "out.h"
+#include "screen.h"
 #include "util.h"
 
 namespace status {
 
 namespace {
 
-constexpr size_t kPctCol = 6;
+// ---------------------------------------------------------------------------
+// Палитра (индексы ANSI 256-палитры)
+// ---------------------------------------------------------------------------
+constexpr uint8_t kPendingBg = 236;  // тёмно-серый — задача ждёт
+constexpr uint8_t kRunningBg = 44;   // голубой — задача выполняется сейчас
+constexpr uint8_t kOkBg = 28;        // зелёный — выполнено успешно
+constexpr uint8_t kFailedBg = 196;   // красный — ошибка
+constexpr uint8_t kSkipBg = 240;     // средне-серый — файл не конвертирован
+constexpr uint8_t kTextFg = 15;      // ярко-белый текст на полосе
+constexpr uint8_t kFooterFg = 7;     // обычный белый текст футера
+constexpr uint8_t kFooterBg = 0;
+
+// Состояние сегмента полосы (одного варианта).
+enum class Seg { Pending, Running, Ok, Failed };
+
+// Целое-состояние строки, заменяющее раскраску сегментов.
+enum class Whole { None, Skip, Error };
 
 // Одна строка статуса = один файл. Во время обработки строка — полоса на всю
-// ширину консоли (зелёная заливка по прогрессу, дальше серый фон, текст поверх).
-// По завершении — простая строка: счётчик, имя файла, победитель, процент.
+// ширину консоли, разбитая на сегменты (по одному на вариант): зелёный —
+// выполнено, голубой — выполняется сейчас, красный — ошибка, тёмно-серый —
+// ожидание. По завершении полоса сохраняет финальные цвета; для skip/error
+// вся полоса красится целиком.
 struct Row {
     std::string label;
+    bool has_tasks = false;
     size_t total = 0;
-    size_t done = 0;
-    bool finished = false;
-    std::string winner;
-    double pct = 0;  // <0 = прочерк
+    std::vector<Seg> segs;
+    bool done = false;
+    Whole whole = Whole::None;
+    bool active = false;  // prep или есть Running-задача (для автоследования)
 };
 
 std::mutex g_m;
 bool g_init = false;
 bool g_interactive = false;
 size_t g_total = 0;
-std::vector<Row> g_rows;   // индекс = порядковый номер файла
-size_t g_visible = 0;      // сколько строк статуса занимает блок (растёт к низу)
-bool g_overflow = false;   // блок заполнил почти весь экран — обычный построчный вывод
-bool g_overflow_handled = false;  // сброс переполнения уже выполнен (см. render_pass)
-DWORD g_orig_mode = 0;
-bool g_orig_mode_valid = false;
+std::vector<Row> g_rows;
 
 // Отдельный поток отрисовки: воркеры только меняют состояние и будят его.
-// Раньше каждый begin_file вызывал redraw_all_locked() синхронно в воркере,
-// и стартовый рывок N файлов превращался в N*(N+1)/2 перерисовок блока,
-// блокируя обработку на десятки секунд.
 std::thread g_render_thread;
 std::condition_variable g_cv;
 bool g_render_stop = false;
-bool g_pending = false;            // есть накопленная работа для потока отрисовки
-std::vector<bool> g_dirty;         // какие строки нужно перерисовать
-std::vector<size_t> g_pending_ensure;  // файлы, которые нужно ввести в блок
-std::vector<std::string> g_pending_log;  // строки лога, ожидающие вывода
-bool g_block_grew = false;         // блок вырос — нужна полная перерисовка
-
-int g_width = 80;
-int g_height = 25;
-bool g_size_valid = false;
-bool g_size_forced = false;  // размер задан через LLAO_STATUS_SIZE — не обновлять
-
-// Позиция последнего отрисованного блока статуса: при перерисовке (resize,
-// рост блока) старая область стирается целиком, иначе на экране остаются
-// копии старого блока.
-int g_drawn_top = 0;
-size_t g_drawn_rows = 0;
+bool g_pending = false;
 
 // Пауза для сбора пачки обновлений: воркеры будят поток отрисовки, он ждёт
-// ещё kDebounce, чтобы нарисовать всё разом (а не по одному тику на файл).
-constexpr std::chrono::milliseconds kDebounce(50);
-
-// Период опроса размера окна. Ресайз замечается и без обновлений от воркеров:
-// иначе, пока нет тиков прогресса (идёт долгий вариант), изменение размера
-// окна не перерисовывало бы статусбар до следующего обновления.
+// ещё kDebounce, чтобы нарисовать всё разом.
+constexpr std::chrono::milliseconds kDebounce(30);
+// Период опроса размера окна: ресайз перерисовывает статусбар сразу, не
+// дожидаясь следующего обновления от воркеров.
 constexpr std::chrono::milliseconds kResizePoll(200);
 
+screen::Buffer g_screen;
+int g_width = 80;
+int g_height = 25;
+bool g_size_forced = false;  // размер задан через LLAO_STATUS_SIZE — не обновлять
+
+// Вьюпорт «прокручиваемого плейлиста»: g_scroll — индекс первой видимой строки.
+int g_scroll = 0;
+bool g_follow = true;  // следовать за активной полосой (Этап B сбрасывает по вводу)
+
+DWORD g_orig_mode = 0;
+bool g_orig_mode_valid = false;
+
 std::wstring u2w(const std::string& s) { return util::u2w(s); }
-std::string w2u(const std::wstring& s) { return util::w2u(s); }
 
 // Ширина поля счётчика по числу файлов (1..).
 size_t counter_width() {
@@ -96,88 +103,113 @@ std::string counter(size_t idx) {
     return buf;
 }
 
-std::string truncate(const std::wstring& w, size_t width) {
-    if (w.size() <= width) return w2u(w);
-    if (width >= 3) return w2u(w.substr(0, width - 3) + L"...");
-    return w2u(w.substr(0, width));
+// Обрезка строки до width символов (голова остаётся, в конце многоточие).
+std::wstring fit(const std::wstring& w, size_t width) {
+    if (w.size() <= width) return w;
+    if (width >= 3) return w.substr(0, width - 3) + L"...";
+    return w.substr(0, width);
 }
 
-// Обрезка строки с сохранением хвоста: при превышении ширины голова заменяется
-// на "…", а важная часть (причина ошибки, результат) остаётся видимой.
-std::string truncate_tail(const std::wstring& w, size_t width) {
-    if (w.size() <= width) return w2u(w);
-    if (width >= 2) return w2u(L"…" + w.substr(w.size() - (width - 1)));
-    return w2u(w.substr(w.size() - width));
-}
-
-std::string pct_col(double pct) {
-    char buf[32];
-    if (pct < 0) return std::string(kPctCol - 1, ' ') + "\xe2\x80\x94";  // —
-    snprintf(buf, sizeof(buf), "%5.1f%%", pct);
-    return std::string(buf);
-}
-
-// Текст строки без цвета/фона, обрезанный до W символов.
-std::string row_text(const Row& r, size_t idx, int W) {
-    std::string s = counter(idx) + " " + r.label + "  ";
-    if (r.finished) {
-        s += r.winner + " " + pct_col(r.pct);
-    } else {
-        s += pct_col(100.0 * (double)r.done / (double)(r.total ? r.total : 1));
+uint8_t seg_bg(Seg s) {
+    switch (s) {
+        case Seg::Running: return kRunningBg;
+        case Seg::Ok: return kOkBg;
+        case Seg::Failed: return kFailedBg;
+        default: return kPendingBg;
     }
-    return truncate(u2w(s), (size_t)W);
 }
 
-// Полоса прогресса на всю ширину W: зелёная заливка (42) до done/total,
-// дальше серый фон (100); текст белым поверх. Текст статичен (кроме процента).
-// Пробелы в тексте пишутся как обычные символы (а не пропускаются): иначе курсор
-// не продвигается и текст склеивается без пробелов. Строка предварительно
-// стирается (\x1b[2K), чтобы не наслаиваться на лог/старую полосу.
-std::string strip_row(const Row& r, size_t idx, int W) {
-    double f = r.total > 0 ? (double)r.done / (double)r.total : 0.0;
-    int filled = (int)(f * W + 0.5);
-    if (filled > W) filled = W;
-    if (filled < 0) filled = 0;
-    std::wstring body = u2w(row_text(r, idx, W));
-    std::string s;
-    s += "\x1b[2K";
-    s += "\x1b[42m" + std::string((size_t)filled, ' ');
-    s += "\x1b[100m" + std::string((size_t)(W - filled), ' ');
-    s += "\x1b[0m\r";
-    // Текст поверх заливки: одна смена цвета на границе заполнения, все символы
-    // (включая пробелы) пишутся — иначе пробелы пропадают и процент «прилипает».
-    size_t split = body.size() < (size_t)filled ? body.size() : (size_t)filled;
-    if (split > 0) s += "\x1b[37;42m" + w2u(body.substr(0, split));
-    if (split < body.size()) s += "\x1b[37;100m" + w2u(body.substr(split));
-    s += "\x1b[0m";
-    return s;
+// Цвет фона колонки col полосы строки r (ширина полосы W). Сегмент,
+// покрывающий колонку, вычисляется пропорционально: задача t занимает
+// колонки [t*W/total, (t+1)*W/total). Если сегментов больше ширины — часть
+// задач не получит колонки (это ок: полоса остаётся читаемой).
+uint8_t col_bg(const Row& r, size_t col, size_t W) {
+    switch (r.whole) {
+        case Whole::Skip: return kSkipBg;
+        case Whole::Error: return kFailedBg;
+        case Whole::None:
+            if (!r.has_tasks || r.total == 0) return kPendingBg;
+            {
+                size_t t = (size_t)((uint64_t)col * r.total / W);
+                if (t >= r.segs.size()) t = r.segs.size() - 1;
+                return seg_bg(r.segs[t]);
+            }
+    }
+    return kPendingBg;
 }
 
-// Строка результата: без фона, стирает предыдущее содержимое строки.
-std::string finished_row(const Row& r, size_t idx, int W) {
-    return "\x1b[2K" + row_text(r, idx, W);
+// Текст строки: счётчик, имя файла и процент выполнения во время обработки.
+std::wstring row_text(const Row& r, size_t idx) {
+    std::string s = counter(idx) + " " + r.label;
+    if (r.has_tasks && !r.done && r.total > 0) {
+        size_t finished = 0;
+        for (Seg sg : r.segs)
+            if (sg == Seg::Ok || sg == Seg::Failed) finished++;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "  %5.1f%%", 100.0 * (double)finished / (double)r.total);
+        s += buf;
+    }
+    return u2w(s);
 }
 
-std::string pos(int row, int col) {
-    return "\x1b[" + std::to_string(row) + ";" + std::to_string(col) + "H";
+// Рисует строку файла idx на экранной строке y.
+void paint_row(size_t idx, int y) {
+    const Row& r = g_rows[idx];
+    int W = g_width;
+    for (int c = 0; c < W; c++) {
+        screen::Cell cell = {L' ', kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
+        g_screen.cell(y, c) = cell;
+    }
+    std::wstring txt = fit(row_text(r, idx), (size_t)W);
+    for (int c = 0; c < (int)txt.size() && c < W; c++) {
+        g_screen.cell(y, c) = {txt[(size_t)c], kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
+    }
 }
 
-// Последняя строка scroll-региона лога (низ региона = верх блока статуса).
-int scroll_bottom() {
-    int b = g_height - (int)g_visible;
-    if (b < 1) b = 1;
-    return b;
+// Подгоняет вьюпорт так, чтобы активная полоса (файлы с prep/Running) была
+// видима целиком, если это возможно.
+void follow_active(int vis) {
+    size_t lo = g_total, hi = 0;
+    for (size_t i = 0; i < g_total; i++) {
+        if (!g_rows[i].active) continue;
+        if (i < lo) lo = i;
+        if (i > hi) hi = i;
+    }
+    if (hi < lo) return;  // активных нет — позицию не трогаем
+    int max_scroll = (int)g_total - vis;
+    if (max_scroll < 0) max_scroll = 0;
+    if ((int)hi >= g_scroll + vis) g_scroll = (int)hi - vis + 1;
+    if ((int)lo < g_scroll) g_scroll = (int)lo;
+    if (g_scroll < 0) g_scroll = 0;
+    if (g_scroll > max_scroll) g_scroll = max_scroll;
 }
 
-// Установить scroll-регион [1..scroll_bottom()]: лог скроллится над блоком,
-// блок остаётся закреплённым у низа экрана.
-void set_region() {
-    out::text(stdout, "\x1b[1;" + std::to_string(scroll_bottom()) + "r");
+// Компоновка всего кадра: видимые строки списка + футер.
+void compose_frame() {
+    g_screen.clear(kFooterFg, kFooterBg);
+    int vis = g_height - 1;  // последняя строка — футер
+    if (vis > (int)g_total) vis = (int)g_total;
+    if (vis < 0) vis = 0;
+
+    if (g_follow) follow_active(vis);
+
+    for (int y = 0; y < vis; y++) {
+        size_t idx = (size_t)g_scroll + y;
+        if (idx < g_total) paint_row(idx, y);
+    }
+
+    size_t lo = (size_t)g_scroll + 1;
+    size_t hi = (size_t)g_scroll + vis;
+    if (hi > g_total) hi = g_total;
+    std::string foot = i18n::fmt("files %zu-%zu / %zu", lo, hi, g_total);
+    foot += g_follow ? " · " + i18n::str("follow") : " · " + i18n::str("manual");
+    std::wstring wf = u2w(foot);
+    for (int c = 0; c < (int)wf.size() && c < g_width; c++)
+        g_screen.cell(g_height - 1, c) = {wf[(size_t)c], kFooterFg, kFooterBg, false};
 }
 
-// Обновляет размер окна консоли. Возвращает true, если размер изменился
-// (или изменилось состояние overflow). Размер, заданный через LLAO_STATUS_SIZE,
-// не обновляется.
+// Обновляет размер окна консоли. Возвращает true, если размер изменился.
+// Размер, заданный через LLAO_STATUS_SIZE, не обновляется.
 bool refresh_size_locked() {
     if (g_size_forced) return false;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -187,146 +219,25 @@ bool refresh_size_locked() {
         return false;
     int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
     int hh = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    if (w < 1) w = 1;
+    if (hh < 1) hh = 1;
     if (w == g_width && hh == g_height) return false;
     g_width = w;
     g_height = hh;
-    if ((int)g_visible >= g_height - 1) {
-        g_overflow = true;
-        g_overflow_handled = false;
-    } else {
-        if (g_overflow) {
-            // Окно снова выросло и блок помещается — возвращаем статусбар
-            // (иначе после переполнения он бы не появлялся даже при развороте).
-            g_overflow = false;
-        }
-        g_block_grew = true;  // новые размеры — все строки пересчитать
-    }
     return true;
 }
 
-// Стирает строки, в которых раньше находился блок статуса: объединение старой
-// области (g_drawn_top..g_drawn_rows) и новой (top..top+g_visible). Без этого
-// при resize и при росте блока старые строки остаются на экране «копиями».
-void erase_block_area_locked(int top) {
-    int lo = top;
-    int hi = top + (int)g_visible;
-    if (g_drawn_rows > 0) {
-        lo = std::min(lo, g_drawn_top);
-        hi = std::max(hi, g_drawn_top + (int)g_drawn_rows);
-    }
-    if (lo < 1) lo = 1;
-    if (hi > g_height + 1) hi = g_height + 1;
-    for (int r = lo; r < hi; r++) out::text(stdout, pos(r, 1) + "\x1b[2K");
-}
-
-// Полная перерисовка блока статусных строк и курсор в зону лога.
-// Вызывается при resize окна и при изменении состава/высоты блока.
-void redraw_all_locked() {
-    if (!g_size_valid || g_overflow) return;
-    set_region();
-    int top = g_height - (int)g_visible + 1;
-    erase_block_area_locked(top);
-    for (size_t i = 0; i < g_visible; i++) {
-        const Row& r = g_rows[i];
-        std::string line = pos(top + (int)i, 1);
-        line += r.finished ? finished_row(r, i, g_width) : strip_row(r, i, g_width);
-        out::text(stdout, line);
-    }
-    out::text(stdout, pos(scroll_bottom(), 1));
-    g_drawn_top = top;
-    g_drawn_rows = g_visible;
-}
-
-// Перерисовка одной строки блока (обычный тик прогресса) + курсор в зону лога.
-void draw_row_locked(size_t idx) {
-    if (!g_size_valid || g_overflow) return;
-    if (idx >= g_visible) return;
-    const Row& r = g_rows[idx];
-    int top = g_height - (int)g_visible + 1;
-    std::string line = pos(top + (int)idx, 1);
-    line += r.finished ? finished_row(r, idx, g_width) : strip_row(r, idx, g_width);
-    line += pos(scroll_bottom(), 1);
-    out::text(stdout, line);
-}
-
-// Вывод накопленных строк лога в зону прокрутки над блоком.
-void log_line(const std::string& text);   // определена ниже
-void ensure_visible_locked(size_t idx);   // определена ниже
-
-void flush_log_locked() {
-    for (auto& line : g_pending_log) log_line(line);
-    g_pending_log.clear();
-}
-
-// Один проход отрисовки (вызывается только из потока отрисовки под g_m):
-// применяет накопленные изменения минимальным числом операций записи.
+// Один проход отрисовки (только из потока отрисовки, под g_m).
 void render_pass_locked() {
-    // Ресайз окна обрабатывается только здесь: GetConsoleScreenBufferInfo
-    // не вызывается в воркерах.
     refresh_size_locked();
-
-    if (!g_size_valid) {
-        for (auto& line : g_pending_log) out::text(stdout, line);
-        g_pending_log.clear();
-        g_pending_ensure.clear();
-        std::fill(g_dirty.begin(), g_dirty.end(), false);
-        g_block_grew = false;
-        return;
-    }
-
-    // Новые файлы должны попасть в блок (строки добавляются к низу).
-    if (!g_overflow) {
-        for (size_t idx : g_pending_ensure) {
-            ensure_visible_locked(idx);
-            if (g_overflow) break;
-        }
-    }
-
-    if (g_overflow) {
-        // Блок не помещается — обычный построчный вывод.
-        if (!g_overflow_handled) {
-            // Сброс scroll-региона на весь экран (иначе \x1b[2J очистит
-            // только старый регион) и полная очистка.
-            out::text(stdout, "\x1b[0m" + pos(1, 1));
-            out::text(stdout, "\x1b[r");
-            out::text(stdout, "\x1b[2J" + pos(1, 1));
-            g_drawn_top = 0;
-            g_drawn_rows = 0;
-            g_overflow_handled = true;
-        }
-        for (size_t idx : g_pending_ensure)
-            out::text(stdout, row_text(g_rows[idx], idx, g_width) + "\n");
-        for (auto& line : g_pending_log) out::text(stdout, line);
-        g_pending_ensure.clear();
-        g_pending_log.clear();
-        std::fill(g_dirty.begin(), g_dirty.end(), false);
-        g_block_grew = false;
-        return;
-    }
-
-    if (g_block_grew) {
-        redraw_all_locked();
-        g_block_grew = false;
-        std::fill(g_dirty.begin(), g_dirty.end(), false);
-        g_pending_ensure.clear();
-        flush_log_locked();
-        return;
-    }
-
-    // Обычный тик: перерисовываем только изменённые строки.
-    for (size_t i = 0; i < g_rows.size(); i++) {
-        if (g_dirty[i]) draw_row_locked(i);
-    }
-    std::fill(g_dirty.begin(), g_dirty.end(), false);
-    g_pending_ensure.clear();
-    flush_log_locked();
+    g_screen.resize(g_width, g_height);
+    compose_frame();
+    g_screen.flush();
 }
 
 // Поток отрисовки. Спящий до появления работы; после пробуждения ждёт ещё
-// kDebounce, чтобы собрать пачку обновлений (например, 11 begin_file подряд)
-// в одну отрисовку вместо синхронных перерисовок в воркерах. Параллельно с
-// ожиданием работы каждые kResizePoll опрашивает размер окна: ресайз
-// перерисовывает статусбар сразу, не дожидаясь следующего тика прогресса.
+// kDebounce, чтобы собрать пачку обновлений в одну отрисовку. Параллельно
+// с ожиданием каждые kResizePoll опрашивает размер окна.
 void render_loop() {
     std::unique_lock<std::mutex> lk(g_m);
     while (true) {
@@ -343,37 +254,9 @@ void render_loop() {
     render_pass_locked();
 }
 
-// Гарантирует, что файл idx попал в блок (строки видны в порядке файлов).
-// Пропущенные файлы приходят сразу в end_file без begin_file. Выполняется
-// только в потоке отрисовки; сам вывод при переполнении делает render_pass.
-void ensure_visible_locked(size_t idx) {
-    while (g_visible <= idx) {
-        if ((int)g_visible >= g_height - 1) {  // блок заполнил почти весь экран
-            g_overflow = true;
-            g_overflow_handled = false;
-            return;
-        }
-        g_visible++;
-    }
-}
-
-// Курсор в последнюю строку scroll-региона и вывод строк лога. Многострочный
-// текст разбивается на строки; каждая строка стирается и обрезается до ширины
-// окна (длинная строка не должна переноситься в зону блока статуса), после
-// чего регион прокручивается.
-void log_line(const std::string& text) {
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find('\n', start);
-        std::string line =
-            text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        out::text(stdout, pos(scroll_bottom(), 1));
-        out::text(stdout, "\x1b[2K");
-        out::text(stdout, truncate_tail(u2w(line), (size_t)g_width));
-        if (end == std::string::npos) break;
-        out::text(stdout, "\r\n");
-        start = end + 1;
-    }
+void wake() {
+    g_pending = true;
+    g_cv.notify_all();
 }
 
 }  // namespace
@@ -384,13 +267,10 @@ void init(size_t total_files, bool no_status) {
     g_rows.assign(total_files, Row{});
     g_init = true;
     g_interactive = false;
-    g_visible = 0;
-    g_overflow = false;
-    g_overflow_handled = false;
-    g_block_grew = false;
+    g_scroll = 0;
+    g_follow = true;
     g_width = 80;
     g_height = 25;
-    g_size_valid = false;
     g_size_forced = false;
     if (no_status) return;
 
@@ -402,7 +282,6 @@ void init(size_t total_files, bool no_status) {
         if (sscanf(sz, "%dx%d", &W, &H) == 2 && W > 0 && H > 0) {
             g_width = W;
             g_height = H;
-            g_size_valid = true;
             g_size_forced = true;
         }
     }
@@ -418,13 +297,29 @@ void init(size_t total_files, bool no_status) {
         g_orig_mode_valid = true;
     }
 
-    if (!g_size_valid) {
+    // Размер окна: консоль -> переменные окружения COLUMNS/LINES -> 80x25.
+    if (!g_size_forced) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         CONSOLE_SCREEN_BUFFER_INFO csbi;
-        if (h != INVALID_HANDLE_VALUE && h != nullptr && GetConsoleScreenBufferInfo(h, &csbi)) {
-            g_width = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-            g_height = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-            g_size_valid = true;
+        bool ok = h != INVALID_HANDLE_VALUE && h != nullptr &&
+                  GetConsoleScreenBufferInfo(h, &csbi);
+        if (ok) {
+            int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+            int hh = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+            if (w > 0 && hh > 0) {
+                g_width = w;
+                g_height = hh;
+            }
+        } else {
+            const char* cols = getenv("COLUMNS");
+            const char* lines = getenv("LINES");
+            if (cols && *cols && lines && *lines) {
+                int w = atoi(cols), hh = atoi(lines);
+                if (w > 0 && hh > 0) {
+                    g_width = w;
+                    g_height = hh;
+                }
+            }
         }
     }
 
@@ -434,12 +329,10 @@ void init(size_t total_files, bool no_status) {
     // исходный экран (с командной строкой и прежним выводом) сохраняется
     // и восстанавливается в shutdown() — как у mc/opencode.
     out::text(stdout, "\x1b[?1049h");
-    out::text(stdout, "\x1b[2J" + pos(1, 1));
-    g_drawn_top = 0;
-    g_drawn_rows = 0;
+    screen::cursor(false);
+    g_screen.resize(g_width, g_height);
 
     // Вся отрисовка — в отдельном потоке; воркеры его только будят.
-    g_dirty.assign(g_total, false);
     g_render_stop = false;
     g_pending = false;
     g_render_thread = std::thread(render_loop);
@@ -447,15 +340,91 @@ void init(size_t total_files, bool no_status) {
 
 bool interactive() { return g_interactive; }
 
+void begin_file(size_t idx, const std::string& label) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    Row& r = g_rows[idx];
+    r.label = label;
+    r.has_tasks = false;
+    r.total = 0;
+    r.segs.clear();
+    r.done = false;
+    r.whole = Whole::None;
+    r.active = false;
+    wake();
+}
+
+void prep(size_t idx) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    g_rows[idx].active = true;
+    wake();
+}
+
+void set_tasks(size_t idx, size_t total) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    Row& r = g_rows[idx];
+    r.total = total;
+    r.has_tasks = true;
+    r.segs.assign(total, Seg::Pending);
+    wake();
+}
+
+void task(size_t idx, size_t task_idx, TaskState st) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    Row& r = g_rows[idx];
+    if (!r.has_tasks || task_idx >= r.segs.size()) return;
+    Seg s = st == TaskState::Ok ? Seg::Ok
+            : st == TaskState::Failed ? Seg::Failed
+                                      : Seg::Running;
+    r.segs[task_idx] = s;
+    if (s == Seg::Running) r.active = true;
+    wake();
+}
+
+void end_file(size_t idx) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    g_rows[idx].done = true;
+    g_rows[idx].active = false;
+    wake();
+}
+
+void mark_skip(size_t idx) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    Row& r = g_rows[idx];
+    r.whole = Whole::Skip;
+    r.done = true;
+    r.active = false;
+    wake();
+}
+
+void mark_error(size_t idx) {
+    if (!g_interactive) return;
+    std::lock_guard<std::mutex> lk(g_m);
+    if (idx >= g_total) return;
+    Row& r = g_rows[idx];
+    r.whole = Whole::Error;
+    r.done = true;
+    r.active = false;
+    wake();
+}
+
 void log(const std::string& line) {
     if (!g_interactive) {
         out::text(stdout, line);
         return;
     }
-    std::lock_guard<std::mutex> lk(g_m);
-    g_pending_log.push_back(line);
-    g_pending = true;
-    g_cv.notify_all();
+    // Интерактивный режим: на экране только полосы, строки подавляются.
 }
 
 void error(const std::string& line) {
@@ -463,51 +432,6 @@ void error(const std::string& line) {
         out::text(stderr, line);
         return;
     }
-    std::lock_guard<std::mutex> lk(g_m);
-    g_pending_log.push_back(line);
-    g_pending = true;
-    g_cv.notify_all();
-}
-
-void begin_file(size_t idx, const std::string& label, size_t total_tasks) {
-    if (!g_interactive) return;
-    std::lock_guard<std::mutex> lk(g_m);
-    if (idx >= g_total) return;
-    g_rows[idx].label = label;
-    g_rows[idx].total = total_tasks;
-    g_rows[idx].done = 0;
-    g_rows[idx].finished = false;
-    g_dirty[idx] = true;
-    g_pending_ensure.push_back(idx);
-    g_block_grew = true;
-    g_pending = true;
-    g_cv.notify_all();
-}
-
-void tick(size_t idx, size_t done) {
-    if (!g_interactive) return;
-    std::lock_guard<std::mutex> lk(g_m);
-    if (idx >= g_total) return;
-    if (g_rows[idx].label.empty()) return;
-    g_rows[idx].done = done;
-    g_dirty[idx] = true;
-    g_pending = true;
-    g_cv.notify_all();
-}
-
-void end_file(size_t idx, const std::string& label, const std::string& winner, double pct) {
-    if (!g_interactive) return;
-    std::lock_guard<std::mutex> lk(g_m);
-    if (idx >= g_total) return;
-    g_rows[idx].label = label;
-    g_rows[idx].finished = true;
-    g_rows[idx].winner = winner;
-    g_rows[idx].pct = pct;
-    g_dirty[idx] = true;
-    g_pending_ensure.push_back(idx);
-    g_block_grew = true;
-    g_pending = true;
-    g_cv.notify_all();
 }
 
 void shutdown() {
@@ -516,24 +440,18 @@ void shutdown() {
     g_render_stop = true;
     g_cv.notify_all();
     lk.unlock();
-    // Ждём, пока поток отрисовки сбросит накопленный лог и завершится.
+    // Ждём, пока поток отрисовки сбросит накопленные изменения и завершится.
     if (g_render_thread.joinable()) g_render_thread.join();
     lk.lock();
-    out::text(stdout, "\x1b[0m");
-    if (g_size_valid && !g_overflow) {
-        out::text(stdout, "\x1b[r");      // весь экран снова скроллится
-        out::text(stdout, "\x1b[2J");     // очистить альтернативный буфер
-    }
-    out::text(stdout, "\x1b[?1049l");     // вернуться к исходному экрану
+    screen::cursor(true);
+    out::text(stdout, "\x1b[0m\x1b[r\x1b[2J\x1b[?1049l");
     if (g_orig_mode_valid) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (h != INVALID_HANDLE_VALUE && h != nullptr) SetConsoleMode(h, g_orig_mode);
     }
     g_interactive = false;
-    g_visible = 0;
-    g_overflow = false;
-    g_drawn_top = 0;
-    g_drawn_rows = 0;
+    g_scroll = 0;
+    g_follow = true;
 }
 
 }  // namespace status
