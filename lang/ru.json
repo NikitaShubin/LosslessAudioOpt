@@ -217,5 +217,8 @@
     " — the config may be outdated": " — конфиг, возможно, устарел",
     "MB": "МБ",
     "Interrupted by user\n": "Прервано пользователем (Ctrl+C)\n",
-    "Replacement failed:\n": "Не удалось заменить файл:\n"
+    "Replacement failed:\n": "Не удалось заменить файл:\n",
+    "files %zu-%zu / %zu": "файлы %zu–%zu / %zu",
+    "follow": "следим",
+    "manual": "вручную"
 }
