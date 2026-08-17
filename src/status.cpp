@@ -68,9 +68,9 @@ bool g_pending = false;
 // Пауза для сбора пачки обновлений: воркеры будят поток отрисовки, он ждёт
 // ещё kDebounce, чтобы нарисовать всё разом.
 constexpr std::chrono::milliseconds kDebounce(30);
-// Период опроса размера окна: ресайз перерисовывает статусбар сразу, не
-// дожидаясь следующего обновления от воркеров.
-constexpr std::chrono::milliseconds kResizePoll(200);
+// Период опроса ввода и размера окна в потоке отрисовки: клавиатура/мышь
+// обрабатываются этим интервалом, ресайз перерисовывается сразу.
+constexpr std::chrono::milliseconds kInputPoll(50);
 
 screen::Buffer g_screen;
 int g_width = 80;
@@ -78,11 +78,17 @@ int g_height = 25;
 bool g_size_forced = false;  // размер задан через LLAO_STATUS_SIZE — не обновлять
 
 // Вьюпорт «прокручиваемого плейлиста»: g_scroll — индекс первой видимой строки.
+// Любая ручная прокрутка (клавиатура/мышь) отключает автоследование g_follow.
 int g_scroll = 0;
-bool g_follow = true;  // следовать за активной полосой (Этап B сбрасывает по вводу)
+bool g_follow = true;  // следовать за активной полосой
 
 DWORD g_orig_mode = 0;
 bool g_orig_mode_valid = false;
+
+// Ввод консоли: дескриптор и исходный режим (восстанавливается в shutdown()).
+HANDLE g_input = INVALID_HANDLE_VALUE;
+DWORD g_orig_in_mode = 0;
+bool g_orig_in_mode_valid = false;
 
 std::wstring u2w(const std::string& s) { return util::u2w(s); }
 
@@ -202,7 +208,11 @@ void compose_frame() {
     size_t hi = (size_t)g_scroll + vis;
     if (hi > g_total) hi = g_total;
     std::string foot = i18n::fmt("files %zu-%zu / %zu", lo, hi, g_total);
-    foot += g_follow ? " · " + i18n::str("follow") : " · " + i18n::str("manual");
+    if (g_follow) {
+        foot += " · " + i18n::str("follow");
+    } else {
+        foot += " · " + i18n::str("manual") + " · " + i18n::str("arrow keys scroll, F — follow");
+    }
     std::wstring wf = u2w(foot);
     for (int c = 0; c < (int)wf.size() && c < g_width; c++)
         g_screen.cell(g_height - 1, c) = {wf[(size_t)c], kFooterFg, kFooterBg, false};
@@ -235,14 +245,63 @@ void render_pass_locked() {
     g_screen.flush();
 }
 
+// Обрабатывает накопленный ввод консоли (клавиатура/мышь/ресайз). Возвращает
+// true, если вьюпорт или режим следования изменились (нужна перерисовка).
+// Вызывается только из потока отрисовки под g_m; блокировки нет — читаются
+// только уже накопленные события.
+bool handle_input_locked() {
+    if (g_input == INVALID_HANDLE_VALUE || g_input == nullptr) return false;
+    DWORD n = 0;
+    if (!GetNumberOfConsoleInputEvents(g_input, &n) || n == 0) return false;
+    const int vis = g_height > 1 ? g_height - 1 : 0;
+    int max_scroll = (int)g_total - vis;
+    if (max_scroll < 0) max_scroll = 0;
+    auto clamp_scroll = [&](int& s) {
+        if (s < 0) s = 0;
+        if (s > max_scroll) s = max_scroll;
+    };
+    bool changed = false;
+    while (n > 0) {
+        INPUT_RECORD rec;
+        DWORD rd = 0;
+        if (!ReadConsoleInput(g_input, &rec, 1, &rd) || rd == 0) break;
+        n--;
+        if (rec.EventType == KEY_EVENT && rec.Event.KeyEvent.bKeyDown) {
+            switch (rec.Event.KeyEvent.wVirtualKeyCode) {
+                case VK_UP: g_scroll--; g_follow = false; break;
+                case VK_DOWN: g_scroll++; g_follow = false; break;
+                case VK_PRIOR: g_scroll -= vis; g_follow = false; break;
+                case VK_NEXT: g_scroll += vis; g_follow = false; break;
+                case VK_HOME: g_scroll = 0; g_follow = false; break;
+                case VK_END: g_scroll = max_scroll; g_follow = false; break;
+                case VK_SPACE:
+                case 'F': g_follow = !g_follow; break;
+                default: continue;
+            }
+            changed = true;
+        } else if (rec.EventType == MOUSE_EVENT &&
+                   (rec.Event.MouseEvent.dwEventFlags & MOUSE_WHEELED)) {
+            short delta = (short)HIWORD(rec.Event.MouseEvent.dwButtonState);
+            g_scroll += delta > 0 ? -3 : 3;
+            g_follow = false;
+            changed = true;
+        } else if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            changed = true;  // новый размер подхватит refresh_size_locked()
+        }
+    }
+    clamp_scroll(g_scroll);
+    return changed;
+}
+
 // Поток отрисовки. Спящий до появления работы; после пробуждения ждёт ещё
 // kDebounce, чтобы собрать пачку обновлений в одну отрисовку. Параллельно
-// с ожиданием каждые kResizePoll опрашивает размер окна.
+// с ожиданием каждые kInputPoll опрашивает ввод и размер окна.
 void render_loop() {
     std::unique_lock<std::mutex> lk(g_m);
     while (true) {
-        g_cv.wait_for(lk, kResizePoll, [&] { return g_render_stop || g_pending; });
+        g_cv.wait_for(lk, kInputPoll, [&] { return g_render_stop || g_pending; });
         if (g_render_stop) break;
+        if (handle_input_locked()) g_pending = true;
         if (!g_pending && refresh_size_locked()) g_pending = true;
         if (!g_pending) continue;
         g_cv.wait_for(lk, kDebounce);  // собрать пачку
@@ -272,6 +331,8 @@ void init(size_t total_files, bool no_status) {
     g_width = 80;
     g_height = 25;
     g_size_forced = false;
+    g_input = INVALID_HANDLE_VALUE;
+    g_orig_in_mode_valid = false;
     if (no_status) return;
 
     const char* force = getenv("LLAO_STATUS_FORCE");
@@ -324,6 +385,25 @@ void init(size_t total_files, bool no_status) {
     }
 
     g_interactive = true;
+
+    // Ввод: стрелки/PgUp/PgDn/Home/End — прокрутка, пробел/F — переключение
+    // автоследования, колесо мыши — прокрутка. Включаем обработку событий окна
+    // и мыши, отключаем QuickEdit (выделение мышью «зависает» консоль) и эхо
+    // ввода (иначе набранные символы печатались бы поверх статусбара). Если
+    // ввода нет (stdin не консоль, например pipe под wine) — вьюпорт остаётся
+    // без прокрутки, это не ошибка.
+    g_input = GetStdHandle(STD_INPUT_HANDLE);
+    if (g_input != INVALID_HANDLE_VALUE && g_input != nullptr) {
+        DWORD imode = 0;
+        if (GetConsoleMode(g_input, &imode)) {
+            g_orig_in_mode = imode;
+            g_orig_in_mode_valid = true;
+            DWORD new_mode = imode | ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT |
+                             ENABLE_MOUSE_INPUT;
+            new_mode &= ~(ENABLE_QUICK_EDIT_MODE | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+            SetConsoleMode(g_input, new_mode);
+        }
+    }
 
     // Весь псевдографический интерфейс живёт в альтернативном буфере экрана:
     // исходный экран (с командной строкой и прежним выводом) сохраняется
@@ -449,9 +529,14 @@ void shutdown() {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (h != INVALID_HANDLE_VALUE && h != nullptr) SetConsoleMode(h, g_orig_mode);
     }
+    if (g_orig_in_mode_valid && g_input != INVALID_HANDLE_VALUE && g_input != nullptr) {
+        SetConsoleMode(g_input, g_orig_in_mode);
+    }
     g_interactive = false;
     g_scroll = 0;
     g_follow = true;
+    g_orig_mode_valid = false;
+    g_orig_in_mode_valid = false;
 }
 
 }  // namespace status
