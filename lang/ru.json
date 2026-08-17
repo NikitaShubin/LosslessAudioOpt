@@ -221,5 +221,5 @@
     "files %zu-%zu / %zu": "файлы %zu–%zu / %zu",
     "follow": "следим",
     "manual": "вручную",
-    "arrow keys scroll, F — follow": "стрелки/PgUp/PgDn — прокрутка, F — следить"
+    "arrow keys scroll, F — follow": "↑↓/PgUp/PgDn — прокрутка, ←/→ — по строке, F — следить"
 }

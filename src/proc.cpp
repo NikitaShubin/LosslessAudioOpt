@@ -14,6 +14,15 @@ namespace {
 
 std::atomic<bool> g_cancel{false};
 
+// Процессорное время дочерних процессов текущего потока (100нс-тики). Каждый
+// run() накапливает CPU своих детей сюда — это позволяет атрибутировать затраты
+// на задачу (см. proc::child_cpu_ms()).
+thread_local uint64_t t_child_cpu_ticks = 0;
+
+uint64_t ft_ticks(const FILETIME& ft) {
+    return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
 std::string quote_arg(const std::string& a) {
     if (a.find_first_of(" \t\"") == std::string::npos) return a;
     std::string r = "\"";
@@ -29,6 +38,15 @@ std::string quote_arg(const std::string& a) {
 
 void cancel() { g_cancel.store(true, std::memory_order_relaxed); }
 bool cancelled() { return g_cancel.load(std::memory_order_relaxed); }
+
+uint64_t child_cpu_ms() { return t_child_cpu_ticks / 10000; }
+
+uint64_t thread_cpu_ms() {
+    FILETIME ft_creation{}, ft_exit{}, ft_kernel{}, ft_user{};
+    if (GetThreadTimes(GetCurrentThread(), &ft_creation, &ft_exit, &ft_kernel, &ft_user))
+        return (ft_ticks(ft_kernel) + ft_ticks(ft_user)) / 10000;
+    return 0;
+}
 
 Result run(const std::vector<std::string>& args, int timeout_sec, const std::string& cwd) {
     Result res;
@@ -152,6 +170,15 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
 
     DWORD code = 0;
     if (GetExitCodeProcess(pi.hProcess, &code)) res.exit_code = (int)code;
+
+    // Процессорное время (kernel+user) — объективная мера работы, не зависящая
+    // от планировщика/приоритета окна. Замер после завершения процесса.
+    FILETIME ft_creation{}, ft_exit{}, ft_kernel{}, ft_user{};
+    if (GetProcessTimes(pi.hProcess, &ft_creation, &ft_exit, &ft_kernel, &ft_user)) {
+        uint64_t ticks = ft_ticks(ft_kernel) + ft_ticks(ft_user);
+        res.cpu_ms = ticks / 10000;
+        t_child_cpu_ticks += ticks;
+    }
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
