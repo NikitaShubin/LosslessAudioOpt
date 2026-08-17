@@ -220,5 +220,6 @@
     "Replacement failed:\n": "Не удалось заменить файл:\n",
     "files %zu-%zu / %zu": "файлы %zu–%zu / %zu",
     "follow": "следим",
-    "manual": "вручную"
+    "manual": "вручную",
+    "arrow keys scroll, F — follow": "стрелки/PgUp/PgDn — прокрутка, F — следить"
 }
