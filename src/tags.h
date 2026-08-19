@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "config.h"
 #include "media.h"
 
 namespace tags {
@@ -54,7 +55,8 @@ std::string canonical_key(const std::string& key);
 
 // Извлекает теги: группы каждого найденного формата (ID3v2, LIST INFO, Vorbis,
 // APEv2, ID3v1, MP4) нативным разбором файла.
-TagSet extract_tags(const std::string& path, const media::Probe& probe);
+TagSet extract_tags(const std::string& path, const media::Probe& probe,
+                    bool native_reader = false);
 
 // Объединяет группы a и b (встроенные + sidecar). Одноимённые типы сливаются.
 TagSet merge_tags(TagSet a, const TagSet& b);
@@ -67,10 +69,10 @@ struct TagPlan {
 };
 
 TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
-                  const std::map<std::string, bool>& tag_caps, bool allow_merge);
+                  const config::Format& fmt, bool allow_merge);
 
-// Записывает одну группу встроенно в файл формата fmt_id (теги в типе type).
-std::string write_group(const std::string& path, const std::string& fmt_id, TagType type,
+// Записывает одну группу встроенно в файл формата fmt (теги в типе type).
+std::string write_group(const std::string& path, const config::Format& fmt, TagType type,
                         const Group& g);
 
 // Записывает ZIP-sidecar (tags.json + pictures/…) рядом с файлом:
@@ -86,7 +88,7 @@ bool read_sidecar(const std::string& base_path, TagSet& ts, std::string* err);
 
 // Сверка после записи: каждая записанная группа присутствует при перечитывании
 // файла нашими парсерами. Возвращает пустую строку, если всё совпало.
-std::string validate_groups(const std::string& path, const std::string& fmt_id,
+std::string validate_groups(const std::string& path, const config::Format& fmt,
                             const std::vector<std::pair<TagType, Group>>& embed,
                             const std::string& ffprobe);
 

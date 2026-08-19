@@ -1,5 +1,6 @@
 #include "tags.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -71,6 +72,27 @@ static std::string norm_key(const std::string& key) {
     return c;
 }
 
+// Нормализация числового значения для сравнения: M4A хранит track/disc
+// бинарно, поэтому «01» читается обратно как «1». Убираем ведущие нули
+// (но не у «0») у каждого числа, включая составные вида «1/10».
+static std::string norm_num(const std::string& s) {
+    std::string out;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = i;
+        while (j < s.size() && isdigit((unsigned char)s[j])) j++;
+        if (j > i) {
+            size_t k = i;
+            while (k + 1 < j && s[k] == '0') k++;
+            out.append(s, k, j - k);
+        }
+        if (j >= s.size()) break;
+        out.push_back(s[j]);
+        i = j + 1;
+    }
+    return out.empty() ? s : out;
+}
+
 // ---------------------------------------------------------------------------
 // Имена типов тегов
 // ---------------------------------------------------------------------------
@@ -127,6 +149,15 @@ static void wr32be(std::vector<uint8_t>& v, uint32_t x) {
     v.push_back((uint8_t)(x >> 16));
     v.push_back((uint8_t)(x >> 8));
     v.push_back((uint8_t)x);
+}
+
+// Запись 32-битного big-endian по смещению (в отличие от wr32be, которая
+// добавляет в конец).
+static void wr32be_at(std::vector<uint8_t>& v, size_t off, uint32_t x) {
+    v[off] = (uint8_t)(x >> 24);
+    v[off + 1] = (uint8_t)(x >> 16);
+    v[off + 2] = (uint8_t)(x >> 8);
+    v[off + 3] = (uint8_t)x;
 }
 static void wr32le(std::vector<uint8_t>& v, uint32_t x) {
     v.push_back((uint8_t)x);
@@ -203,61 +234,23 @@ static void put_field(TagSet& ts, const std::string& key, const std::string& val
 }
 
 // ---------------------------------------------------------------------------
-// Имена ключей для записи по форматам
+// Имена ключей для записи по форматам (в JSON → tag.key_map)
 // ---------------------------------------------------------------------------
-
-static const std::map<std::string, std::string> VORBIS_KEYS = {
-    {"title", "TITLE"},           {"artist", "ARTIST"},       {"album", "ALBUM"},
-    {"album_artist", "ALBUMARTIST"}, {"composer", "COMPOSER"}, {"genre", "GENRE"},
-    {"date", "DATE"},             {"track", "TRACKNUMBER"},   {"disc", "DISCNUMBER"},
-    {"comment", "COMMENT"},       {"isrc", "ISRC"},           {"encoder", "ENCODER"},
-    {"lyrics", "LYRICS"},         {"copyright", "COPYRIGHT"}, {"cue_sheet", "CUESHEET"},
-};
-
-static const std::map<std::string, std::string> APE_KEYS = {
-    {"title", "Title"},           {"artist", "Artist"},       {"album", "Album"},
-    {"album_artist", "Album Artist"}, {"composer", "Composer"}, {"genre", "Genre"},
-    {"date", "Year"},             {"track", "Track"},         {"disc", "Disc"},
-    {"comment", "Comment"},       {"isrc", "ISRC"},           {"encoder", "Encoder"},
-    {"lyrics", "Lyrics"},         {"copyright", "Copyright"}, {"cue_sheet", "Cuesheet"},
-};
-
-static const std::map<std::string, std::string> MP4_KEYS = {
-    {"title", "\xa9"
-              "nam"},
-    {"artist", "\xa9"
-               "ART"},
-    {"album", "\xa9"
-              "alb"},
-    {"album_artist", "aART"},
-    {"composer", "\xa9"
-                 "wrt"},
-    {"genre", "\xa9"
-              "gen"},
-    {"date", "\xa9"
-             "day"},
-    {"comment", "\xa9"
-                "cmt"},
-    {"encoder", "\xa9"
-                "too"},
-    {"lyrics", "\xa9"
-               "lyr"},
-    {"copyright", "cprt"},
-};
 
 // ---------------------------------------------------------------------------
 // FLAC / Vorbis comment
 // ---------------------------------------------------------------------------
 
-static void build_vorbis_comment(const Group& g, std::vector<uint8_t>& out) {
+static void build_vorbis_comment(const Group& g, const std::map<std::string, std::string>& key_map,
+                                 std::vector<uint8_t>& out) {
     std::vector<std::pair<std::string, std::string>> items;
     for (const auto& [key, values] : g.fields) {
         for (const auto& val : values) {
             std::string k;
             if (is_replaygain(key)) k = key;  // replaygain_track_gain → REPLAYGAIN_TRACK_GAIN
             else {
-                auto it = VORBIS_KEYS.find(key);
-                k = it != VORBIS_KEYS.end() ? it->second : key;
+                auto it = key_map.find(key);
+                k = it != key_map.end() ? it->second : key;
             }
             items.emplace_back(k, val);
         }
@@ -462,7 +455,8 @@ static void ape_text_item(std::vector<uint8_t>& body, const std::string& key, co
     ape_item(body, key, v, 0);
 }
 
-static void build_apev2(const Group& g, std::vector<uint8_t>& out) {
+static void build_apev2(const Group& g, const std::map<std::string, std::string>& key_map,
+                        std::vector<uint8_t>& out) {
     std::vector<uint8_t> body;
     for (const auto& [key, values] : g.fields) {
         std::string k;
@@ -470,8 +464,8 @@ static void build_apev2(const Group& g, std::vector<uint8_t>& out) {
             k = key;
             if (!k.empty()) k[0] = (char)::toupper((unsigned char)k[0]);
         } else {
-            auto it = APE_KEYS.find(key);
-            k = it != APE_KEYS.end() ? it->second : key;
+            auto it = key_map.find(key);
+            k = it != key_map.end() ? it->second : key;
         }
         for (const auto& val : values) ape_text_item(body, k, val);
     }
@@ -628,7 +622,8 @@ static void id3v2_txxx(std::vector<uint8_t>& out, const std::string& desc, const
     out.insert(out.end(), payload.begin(), payload.end());
 }
 
-static void build_id3v2(const Group& g, std::vector<uint8_t>& out) {
+static void build_id3v2(const Group& g, const std::map<std::string, std::string>& key_map,
+                        std::vector<uint8_t>& out) {
     std::vector<uint8_t> frames;
     for (const auto& [key, values] : g.fields) {
         if (key == "lyrics") continue;
@@ -638,15 +633,8 @@ static void build_id3v2(const Group& g, std::vector<uint8_t>& out) {
             replayg = key;
             for (auto& ch : replayg) ch = (char)::toupper((unsigned char)ch);
         } else {
-            static const std::map<std::string, const char*> m = {
-                {"title", "TIT2"},         {"artist", "TPE1"},     {"album", "TALB"},
-                {"album_artist", "TPE2"},  {"composer", "TCOM"},   {"genre", "TCON"},
-                {"date", "TDRC"},          {"track", "TRCK"},      {"disc", "TPOS"},
-                {"comment", "COMM"},       {"isrc", "TSRC"},       {"encoder", "TENC"},
-                {"copyright", "TCOP"},
-            };
-            auto it = m.find(key);
-            if (it != m.end()) id = it->second;
+            auto it = key_map.find(key);
+            if (it != key_map.end()) id = it->second.c_str();
         }
         for (const auto& val : values) {
             if (id && std::string(id) == "COMM") id3v2_comm(frames, val);
@@ -718,14 +706,29 @@ static bool id3v2_parse(const uint8_t* d, size_t n, Group& g) {
             if (p < fsize) pic.data.assign(f + p, f + fsize);
             g.pictures.push_back(std::move(pic));
         } else if (id == "USLT") {
+            // encoding, язык (3 байта), дескриптор (zstring), текст. Дескриптор
+            // обязан быть пропущен, иначе текст читается с ведущим NUL и не
+            // совпадает с записанным (валидация «лирика не сохранилась»).
             if (fsize > 4) {
                 uint8_t enc = f[0];
-                const uint8_t* txt = f + 4;
-                size_t tlen = fsize - 4;
-                std::string s;
-                if (enc == 1 || enc == 2) s = utf16_to_utf8(txt, tlen);
-                else s.assign((const char*)txt, tlen);
-                if (g.fields["lyrics"].empty()) g.fields["lyrics"].push_back(s);
+                size_t p = 4;
+                size_t q = p;
+                if (enc == 1 || enc == 2) {
+                    while (q + 1 < fsize && !(f[q] == 0 && f[q + 1] == 0)) q += 2;
+                } else {
+                    while (q < fsize && f[q] != 0) q++;
+                }
+                size_t tstart = q + (enc == 1 || enc == 2 ? 2 : 1);
+                if (tstart < fsize) {
+                    size_t tlen = fsize - tstart;
+                    std::string s;
+                    if (enc == 1 || enc == 2) s = utf16_to_utf8(f + tstart, tlen);
+                    else {
+                        while (tlen > 0 && f[tstart + tlen - 1] == 0) tlen--;
+                        s.assign((const char*)f + tstart, tlen);
+                    }
+                    if (g.fields["lyrics"].empty()) g.fields["lyrics"].push_back(s);
+                }
             }
         } else if (id == "COMM") {
             // encoding, язык (3 байта), описание, текст
@@ -945,7 +948,8 @@ static void mp4_ilst_parse(const uint8_t* d, size_t n, Group& g) {
     M4aBox moov_b;
     moov_b.off = moov - 4;
     moov_b.size = rd32be(d + moov - 4);
-    auto traks = m4a_children(d, moov, moov_b.off + moov_b.size);
+    // Содержимое moov начинается после заголовка бокса (size+type): moov+4.
+    auto traks = m4a_children(d, moov + 4, moov_b.off + moov_b.size);
     for (const auto& m : traks) {
         if (memcmp(m.type, "udta", 4) != 0) continue;
         auto udtas = m4a_children(d, m.off + 8, m.off + m.size);
@@ -983,8 +987,8 @@ static void mp4_ilst_parse(const uint8_t* d, size_t n, Group& g) {
                                 // custom: mean/name/data
                                 auto sub = m4a_children(d, it.off + 8, it.off + it.size);
                                 for (const auto& sb : sub) {
-                                    if (memcmp(sb.type, "name", 4) == 0 && sb.size > 12) {
-                                        std::string nm((const char*)d + sb.off + 12, sb.size - 12);
+                                    if (memcmp(sb.type, "name", 4) == 0 && sb.size > 8) {
+                                        std::string nm((const char*)d + sb.off + 8, sb.size - 8);
                                         if (!nm.empty()) g_put(g, nm, s);
                                     }
                                 }
@@ -1107,18 +1111,6 @@ static void wav_id3v2_blocks(const uint8_t* d, size_t n, Group& g) {
 // Извлечение тегов: нативные разборы в отдельные группы
 // ---------------------------------------------------------------------------
 
-static bool is_native_format(const std::string& fmt) {
-    static const std::string natives[] = {
-        "flac", "ogg",  "opus",      "vorbis", "mp4",      "m4a", "mov",
-        "mp3",  "mpeg", "wav",       "riff",   "tta",      "wavpack", "ape",
-        "tak",  "optimfrog", "ofr",  "la",
-    };
-    std::string f = util::to_lower(fmt);
-    for (const auto& s : natives)
-        if (f.find(s) != std::string::npos) return true;
-    return false;
-}
-
 // Пересобирает каноническую агрегацию из групп и детектирует противоречия.
 static void rebuild_canonical(TagSet& ts) {
     ts.fields.clear();
@@ -1161,7 +1153,7 @@ static void rebuild_canonical(TagSet& ts) {
     ts.present = !(ts.fields.empty() && ts.pictures.empty() && ts.cue_sheet.empty());
 }
 
-TagSet extract_tags(const std::string& path, const media::Probe& probe) {
+TagSet extract_tags(const std::string& path, const media::Probe& probe, bool native_reader) {
     TagSet ts;
     auto data = util::read_file(path);
     if (data.empty()) return ts;
@@ -1228,7 +1220,7 @@ TagSet extract_tags(const std::string& path, const media::Probe& probe) {
 
     // Неизвестный контейнер с тегами по ffprobe: берём текст, но полным разбором
     // (картинки и т.п.) не гарантируем — помечаем файл как неполный.
-    if (ts.groups.empty() && !is_native_format(fmt)) {
+    if (ts.groups.empty() && !native_reader) {
         Group g;
         g.type = TagType::unknown;
         for (const auto& [k, v] : probe.tags)
@@ -1276,24 +1268,24 @@ TagSet merge_tags(TagSet a, const TagSet& b) {
 // Планирование: что встроить и что вынести в sidecar
 // ---------------------------------------------------------------------------
 
-// Вместимость типа тегов по контенту группы (форматные ограничения).
-static bool content_fits_type(TagType t, const Group& g) {
-    if (t == TagType::mp4) {
+// Вместимость типа тегов по контенту группы (форматные ограничения из JSON).
+static bool content_fits_type(const config::Format& fmt, TagType /*t*/, const Group& g) {
+    if (!fmt.tag_write_supported) return false;
+    if (!fmt.tag_replaygain_allowed) {
         for (const auto& [k, vs] : g.fields)
-            if (is_replaygain(k)) return false;  // ReplayGain в M4A не пишется
+            if (is_replaygain(k)) return false;
     }
-    if (t == TagType::id3v1) {
-        static const std::set<std::string> ok = {"title", "artist", "album", "date", "comment",
-                                                 "track"};
+    if (!fmt.tag_allowed_keys.empty()) {
         for (const auto& [k, vs] : g.fields) {
-            if (ok.count(k)) continue;
+            if (std::find(fmt.tag_allowed_keys.begin(), fmt.tag_allowed_keys.end(), k) !=
+                fmt.tag_allowed_keys.end())
+                continue;
             if (!has_value(vs)) continue;
             return false;
         }
-        if (!g.pictures.empty()) return false;
-        if (!g.cue_sheet.empty()) return false;
     }
-    if (t == TagType::riff) return false;  // LIST INFO писать не умеем
+    if (!fmt.tag_pictures_allowed && !g.pictures.empty()) return false;
+    if (!fmt.tag_cue_sheet_allowed && !g.cue_sheet.empty()) return false;
     return true;
 }
 
@@ -1324,11 +1316,30 @@ static bool caps_ok(const Group& g, const std::map<std::string, bool>& tag_caps,
 }
 
 TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
-                  const std::map<std::string, bool>& tag_caps, bool allow_merge) {
+                  const config::Format& fmt, bool allow_merge) {
     TagPlan plan;
     std::vector<Group> groups;
-    for (const auto& g : ts.groups)
-        if (!g.empty()) groups.push_back(g);
+    for (const auto& g : ts.groups) {
+        if (g.empty()) continue;
+        Group c = g;
+        bool dirty = false;
+        for (auto& [k, vs] : c.fields) {
+            vs.erase(std::remove_if(vs.begin(), vs.end(),
+                                    [](const std::string& s) { return s.empty(); }),
+                     vs.end());
+            if (vs.empty()) dirty = true;
+        }
+        if (dirty) {
+            Group c2;
+            c2.type = c.type;
+            c2.cue_sheet = c.cue_sheet;
+            c2.pictures = std::move(c.pictures);
+            for (auto& [k, vs] : c.fields)
+                if (!vs.empty()) c2.fields[k] = std::move(vs);
+            c = std::move(c2);
+        }
+        if (!c.empty()) groups.push_back(std::move(c));
+    }
     if (groups.empty()) return plan;
 
     auto native = [&]() -> TagType {
@@ -1337,8 +1348,6 @@ TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
         return TagType::unknown;
     };
 
-    // Восстановление: если набор согласован и целиком влезает в один нативный
-    // тип — мержим всё в одну группу.
     if (allow_merge && !ts.conflict) {
         Group merged;
         for (const auto& g : groups) {
@@ -1349,19 +1358,18 @@ TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
         }
         TagType t = native();
         std::vector<std::string> missing;
-        if (t != TagType::unknown && content_fits_type(t, merged) &&
-            caps_ok(merged, tag_caps, &missing)) {
+        if (t != TagType::unknown && content_fits_type(fmt, t, merged) &&
+            caps_ok(merged, fmt.tag_caps, &missing)) {
             plan.embed.emplace_back(t, std::move(merged));
             return plan;
         }
     }
 
-    // Сжатие с единственной группой: конвертируем её в нативный тип цели.
     if (!allow_merge && groups.size() == 1) {
         TagType t = native();
         std::vector<std::string> missing;
-        if (t != TagType::unknown && content_fits_type(t, groups[0]) &&
-            caps_ok(groups[0], tag_caps, &missing)) {
+        if (t != TagType::unknown && content_fits_type(fmt, t, groups[0]) &&
+            caps_ok(groups[0], fmt.tag_caps, &missing)) {
             plan.embed.emplace_back(t, groups[0]);
             return plan;
         }
@@ -1369,10 +1377,6 @@ TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
         return plan;
     }
 
-    // Мержи запрещены (несколько групп): каждая группа в своём типе, если цель
-    // его поддерживает и содержимое помещается; иначе — в sidecar. На каждый
-    // нативный тип встраивается не больше одной группы — писатели перезаписывают
-    // тег целиком, так что вторая однотипная группа ушла бы в никуда.
     std::set<TagType> used;
     for (const auto& g : groups) {
         bool supp = false;
@@ -1383,7 +1387,7 @@ TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
                 break;
             }
         std::vector<std::string> missing;
-        if (supp && content_fits_type(g.type, g) && caps_ok(g, tag_caps, &missing))
+        if (supp && content_fits_type(fmt, g.type, g) && caps_ok(g, fmt.tag_caps, &missing))
             plan.embed.emplace_back(g.type, g);
         else
             plan.sidecar.push_back(g);
@@ -1395,10 +1399,11 @@ TagPlan plan_tags(const TagSet& ts, const std::vector<TagType>& target_types,
 // Запись встроенных тегов (одна группа)
 // ---------------------------------------------------------------------------
 
-std::string write_group(const std::string& path, const std::string& fmt_id, TagType type,
+std::string write_group(const std::string& path, const config::Format& fmt, TagType type,
                         const Group& g) {
     if (g.empty()) return "";
-    if (type == TagType::id3v1 && fmt_id == "la") {
+    const auto& km = fmt.tag_key_map;
+    if (fmt.tag_write_method == "id3v1_append") {
         auto data = util::read_file(path);
         if (data.size() < 128) return i18n::str("file is too small for ID3v1");
         if (data.size() >= 128 && memcmp(data.data() + data.size() - 128, "TAG", 3) == 0)
@@ -1408,13 +1413,11 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         data.insert(data.end(), tag.begin(), tag.end());
         return util::write_file(path, data) ? "" : i18n::str("could not write ID3v1");
     }
-    if (type == TagType::vorbis && fmt_id == "flac") {
+    if (fmt.tag_write_method == "flac_metadata") {
         auto data = util::read_file(path);
         Group ignored;
         int64_t audio = flac_metadata(data.data(), data.size(), ignored);
         if (audio < 0) return i18n::str("not a FLAC file or corrupted metadata");
-        // Собираем новые блоки: сохраняем STREAMINFO и т.д., заменяя
-        // VORBIS_COMMENT и PICTURE.
         std::vector<uint8_t> out;
         out.insert(out.end(), data.begin(), data.begin() + 4);
         size_t o = 4;
@@ -1423,11 +1426,9 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
             uint8_t btype = hdr & 0x7f;
             uint32_t len =
                 ((uint32_t)data[o + 1] << 16) | ((uint32_t)data[o + 2] << 8) | data[o + 3];
-            bool last = (hdr & 0x80) != 0;
             if (btype == 4 || btype == 6) {
-                // VORBIS_COMMENT/PICTURE — пропускаем (запишем свои)
             } else {
-                out.push_back((uint8_t)(btype | (last ? 0x80 : 0)));
+                out.push_back((uint8_t)(btype | (hdr & 0x80)));
                 out.push_back(data[o + 1]);
                 out.push_back(data[o + 2]);
                 out.push_back(data[o + 3]);
@@ -1436,7 +1437,7 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
             o += 4 + len;
         }
         std::vector<uint8_t> vc;
-        build_vorbis_comment(g, vc);
+        build_vorbis_comment(g, km, vc);
         out.push_back(0x04);
         out.push_back((uint8_t)(vc.size() >> 16));
         out.push_back((uint8_t)(vc.size() >> 8));
@@ -1451,7 +1452,6 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
             out.push_back((uint8_t)pb.size());
             out.insert(out.end(), pb.begin(), pb.end());
         }
-        // Помечаем последний блок как последний
         size_t hpos = 4;
         size_t last_hdr = hpos;
         for (size_t i = hpos; i + 4 <= out.size();) {
@@ -1468,13 +1468,10 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         out.insert(out.end(), data.begin() + audio, data.end());
         return util::write_file(path, out) ? "" : i18n::str("could not write FLAC tags");
     }
-    if (type == TagType::apev2 &&
-        (fmt_id == "wavpack" || fmt_id == "ape" || fmt_id == "monkeys_audio" || fmt_id == "ofr" ||
-         fmt_id == "optimfrog" || fmt_id == "tak")) {
+    if (fmt.tag_write_method == "apev2_tail") {
         std::vector<uint8_t> tag;
-        build_apev2(g, tag);
+        build_apev2(g, km, tag);
         auto data = util::read_file(path);
-        // Обрезаем старые APEv2 и ID3v1, если есть
         if (data.size() >= 128 && memcmp(data.data() + data.size() - 128, "TAG", 3) == 0)
             data.resize(data.size() - 128);
         if (data.size() >= 32 && memcmp(data.data() + data.size() - 32, "APETAGEX", 8) == 0) {
@@ -1484,11 +1481,10 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         data.insert(data.end(), tag.begin(), tag.end());
         return util::write_file(path, data) ? "" : i18n::str("could not write APEv2");
     }
-    if (type == TagType::id3v2 && fmt_id == "tta") {
+    if (fmt.tag_write_method == "id3v2_header") {
         std::vector<uint8_t> tag;
-        build_id3v2(g, tag);
+        build_id3v2(g, km, tag);
         auto data = util::read_file(path);
-        // Если файл начинается с ID3v2 — удаляем старый
         if (data.size() >= 10 && memcmp(data.data(), "ID3", 3) == 0) {
             uint32_t tag_size = syncsafe(data.data() + 6);
             if (10 + tag_size <= data.size()) data.erase(data.begin(), data.begin() + 10 + tag_size);
@@ -1496,9 +1492,8 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         data.insert(data.begin(), tag.begin(), tag.end());
         return util::write_file(path, data) ? "" : i18n::str("could not write ID3v2");
     }
-    if (type == TagType::mp4 && (fmt_id == "alac" || fmt_id == "mpeg4_als")) {
+    if (fmt.tag_write_method == "mp4_ilst") {
         auto data = util::read_file(path);
-        // moov должен идти после mdat (как пишет ffmpeg без +faststart)
         size_t mdat = std::string::npos, moov = std::string::npos;
         for (size_t i = 0; i + 4 <= data.size(); i++) {
             if (mdat == std::string::npos && memcmp(data.data() + i, "mdat", 4) == 0)
@@ -1515,7 +1510,6 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         uint64_t moov_sz = rd32be(data.data() + moov_off);
         if (moov_sz < 8 || moov_off + moov_sz > data.size()) return i18n::str("moov is corrupted");
 
-        // Находим udta -> meta -> ilst
         M4aBox udta{0, 0, {'u', 'd', 't', 'a'}};
         M4aBox meta{0, 0, {'m', 'e', 't', 'a'}};
         M4aBox ilst{0, 0, {'i', 'l', 's', 't'}};
@@ -1536,26 +1530,28 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         if (!found_udta || !found_meta || !found_ilst)
             return i18n::str("no udta/meta/ilst in moov (ffmpeg should create them)");
 
-        // Собираем новые ilst
         std::vector<uint8_t> new_ilst;
         auto add_item = [&](const std::string& key4, uint32_t dataflags,
                             const std::vector<uint8_t>& val) {
             std::vector<uint8_t> data_box;
-            data_box.insert(data_box.end(), {0, 0, 0, 0});  // data size placeholder
+            data_box.insert(data_box.end(), {0, 0, 0, 0});
             data_box.insert(data_box.end(), {'d', 'a', 't', 'a'});
             wr32be(data_box, dataflags);
             wr32be(data_box, 0);
             data_box.insert(data_box.end(), val.begin(), val.end());
-            wr32be(data_box, (uint32_t)data_box.size());  // размер data-бокса
+            wr32be_at(data_box, 0, (uint32_t)data_box.size());
             std::vector<uint8_t> item;
             item.insert(item.end(), {0, 0, 0, 0});
             item.insert(item.end(), key4.begin(), key4.end());
             item.insert(item.end(), data_box.begin(), data_box.end());
-            wr32be(item, (uint32_t)item.size());
+            wr32be_at(item, 0, (uint32_t)item.size());
             new_ilst.insert(new_ilst.end(), item.begin(), item.end());
         };
         for (const auto& [key, values] : g.fields) {
-            if (key == "track" || key == "disc") {
+            bool is_binary = std::find(fmt.tag_numeric_fields.begin(),
+                                       fmt.tag_numeric_fields.end(), key) !=
+                             fmt.tag_numeric_fields.end();
+            if (is_binary) {
                 for (const auto& val : values) {
                     unsigned n = 0;
                     try { n = (unsigned)std::stoul(val); } catch (...) {}
@@ -1563,48 +1559,43 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
                     v[2] = (uint8_t)(n >> 8);
                     v[3] = (uint8_t)n;
                     if (key == "track") { v.resize(8); add_item("trkn", 0, v); }
-                    else { v.resize(6); add_item("disk", 0, v); }
+                    else if (key == "disc") { v.resize(6); add_item("disk", 0, v); }
                 }
             } else if (is_replaygain(key)) {
-                // ReplayGain в mp4 обычно не пишется — переносим в sidecar
                 return i18n::str("ReplayGain is not supported in M4A (use a sidecar)");
             } else {
                 std::string key4 = key;
                 bool custom = false;
-                if (key == "lyrics") key4 = "\xa9lyr";
-                else {
-                    auto it = MP4_KEYS.find(key);
-                    if (it != MP4_KEYS.end()) key4 = it->second;
-                    else custom = true;
-                }
+                auto it = km.find(key);
+                if (it != km.end()) key4 = it->second;
+                else custom = true;
                 for (const auto& val : values) {
                     if (custom) {
-                        // ---- mean/name/data
                         std::vector<uint8_t> mean;
                         mean.insert(mean.end(), {0, 0, 0, 0});
                         mean.insert(mean.end(), {'m', 'e', 'a', 'n'});
                         std::string meanval = "com.apple.iTunes";
                         mean.insert(mean.end(), meanval.begin(), meanval.end());
-                        wr32be(mean, (uint32_t)mean.size());
+                        wr32be_at(mean, 0, (uint32_t)mean.size());
                         std::vector<uint8_t> name;
                         name.insert(name.end(), {0, 0, 0, 0});
                         name.insert(name.end(), {'n', 'a', 'm', 'e'});
                         name.insert(name.end(), key.begin(), key.end());
-                        wr32be(name, (uint32_t)name.size());
+                        wr32be_at(name, 0, (uint32_t)name.size());
                         std::vector<uint8_t> dbox;
                         dbox.insert(dbox.end(), {0, 0, 0, 0});
                         dbox.insert(dbox.end(), {'d', 'a', 't', 'a'});
                         wr32be(dbox, 1);
                         wr32be(dbox, 0);
                         dbox.insert(dbox.end(), val.begin(), val.end());
-                        wr32be(dbox, (uint32_t)dbox.size());
+                        wr32be_at(dbox, 0, (uint32_t)dbox.size());
                         std::vector<uint8_t> item;
                         item.insert(item.end(), {0, 0, 0, 0});
                         item.insert(item.end(), {'-', '-', '-', '-'});
                         item.insert(item.end(), mean.begin(), mean.end());
                         item.insert(item.end(), name.begin(), name.end());
                         item.insert(item.end(), dbox.begin(), dbox.end());
-                        wr32be(item, (uint32_t)item.size());
+                        wr32be_at(item, 0, (uint32_t)item.size());
                         new_ilst.insert(new_ilst.end(), item.begin(), item.end());
                     } else {
                         std::vector<uint8_t> v(val.begin(), val.end());
@@ -1618,7 +1609,6 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
             add_item("covr", dataflags, pic.data);
         }
 
-        // Заменяем ilst и пересчитываем размеры
         std::vector<uint8_t> out;
         out.reserve(data.size() + new_ilst.size());
         out.insert(out.end(), data.begin(), data.end());
@@ -1627,7 +1617,7 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         new_ilst_box.insert(new_ilst_box.end(), {0, 0, 0, 0});
         new_ilst_box.insert(new_ilst_box.end(), {'i', 'l', 's', 't'});
         new_ilst_box.insert(new_ilst_box.end(), new_ilst.begin(), new_ilst.end());
-        wr32be(new_ilst_box, (uint32_t)new_ilst_box.size());
+        wr32be_at(new_ilst_box, 0, (uint32_t)new_ilst_box.size());
         out.insert(out.begin() + ilst.off, new_ilst_box.begin(), new_ilst_box.end());
         int64_t delta = (int64_t)new_ilst_box.size() - (int64_t)ilst.size;
         auto bump = [&](uint64_t off, int64_t add) {
@@ -1655,7 +1645,7 @@ std::string write_group(const std::string& path, const std::string& fmt_id, TagT
         return util::write_file(path, out) ? "" : i18n::str("could not write M4A tags");
     }
     return i18n::fmt("format '%s' does not support built-in tags of type '%s'",
-                     fmt_id.c_str(), tag_type_name(type));
+                     fmt.id.c_str(), tag_type_name(type));
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,20 +1829,18 @@ bool read_sidecar(const std::string& base_path, TagSet& ts, std::string* err) {
 // Валидация после записи
 // ---------------------------------------------------------------------------
 
-std::string validate_groups(const std::string& path, const std::string& fmt_id,
+std::string validate_groups(const std::string& path, const config::Format& fmt,
                             const std::vector<std::pair<TagType, Group>>& embed,
                             const std::string& ffprobe) {
     media::Probe p;
-    if (fmt_id == "optimfrog" || fmt_id == "ofr" || fmt_id == "tak") {
-        // ffmpeg/ffprobe (BtbN-сборки) не содержит OFR-демуксера, а из TAK теги
-        // (APEv2-хвост) ffprobe не читает — в обоих случаях теги читаем напрямую.
+    if (fmt.tag_validate_skip_ffprobe) {
         p.ok = true;
-        p.format_name = fmt_id;
+        p.format_name = fmt.id;
     } else {
         p = media::probe_file(path, ffprobe);
         if (!p.ok) return i18n::str("ffprobe could not read the written tags: ") + p.error;
     }
-    TagSet read = extract_tags(path, p);
+    TagSet read = extract_tags(path, p, fmt.tag_native_reader);
     std::vector<std::string> problems;
     size_t want_pics = 0;
     for (const auto& [type, g] : embed) {
@@ -1862,10 +1850,13 @@ std::string validate_groups(const std::string& path, const std::string& fmt_id,
             if (key == "lyrics" || is_replaygain(key)) continue;
             for (const auto& val : values) {
                 bool found = false;
+                bool numeric = std::find(fmt.tag_numeric_fields.begin(),
+                                         fmt.tag_numeric_fields.end(), key) !=
+                               fmt.tag_numeric_fields.end();
                 for (const auto& [rk, rv] : read.fields) {
                     if (rk == key || norm_key(rk) == norm_key(key)) {
                         for (const auto& r : rv)
-                            if (r == val) { found = true; break; }
+                            if (r == val || (numeric && norm_num(r) == norm_num(val))) { found = true; break; }
                     }
                 }
                 if (!found) {

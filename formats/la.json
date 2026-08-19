@@ -41,6 +41,19 @@
   "tag": {
     "system": "id3v1",
     "writer": "id3",
+    "write_method": "id3v1_append",
+    "native_reader": true,
+    "numeric_fields": ["track"],
+    "key_map": {
+      "title": "title", "artist": "artist", "album": "album",
+      "date": "date", "comment": "comment", "track": "track"
+    },
+    "reverse_key_map": {},
+    "write_constraints": {
+      "allowed_keys": ["title", "artist", "album", "date", "comment", "track"],
+      "pictures_allowed": false,
+      "cue_sheet_allowed": false
+    },
     "capabilities": {
       "text": false,
       "pictures": false,

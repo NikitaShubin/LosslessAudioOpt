@@ -56,6 +56,19 @@ struct Format {
     std::string tag_writer;
     std::map<std::string, bool> tag_caps;  // text/pictures/lyrics/cue_sheet/replay_gain/chapters
 
+    // Data-driven tag fields (из formats/*.json → tag.*)
+    std::string tag_write_method;                          // id3v1_append | flac_metadata | apev2_tail | id3v2_header | mp4_ilst
+    bool tag_native_reader = false;                        // встроенный парсер тегов
+    bool tag_validate_skip_ffprobe = false;                // OFR/TAK: пропуск ffprobe при валидации
+    std::vector<std::string> tag_numeric_fields;           // поля для norm_num (track, disc)
+    std::map<std::string, std::string> tag_key_map;        // canonical → format key (запись)
+    std::map<std::string, std::string> tag_reverse_key_map; // format → canonical (чтение)
+    std::vector<std::string> tag_allowed_keys;             // write_constraints: пусто = все
+    bool tag_replaygain_allowed = true;
+    bool tag_pictures_allowed = true;
+    bool tag_cue_sheet_allowed = true;
+    bool tag_write_supported = true;                       // false для RIFF (запись не реализована)
+
     int channels_min = 1;
     int channels_max = 0;
     std::vector<int> bit_depth;

@@ -18,6 +18,7 @@ files/
 wav/
 rzlt/
 scratch_test/
+2opt/
 
 # Python
 __pycache__/
@@ -25,3 +26,4 @@ __pycache__/
 # Артефакты сборки
 *.o
 llao.exe
+bench.exe

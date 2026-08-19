@@ -180,7 +180,9 @@ def read_id3v2(path):
             if desc and val:
                 put(canon(desc), val)
         elif fid == "USLT":
-            t = decode_text(f[4:], f[0])
+            # Структура как у COMM: enc, язык (3 байта), дескриптор, текст.
+            # Дескриптор пропускаем, иначе текст читается с ведущим NUL.
+            t = _split_comm(f[4:], f[0])
             if t:
                 put("lyrics", t)
         elif fid == "APIC":
@@ -264,6 +266,22 @@ def read_flac(path):
             else:
                 out.setdefault(ck, []).append(val)
     return {"fields": out, "pictures": pics}
+
+
+def read_m4a(path):
+    """Теги M4A (alac/trkn и пр.) через ffprobe -> {'fields': {...}}."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags",
+                        "-of", "json", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        return None
+    data = json.loads(r.stdout or "{}")
+    tags = (data.get("format") or {}).get("tags") or {}
+    out = {}
+    for k, v in tags.items():
+        out.setdefault(canon(k), []).append(v)
+    if not out:
+        return None
+    return {"fields": out, "pictures": 0}
 
 
 def read_sidecar_groups(zp):
@@ -353,6 +371,25 @@ def inject_id3_chunk(wav_path, tag):
         out += d[o:nxt]
         o = nxt
     assert inserted, "data-чанк не найден"
+    struct.pack_into("<I", out, 4, len(out) - 8)
+    open(wav_path, "wb").write(bytes(out))
+
+
+def strip_wav_list(wav_path):
+    """Удаляет LIST-чанк (RIFF INFO) из WAV, чтобы у файла остался один тип
+    тегов (id3v2). Иначе llao видит две группы (riff encoder + id3v2) и
+    уводит конфликт в sidecar, что ломает сценарий «embed в mp4»."""
+    d = open(wav_path, "rb").read()
+    assert d[:4] == b"RIFF" and d[8:12] == b"WAVE"
+    o = 12
+    out = bytearray(d[:12])
+    while o + 8 <= len(d):
+        cid = d[o:o + 4]
+        sz = struct.unpack_from("<I", d, o + 4)[0]
+        nxt = o + 8 + sz + (sz & 1)
+        if cid != b"LIST":
+            out += d[o:nxt]
+        o = nxt
     struct.pack_into("<I", out, 4, len(out) - 8)
     open(wav_path, "wb").write(bytes(out))
 
@@ -532,6 +569,14 @@ def gen_fixtures():
     rewrite_flac_metadata(os.path.join(FIX, "single.flac"),
                           rename={"DESCRIPTION": "COMMENT"})
 
+    # lyrics.flac: многострочная лирика со спецсимволами — для регрессии
+    # ID3v2-USLT (валидация «лирика не сохранилась»).
+    ffmpeg(["-i", mix, "-c:a", "flac", "-compression_level", "0",
+            "-metadata", "title=Lyrics Title",
+            "-metadata", "artist=Lyrics Artist",
+            "-metadata", 'lyrics=Куплет 1\nКуплет 2 "кавычки" \\ хвост',
+            os.path.join(FIX, "lyrics.flac")], cwd=FIX)
+
     ffmpeg(["-i", mix, "-c:a", "flac", "-compression_level", "0",
             "-metadata", "title=Cue Title",
             "-metadata", "CUESHEET=PERFORMER Test Artist\r\nTITLE Test\r\nFILE x.wav\r\n  TRACK 01 AUDIO\r\n    TITLE Track\r\n    INDEX 01 00:00:00",
@@ -603,6 +648,18 @@ def gen_fixtures():
             "-metadata", "title=WV Title",
             "-metadata", "artist=WV Artist",
             os.path.join(FIX, "wv_single.wv")], cwd=FIX)
+
+    # track01.wav: PCM WAV (намеренно крупный, чтобы замена на alac сработала)
+    # с ID3v2-тегами, где track = «01» (ведущий ноль). M4A хранит track
+    # бинарно (trkn), поэтому при переносе в alac «01» читается обратно как
+    # «1» — валидация должна сравнивать численно (регрессия «поле track не
+    # сохранилось»).
+    track01 = os.path.join(FIX, "track01.wav")
+    ffmpeg(["-i", mix, "-c:a", "pcm_s16le", track01], cwd=FIX)
+    strip_wav_list(track01)
+    inject_id3_chunk(track01, build_id3v2([("TIT2", "Track Zero"),
+                                           ("TPE1", "Track Artist"),
+                                           ("TRCK", "01")], enc=1))
 
     ffmpeg(["-i", mix, "-c:a", "libmp3lame", "-write_id3v1", "0",
             "-metadata", "title=MP3 Title",
@@ -685,6 +742,18 @@ def o2_flac_to_wavpack(d):
     assert_subset({"title": ["Test Title"], "artist": ["Test Artist"],
                    "comment": ["Test Comment"], "replaygain_track_gain": ["-11.70 dB"]},
                   ape["fields"], "O2 wv")
+
+
+def o2b_flac_to_alac_track_zero(d):
+    cp(os.path.join(FIX, "track01.wav"), os.path.join(d, "src.wav"))
+    rc, out = run_tool(["optimize", d, "--formats=alac", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O2B", out)
+    assert os.path.exists(os.path.join(d, "src.m4a")), "нет src.m4a"
+    m4a = read_m4a(os.path.join(d, "src.m4a"))
+    assert m4a, "в m4a нет тегов"
+    assert_subset({"title": ["Track Zero"], "artist": ["Track Artist"],
+                   "track": ["1"]}, m4a["fields"], "O2B m4a")
 
 
 def o3_wv_to_flac(d):
@@ -845,6 +914,19 @@ def o8_v1_sidecar_to_optimfrog(d):
     assert_subset({"title": ["Restored Title"], "comment": ["Restored Comment"]},
                   ape["fields"], "O8 ofr")
     assert ape["pictures"] == 1, "картинка не сохранена в ofr"
+
+
+def o9_lyrics_to_tta(d):
+    cp(os.path.join(FIX, "lyrics.flac"), os.path.join(d, "src.flac"))
+    rc, out = run_tool(["optimize", d, "--formats=tta", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O9", out)
+    assert os.path.exists(os.path.join(d, "src.tta")), "нет src.tta"
+    id3 = read_id3v2(os.path.join(d, "src.tta"))
+    assert id3, "в tta нет ID3v2"
+    LYR = 'Куплет 1\nКуплет 2 "кавычки" \\ хвост'
+    assert_subset({"title": ["Lyrics Title"], "artist": ["Lyrics Artist"],
+                   "lyrics": [LYR]}, id3["fields"], "O9 tta")
 
 
 def e1_round_trip_wav_tta_flac(d):
@@ -1018,12 +1100,14 @@ def e5_triple_conflict_roundtrip(d):
 SCENARIOS = [
     ("o1", "O1  flac(vorbis) -> tta: ID3v2 embed, без sidecar, все поля+ReplayGain", o1_flac_to_tta),
     ("o2", "O2  flac(vorbis) -> wavpack: APEv2 embed, без sidecar", o2_flac_to_wavpack),
+    ("o2b", "O2B wav(id3v2) -> alac(m4a): track «01» (ведущий ноль) проходит валидацию, в m4a читается как «1» (trkn бинарный)", o2b_flac_to_alac_track_zero),
     ("o3", "O3  wv(apev2) -> flac: vorbis embed, без sidecar", o3_wv_to_flac),
     ("o4", "O4  mp3(id3v2) -> flac (restore, lossy): vorbis embed", o4_mp3_to_flac),
     ("o5", "O5  wav(riff+id3v2 конфликт) -> flac: всё в sidecar, embed нет", o5_wav_conflict_to_flac),
     ("o6", "O6  wav(riff+id3v2 конфликт) -> tta: id3v2 embed (UTF-16), riff в sidecar", o6_wav_conflict_to_tta),
     ("o7", "O7  flac(cue_sheet) -> tta: caps не влезают -> весь набор в sidecar", o7_cue_to_tta_caps),
     ("o8", "O8  v1-sidecar -> optimfrog: APEv2 embed, валидация без ffprobe", o8_v1_sidecar_to_optimfrog),
+    ("o9", "O9  flac(lyrics со спецсимволами) -> tta: ID3v2-USLT embed, валидация лирики", o9_lyrics_to_tta),
     ("r1", "R1  v1-sidecar -> wavpack: APEv2 embed + картинка, sidecar удалён", r1_v1_sidecar_to_wavpack),
     ("r2", "R2  v2-sidecar (id3v2) -> tta: embed, без sidecar", r2_v2_single_to_tta),
     ("r3", "R3  v2-sidecar (id3v2+riff конфликт) -> tta: id3v2 embed, riff в sidecar", r3_v2_conflict_to_tta),

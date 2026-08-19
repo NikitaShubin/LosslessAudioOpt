@@ -12,6 +12,24 @@ namespace json = nlohmann;
 
 namespace config {
 
+// JSON \u00a9 декодируется nlohmann/json как UTF-8 \xc2\xa9 (2 байта),
+// а MP4 4CC ключи требуют ровно 4 байт с raw \xa9.  Нормализуем: любую
+// UTF-8 последовательность 2 байта для символов U+0080..U+00BF
+// (0xc2 0x80..0xbf) заменяем одним байтом.
+static std::string normalize_4cc(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if ((unsigned char)s[i] == 0xc2 && i + 1 < s.size() &&
+            (unsigned char)s[i + 1] >= 0x80 && (unsigned char)s[i + 1] <= 0xbf) {
+            out.push_back(s[++i]);
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+    return out;
+}
+
 static const char* REQUIRED_FIELDS[] = {"id", "name", "extension", "engine", "downloads", "encode", "decode", "tag", "caps"};
 static const char* TAG_CAPS[] = {"text", "pictures", "lyrics", "cue_sheet", "replay_gain", "chapters"};
 static const char* DOWNLOAD_KINDS[] = {"archive", "extract7z"};
@@ -176,6 +194,30 @@ Format validate(const json::json& data) {
         }
     } else {
         throw Error(err_str(fmt_id, i18n::str("tag.capabilities is required")));
+    }
+
+    // Data-driven tag fields (все опциональны)
+    f.tag_write_method = tag.value("write_method", "");
+    f.tag_native_reader = tag.value("native_reader", false);
+    f.tag_validate_skip_ffprobe = tag.value("validate_skip_ffprobe", false);
+    if (tag.contains("numeric_fields") && tag.at("numeric_fields").is_array())
+        for (const auto& v : tag.at("numeric_fields"))
+            f.tag_numeric_fields.push_back(v.get<std::string>());
+    if (tag.contains("key_map") && tag.at("key_map").is_object())
+        for (auto& [k, v] : tag.at("key_map").items())
+            f.tag_key_map[k] = normalize_4cc(v.get<std::string>());
+    if (tag.contains("reverse_key_map") && tag.at("reverse_key_map").is_object())
+        for (auto& [k, v] : tag.at("reverse_key_map").items())
+            f.tag_reverse_key_map[normalize_4cc(k)] = normalize_4cc(v.get<std::string>());
+    if (tag.contains("write_constraints") && tag.at("write_constraints").is_object()) {
+        const auto& wc = tag.at("write_constraints");
+        if (wc.contains("allowed_keys") && wc.at("allowed_keys").is_array())
+            for (const auto& v : wc.at("allowed_keys"))
+                f.tag_allowed_keys.push_back(v.get<std::string>());
+        f.tag_replaygain_allowed = wc.value("replaygain_allowed", true);
+        f.tag_pictures_allowed = wc.value("pictures_allowed", true);
+        f.tag_cue_sheet_allowed = wc.value("cue_sheet_allowed", true);
+        f.tag_write_supported = wc.value("write_supported", true);
     }
 
     // caps

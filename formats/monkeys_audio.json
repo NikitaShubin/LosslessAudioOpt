@@ -42,6 +42,18 @@
   "tag": {
     "system": "apev2",
     "writer": "monkeysaudio",
+    "write_method": "apev2_tail",
+    "native_reader": true,
+    "numeric_fields": [],
+    "key_map": {
+      "title": "Title", "artist": "Artist", "album": "Album",
+      "album_artist": "Album Artist", "composer": "Composer",
+      "genre": "Genre", "date": "Year", "track": "Track",
+      "disc": "Disc", "comment": "Comment", "isrc": "ISRC",
+      "encoder": "Encoder", "lyrics": "Lyrics",
+      "copyright": "Copyright", "cue_sheet": "Cuesheet"
+    },
+    "reverse_key_map": {},
     "capabilities": {
       "text": true,
       "pictures": true,
