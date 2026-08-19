@@ -56,6 +56,18 @@
   "tag": {
     "system": "vorbis",
     "writer": "flac",
+    "write_method": "flac_metadata",
+    "native_reader": true,
+    "numeric_fields": [],
+    "key_map": {
+      "title": "TITLE", "artist": "ARTIST", "album": "ALBUM",
+      "album_artist": "ALBUMARTIST", "composer": "COMPOSER",
+      "genre": "GENRE", "date": "DATE", "track": "TRACKNUMBER",
+      "disc": "DISCNUMBER", "comment": "COMMENT", "isrc": "ISRC",
+      "encoder": "ENCODER", "lyrics": "LYRICS",
+      "copyright": "COPYRIGHT", "cue_sheet": "CUESHEET"
+    },
+    "reverse_key_map": {},
     "capabilities": {
       "text": true,
       "pictures": true,

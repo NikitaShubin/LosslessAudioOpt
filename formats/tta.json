@@ -43,6 +43,22 @@
   "tag": {
     "system": "id3",
     "writer": "id3",
+    "write_method": "id3v2_header",
+    "native_reader": true,
+    "numeric_fields": ["track", "disc"],
+    "key_map": {
+      "title": "TIT2", "artist": "TPE1", "album": "TALB",
+      "album_artist": "TPE2", "composer": "TCOM", "genre": "TCON",
+      "date": "TDRC", "track": "TRCK", "disc": "TPOS",
+      "comment": "COMM", "isrc": "TSRC", "encoder": "TENC",
+      "copyright": "TCOP"
+    },
+    "reverse_key_map": {
+      "TIT2": "title", "TPE1": "artist", "TALB": "album",
+      "TPE2": "album_artist", "TCOM": "composer", "TCON": "genre",
+      "TDRC": "date", "TRCK": "track", "TPOS": "disc",
+      "TSRC": "isrc", "TENC": "encoder", "TCOP": "copyright"
+    },
     "capabilities": {
       "text": true,
       "pictures": true,

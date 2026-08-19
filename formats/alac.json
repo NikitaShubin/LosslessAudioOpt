@@ -43,6 +43,26 @@
   "tag": {
     "system": "mp4",
     "writer": "mp4",
+    "write_method": "mp4_ilst",
+    "native_reader": true,
+    "numeric_fields": ["track", "disc"],
+    "key_map": {
+      "title": "\u00a9nam", "artist": "\u00a9ART", "album": "\u00a9alb",
+      "album_artist": "aART", "composer": "\u00a9wrt",
+      "genre": "\u00a9gen", "date": "\u00a9day",
+      "comment": "\u00a9cmt", "encoder": "\u00a9too",
+      "lyrics": "\u00a9lyr", "copyright": "cprt"
+    },
+    "reverse_key_map": {
+      "\u00a9nam": "title", "\u00a9ART": "artist", "\u00a9alb": "album",
+      "aART": "album_artist", "\u00a9wrt": "composer",
+      "\u00a9gen": "genre", "\u00a9day": "date",
+      "\u00a9cmt": "comment", "\u00a9too": "encoder",
+      "\u00a9lyr": "lyrics", "cprt": "copyright"
+    },
+    "write_constraints": {
+      "replaygain_allowed": false
+    },
     "capabilities": {
       "text": true,
       "pictures": true,
