@@ -221,5 +221,6 @@
     "files %zu-%zu / %zu": "файлы %zu–%zu / %zu",
     "follow": "следим",
     "manual": "вручную",
-    "arrow keys scroll, F — follow": "↑↓/PgUp/PgDn — прокрутка, ←/→ — по строке, F — следить"
+    "arrow keys scroll, F — follow": "↑↓/PgUp/PgDn — прокрутка, ←/→ — по строке, F — следить",
+    "Ctrl+C: graceful shutdown in progress, finishing current tasks... (press again for force exit)": "Ctrl+C: аккуратная остановка, завершаем текущие задачи… (ещё раз — принудительный выход)"
 }

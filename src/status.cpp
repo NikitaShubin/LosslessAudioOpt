@@ -13,6 +13,7 @@
 
 #include "i18n.h"
 #include "out.h"
+#include "proc.h"
 #include "screen.h"
 #include "util.h"
 
@@ -69,6 +70,14 @@ bool g_interactive = false;
 size_t g_total = 0;
 std::vector<Row> g_rows;
 
+// Накопленные диагностические строки (под g_m). В интерактивном режиме log/error
+// не выводятся на экран сразу: они буферизуются, последняя ошибка показывается
+// в футере, а весь накопленный список печатается после shutdown() (когда
+// альтернативный буфер уже восстановлен — иначе текст пропадёт).
+std::vector<std::string> g_log_lines;
+std::vector<std::string> g_error_lines;
+constexpr size_t kMaxBufLines = 500;
+
 // Отдельный поток отрисовки: воркеры только меняют состояние и будят его.
 std::thread g_render_thread;
 std::condition_variable g_cv;
@@ -95,6 +104,26 @@ bool g_follow = true;  // следовать за активной полосо�
 // Горизонтальный сдвиг строк списка (←/→): смещает видимую часть длинных имён
 // файлов. Не влияет на автоследование.
 int g_hscroll = 0;
+
+// Перетаскивание вертикального скроллбара: g_sb_drag — идёт ли перетаскивание
+// (левая кнопка нажата в колонке скроллбара), g_sb_drag_off — смещение точки
+// захвата бегунка (когда нажали именно на бегунок, а не на трек).
+bool g_sb_drag = false;
+int g_sb_drag_off = 0;
+
+// Псевдографический вертикальный скроллбар справа: виден, когда список не
+// помещается в окно (g_total > видимых строк). Занимает последнюю колонку;
+// клик по нему мышью прыгает в позицию, прокрутка стрелками/колесом работает
+// как обычно.
+bool scrollbar_visible() {
+    return g_height >= 2 && g_total > (size_t)(g_height - 1);
+}
+
+// Ширина области контента (список + полосы + футер): без последней колонки,
+// когда справа рисуется скроллбар.
+int content_width() {
+    return scrollbar_visible() ? g_width - 1 : g_width;
+}
 
 // Режим полосы: прогрессбар по умолчанию, Tab переключает на мозаику.
 BarMode g_mode = BarMode::Progress;
@@ -126,32 +155,70 @@ std::string counter(size_t idx) {
     return buf;
 }
 
-// Обрезка строки до width символов (голова остаётся, в конце многоточие).
-std::wstring fit(const std::wstring& w, size_t width) {
-    if (w.size() <= width) return w;
-    if (width >= 3) return w.substr(0, width - 3) + L"...";
-    return w.substr(0, width);
+// Длина строки в колонках терминала (широкие символы — 2 колонки).
+int str_cols(const std::wstring& s) {
+    int n = 0;
+    for (wchar_t c : s) n += screen::disp_width(c);
+    return n;
 }
 
-// Обрезка строки с учётом горизонтального сдвига hscroll. Сдвиг 0 — голова
-// + многоточие в конце; сдвиг > 0 — многоточие в начале (путь неполный) и
-// либо весь хвост, либо хвост + многоточие в конце.
+// Обрезка строки до width колонок (голова остаётся, в конце многоточие).
+std::wstring fit(const std::wstring& w, size_t width) {
+    if (w.empty() || width == 0) return L"";
+    if (str_cols(w) <= (int)width) return w;
+    if (width < 3) return screen::truncate_cols(w, (int)width);
+    return screen::truncate_cols(w, (int)width - 3) + L"...";
+}
+
+// Обрезка строки с учётом горизонтального сдвига hscroll (в колонках). Лист
+// ведёт себя как монолитная лента: сдвиг 0 — голова + многоточие в конце (если
+// не помещается); сдвиг > 0 — первые 3 колонки окна закрыты маской «...»
+// (скрывает начало пути), видимая часть начинается с колонки hscroll+3, а
+// справа «...» добавляется, пока хвост всё ещё обрезается.
 std::wstring fit_scroll(const std::wstring& w, size_t width, int hscroll) {
-    if (width == 0) return L"";
-    if (w.size() <= width) return w;
-    if (width < 3) return w.substr(0, width);
-    if (hscroll <= 0) return w.substr(0, width - 3) + L"...";
-    size_t start = (size_t)hscroll;
-    if (start > w.size()) start = w.size();
-    std::wstring out = L"...";
-    size_t avail = width - 3;  // место под ведущее многоточие
-    if (w.size() - start <= avail) {
-        out += w.substr(start);
-        return out;
+    if (w.empty() || width == 0) return L"";
+    if (hscroll <= 0) return fit(w, width);
+    if (width < 3) return screen::truncate_cols(w, (int)width);
+    int start = hscroll + 3;
+    int col = 0;
+    size_t i = 0;
+    while (i < w.size() && col < start) {
+        col += screen::disp_width(w[i]);
+        i++;
     }
-    out += w.substr(start, avail);
-    out += L"...";
-    return out;
+    std::wstring sub = w.substr(i);
+    int content_max = (int)width - 3;  // колонки под контент после левой маски
+    bool right_mask = (long long)hscroll + (int)width < str_cols(w);
+    if (right_mask && content_max >= 6) {
+        std::wstring mid = screen::truncate_cols(sub, content_max - 3);
+        return L"..." + mid + L"...";
+    }
+    return L"..." + screen::truncate_cols(sub, content_max);
+}
+
+// Высота бегунка вертикального скроллбара (в строках трека track).
+int thumb_height(int track) {
+    int thumb = (int)((long long)track * track / g_total);
+    if (thumb < 1) thumb = 1;
+    return thumb;
+}
+
+// Смещение верха бегунка по текущей позиции g_scroll (в строках трека track).
+int thumb_offset(int track, int thumb) {
+    int max_scroll = (int)g_total - track;
+    if (max_scroll < 0) max_scroll = 0;
+    if (max_scroll <= 0) return 0;
+    return (int)((long long)g_scroll * (track - thumb) / max_scroll);
+}
+
+// Прыжок вьюпорта в позицию, соответствующую строке трека y. Сдвигается
+// g_scroll и отключается автоследование (ручное действие).
+void sb_jump(int y, int track) {
+    if (y < 0) y = 0;
+    int max_scroll = (int)g_total - track;
+    if (max_scroll < 0) max_scroll = 0;
+    g_scroll = (int)((long long)y * max_scroll / track);
+    g_follow = false;
 }
 
 uint8_t seg_bg(Seg s) {
@@ -206,15 +273,34 @@ uint8_t col_bg(const Row& r, size_t col, size_t W) {
 // Процент строки (см. определение ниже).
 std::wstring row_pct(const Row& r);
 
+// Максимальный горизонтальный сдвиг: правый край самого длинного лейбла должен
+// оставаться видимым. Считается так же, как ширина области лейбла в row_label:
+// вся ширина минус процент и счётчик. При hscroll > этого значения последний
+// символ самого длинного пути уехал бы за правый край — такой сдвиг запрещаем.
+int max_hscroll_locked() {
+    int W = content_width();
+    int best = 0;
+    for (size_t i = 0; i < g_total; i++) {
+        const Row& r = g_rows[i];
+        int left_w = W - str_cols(row_pct(r));
+        if (left_w <= 0) left_w = W;
+        int label_w = left_w - (int)str_cols(u2w(counter(i)) + L" ");
+        if (label_w <= 0) continue;
+        int need = str_cols(u2w(r.label)) - label_w;
+        if (need > best) best = need;
+    }
+    return best;
+}
+
 // Текст строки: счётчик + имя файла (с учётом горизонтального сдвига). Процент
 // формируется отдельно (row_pct) и выравнивается по правому краю в paint_row.
 std::wstring row_label(const Row& r, size_t idx) {
     std::wstring s = u2w(counter(idx)) + L" ";
-    int W = g_width;
+    int W = content_width();
     std::wstring pct = row_pct(r);
-    int left_w = W - (int)pct.size();
+    int left_w = W - str_cols(pct);
     if (left_w <= 0) left_w = W;
-    int label_w = left_w - (int)s.size();
+    int label_w = left_w - str_cols(s);
     if (label_w > 0) s += fit_scroll(u2w(r.label), (size_t)label_w, g_hscroll);
     else s = fit(s, (size_t)left_w);
     return s;
@@ -239,33 +325,43 @@ std::wstring row_pct(const Row& r) {
     return L"";
 }
 
+// Пишет текст в клетки строки y, начиная с колонки x, с учётом ширины символов
+// (широкие занимают две колонки). max_cols — максимальная ширина в колонках.
+// Возвращает число занятых колонок. Фон каждой колонки — как у полосы (col_bg).
+int put_text_cols(int y, int x, const std::wstring& s, int max_cols, const Row& r, int W) {
+    int col = x;
+    for (wchar_t ch : s) {
+        int w = screen::disp_width(ch);
+        if (col + w > x + max_cols) break;
+        if (col >= g_width) break;
+        g_screen.cell(y, col) = {ch, kTextFg, col_bg(r, (size_t)col, (size_t)W), true};
+        col += w;
+    }
+    return col - x;
+}
+
 // Рисует строку файла idx на экранной строке y. Процент — строго у правого края.
 void paint_row(size_t idx, int y) {
     const Row& r = g_rows[idx];
-    int W = g_width;
+    int W = content_width();
     for (int c = 0; c < W; c++) {
         screen::Cell cell = {L' ', kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
         g_screen.cell(y, c) = cell;
     }
     std::wstring label = row_label(r, idx);
     std::wstring pct = row_pct(r);
-    int pct_w = (int)pct.size();
+    int pct_w = str_cols(pct);
     int left_w = W - pct_w;
     if (left_w <= 0) {
         left_w = W;
         pct_w = 0;
     }
-    int lw = (int)label.size();
+    int lw = str_cols(label);
     if (lw > left_w) lw = left_w;
-    for (int c = 0; c < lw; c++) {
-        g_screen.cell(y, c) = {label[(size_t)c], kTextFg, col_bg(r, (size_t)c, (size_t)W), true};
-    }
+    put_text_cols(y, 0, label, lw, r, W);
     if (pct_w > 0) {
         int x0 = W - pct_w;
-        for (int c = 0; c < pct_w; c++) {
-            g_screen.cell(y, x0 + c) = {pct[(size_t)c], kTextFg,
-                                        col_bg(r, (size_t)(x0 + c), (size_t)W), true};
-        }
+        put_text_cols(y, x0, pct, pct_w, r, W);
     }
 }
 
@@ -287,18 +383,34 @@ void follow_active(int vis) {
     if (g_scroll > max_scroll) g_scroll = max_scroll;
 }
 
-// Компоновка всего кадра: видимые строки списка + футер.
+// Компоновка всего кадра: видимые строки списка + футер + (скроллбар справа).
 void compose_frame() {
     g_screen.clear(kFooterFg, kFooterBg);
     int vis = g_height - 1;  // последняя строка — футер
     if (vis > (int)g_total) vis = (int)g_total;
     if (vis < 0) vis = 0;
+    int W = content_width();
 
     if (g_follow) follow_active(vis);
 
     for (int y = 0; y < vis; y++) {
         size_t idx = (size_t)g_scroll + y;
         if (idx < g_total) paint_row(idx, y);
+    }
+
+    // Вертикальный скроллбар в последней колонке: трек — на видимые строки,
+    // бегунок — доля видимой части списка. Клик по нему обрабатывается
+    // в handle_input_locked (прыжок на позицию курсора).
+    if (scrollbar_visible() && vis > 0) {
+        int track = vis;
+        int thumb = thumb_height(track);
+        int thumb_y = thumb_offset(track, thumb);
+        for (int y = 0; y < track; y++) {
+            bool in = y >= thumb_y && y < thumb_y + thumb;
+            g_screen.cell(y, g_width - 1) = {in ? L'█' : L'│',
+                                             in ? (uint8_t)kFooterFg : (uint8_t)8,
+                                             kFooterBg, false};
+        }
     }
 
     size_t lo = (size_t)g_scroll + 1;
@@ -313,9 +425,29 @@ void compose_frame() {
         if (g_total > (size_t)vis && vis > 0)
             foot += " · " + i18n::str("arrow keys scroll, F — follow");
     }
-    std::wstring wf = u2w(foot);
-    for (int c = 0; c < (int)wf.size() && c < g_width; c++)
-        g_screen.cell(g_height - 1, c) = {wf[(size_t)c], kFooterFg, kFooterBg, false};
+    std::wstring wf;
+    if (proc::cancelled()) {
+        // Ctrl+C: сразу показываем, что идёт аккуратная остановка (иначе
+        // кажется, что интерфейс завис, пока воркеры добивают процессы).
+        wf = L"!" + screen::truncate_cols(
+                        u2w(i18n::str("Ctrl+C: graceful shutdown in progress, "
+                                      "finishing current tasks... (press again for force exit)")),
+                        W - 1);
+    } else if (!g_error_lines.empty()) {
+        // При ошибках в футере показываем последнюю причину (иначе в интерактивном
+        // режиме не видно, что пошло не так) — красным текстом на чёрном фоне.
+        wf = L"!" + screen::truncate_cols(u2w(g_error_lines.back()), W - 1);
+    } else {
+        wf = screen::truncate_cols(u2w(foot), W);
+    }
+    int col = 0;
+    for (wchar_t ch : wf) {
+        if (col >= W) break;
+        bool is_err = proc::cancelled() || !g_error_lines.empty();
+        g_screen.cell(g_height - 1, col) = {ch, is_err ? (uint8_t)kFailedBg : kFooterFg,
+                                            kFooterBg, is_err};
+        col += screen::disp_width(ch);
+    }
 }
 
 // Обновляет размер окна консоли. Возвращает true, если размер изменился.
@@ -341,6 +473,8 @@ bool refresh_size_locked() {
 void render_pass_locked() {
     refresh_size_locked();
     g_screen.resize(g_width, g_height);
+    // После ресайза окна предел сдвига мог измениться — приводим вьюпорт в норму.
+    if (g_hscroll > max_hscroll_locked()) g_hscroll = max_hscroll_locked();
     compose_frame();
     g_screen.flush();
 }
@@ -390,13 +524,52 @@ bool handle_input_locked() {
             g_scroll += delta > 0 ? -3 : 3;
             g_follow = false;
             changed = true;
+        } else if (rec.EventType == MOUSE_EVENT && rec.Event.MouseEvent.dwEventFlags == 0) {
+            // Нажатие/отпускание кнопки. По колонке скроллбара: нажатие на сам
+            // бегунок — захват с сохранением смещения от его верха (затем движение
+            // перетаскивает бегунок), клик по треку — прыжок в позицию; отпускание
+            // завершает перетаскивание.
+            const auto& me = rec.Event.MouseEvent;
+            bool pressed = (me.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
+            if (!pressed) {
+                g_sb_drag = false;
+                g_sb_drag_off = 0;
+                continue;
+            }
+            if (!scrollbar_visible() || me.dwMousePosition.X != g_width - 1 || vis <= 0)
+                continue;
+            int track = vis;
+            int y = me.dwMousePosition.Y;
+            if (y < 0 || y >= track) continue;
+            int thumb = thumb_height(track);
+            int thumb_y = thumb_offset(track, thumb);
+            g_sb_drag = true;
+            if (y >= thumb_y && y < thumb_y + thumb) g_sb_drag_off = y - thumb_y;
+            else g_sb_drag_off = 0;
+            // Верх бегунка встаёт на точку захвата (для прыжка по треку off=0).
+            sb_jump(y - g_sb_drag_off, track);
+            changed = true;
+        } else if (rec.EventType == MOUSE_EVENT &&
+                   (rec.Event.MouseEvent.dwEventFlags & MOUSE_MOVED)) {
+            // Перетаскивание скроллбара: курсор движется с зажатой кнопкой —
+            // бегунок следует, сохраняя точку захвата.
+            const auto& me = rec.Event.MouseEvent;
+            if (g_sb_drag && (me.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) && vis > 0) {
+                int track = vis;
+                int y = me.dwMousePosition.Y - g_sb_drag_off;
+                if (y >= 0 && y < track) {
+                    sb_jump(y, track);
+                    changed = true;
+                }
+            }
         } else if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
             changed = true;  // новый размер подхватит refresh_size_locked()
         }
     }
     clamp_scroll(g_scroll);
     if (g_hscroll < 0) g_hscroll = 0;
-    if (g_hscroll > 4096) g_hscroll = 4096;
+    int max_h = max_hscroll_locked();
+    if (g_hscroll > max_h) g_hscroll = max_h;
     return changed;
 }
 
@@ -404,6 +577,9 @@ bool handle_input_locked() {
 // kDebounce, чтобы собрать пачку обновлений в одну отрисовку. Параллельно
 // с ожиданием каждые kInputPoll опрашивает ввод и размер окна.
 void render_loop() {
+    // Поток ввода/отрисовки — выше приоритетом, чем воркеры и кодеки,
+    // чтобы навигация клавишами/мышью не тормозила под нагрузкой на CPU.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     std::unique_lock<std::mutex> lk(g_m);
     while (true) {
         g_cv.wait_for(lk, kInputPoll, [&] { return g_render_stop || g_pending; });
@@ -436,6 +612,8 @@ void init(size_t total_files, bool no_status) {
     g_scroll = 0;
     g_follow = true;
     g_hscroll = 0;
+    g_sb_drag = false;
+    g_sb_drag_off = 0;
     g_mode = BarMode::Progress;
     g_width = 80;
     g_height = 25;
@@ -619,7 +797,8 @@ void log(const std::string& line) {
         out::text(stdout, line);
         return;
     }
-    // Интерактивный режим: на экране только полосы, строки подавляются.
+    std::lock_guard<std::mutex> lk(g_m);
+    if (g_log_lines.size() < kMaxBufLines) g_log_lines.push_back(line);
 }
 
 void error(const std::string& line) {
@@ -627,6 +806,9 @@ void error(const std::string& line) {
         out::text(stderr, line);
         return;
     }
+    std::lock_guard<std::mutex> lk(g_m);
+    if (g_error_lines.size() < kMaxBufLines) g_error_lines.push_back(line);
+    wake();
 }
 
 void shutdown() {
@@ -651,9 +833,19 @@ void shutdown() {
     g_scroll = 0;
     g_follow = true;
     g_hscroll = 0;
+    g_sb_drag = false;
+    g_sb_drag_off = 0;
     g_mode = BarMode::Progress;
     g_orig_mode_valid = false;
     g_orig_in_mode_valid = false;
+
+    // Накопленные диагностические строки печатаем после восстановления
+    // альтернативного буфера (см. kMaxBufLines): в интерактивном режиме они
+    // подавляются, иначе причины ошибок были бы невидимы.
+    for (const auto& l : g_error_lines) out::text(stderr, l);
+    for (const auto& l : g_log_lines) out::text(stdout, l);
+    g_error_lines.clear();
+    g_log_lines.clear();
 }
 
 }  // namespace status
