@@ -15,7 +15,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Кэш wine
+        id: cache-wine
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/wine-stable
+            /usr/bin/wine*
+            /usr/lib/wine*
+            /usr/share/wine*
+            /usr/share/doc/wine*
+          key: wine-noble-${{ runner.image }}
+
       - name: Установка зависимостей (wine 10, ffmpeg, p7zip)
+        if: steps.cache-wine.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends wget ca-certificates gnupg2
