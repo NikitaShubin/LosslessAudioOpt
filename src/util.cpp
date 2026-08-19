@@ -32,6 +32,50 @@ static std::wstring utf8_to_cp(const std::string& s, UINT cp) {
 std::wstring u2w(const std::string& s) { return utf8_to_cp(s, CP_UTF8); }
 std::string w2u(const std::wstring& s) { return utf8_from_cp(s, CP_UTF8); }
 
+std::string process_id() {
+    return std::to_string((unsigned long)GetCurrentProcessId());
+}
+
+std::string machine_cpu() {
+    std::wstring out;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0,
+                      KEY_READ, &key) == ERROR_SUCCESS) {
+        wchar_t buf[256];
+        DWORD size = sizeof(buf);
+        if (RegQueryValueExW(key, L"ProcessorNameString", nullptr, nullptr,
+                             (LPBYTE)buf, &size) == ERROR_SUCCESS && size > 0)
+            out = buf;
+        RegCloseKey(key);
+    }
+    return out.empty() ? std::string("unknown") : w2u(out);
+}
+
+std::string machine_host() {
+    wchar_t buf[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD size = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(buf, &size)) return w2u(buf);
+    return std::string("unknown");
+}
+
+std::string machine_id() {
+    std::string s = machine_cpu() + " | " + machine_host();
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    const char* hx = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 0; i < 16; i++) out[i] = hx[(h >> (60 - i * 4)) & 0xf];
+    return out;
+}
+
+void set_thread_below_normal() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+}
+
 std::string join_path(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
     if (b.empty()) return a;

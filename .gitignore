@@ -26,4 +26,3 @@ __pycache__/
 # Артефакты сборки
 *.o
 llao.exe
-bench.exe
