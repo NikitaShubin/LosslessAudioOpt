@@ -13,6 +13,7 @@ namespace proc {
 namespace {
 
 std::atomic<bool> g_cancel{false};
+std::atomic<bool> g_abort{false};
 
 // Процессорное время дочерних процессов текущего потока (100нс-тики). Каждый
 // run() накапливает CPU своих детей сюда — это позволяет атрибутировать затраты
@@ -38,6 +39,9 @@ std::string quote_arg(const std::string& a) {
 
 void cancel() { g_cancel.store(true, std::memory_order_relaxed); }
 bool cancelled() { return g_cancel.load(std::memory_order_relaxed); }
+
+void abort_all() { g_abort.store(true, std::memory_order_relaxed); }
+bool aborted() { return g_abort.load(std::memory_order_relaxed); }
 
 uint64_t child_cpu_ms() { return t_child_cpu_ticks / 10000; }
 
@@ -84,7 +88,10 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
     si.hStdOutput = hWrite;
     si.hStdError = hWrite;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD create_flags = CREATE_NO_WINDOW;
+    // Кодеки — главные потребители CPU; низкий приоритет класса процесса
+    // (BELOW_NORMAL) оставляет ресурсы потокам ввода/отрисовки интерфейса,
+    // иначе статусбар заметно тормозит под нагрузкой.
+    DWORD create_flags = CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS;
 
     // Job Object с JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: если наш процесс умирает
     // аварийно (kill извне, авария), ОС закроет все хендлы job и дочерний процесс
@@ -161,8 +168,12 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
             res.cancelled = true;
             break;
         }
+        if (aborted()) {
+            res.aborted = true;
+            break;
+        }
     }
-    if (timed_out || res.cancelled) {
+    if (timed_out || res.cancelled || res.aborted) {
         if (timed_out) res.timed_out = true;
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 10000);
