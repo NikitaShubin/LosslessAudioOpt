@@ -33,8 +33,10 @@ constexpr uint8_t kDoneBg = 28;        // зелёный — файл обраб
 constexpr uint8_t kPreppingBg = 130;   // тёмно-оранжевый — файл распаковывается (вся строка)
 constexpr uint8_t kNotStartedBg = 0;   // чёрный — файл ещё не начат
 constexpr uint8_t kTextFg = 15;        // ярко-белый текст на полосе
-constexpr uint8_t kFooterFg = 7;       // обычный белый текст футера
-constexpr uint8_t kFooterBg = 0;
+constexpr uint8_t kFooterFg = 252;    // приглушённый белый текст футера
+constexpr uint8_t kFooterBg = 235;    // тёмно-серый фон футера (≠ чёрный контента)
+constexpr uint8_t kScrollTrackFg = 238; // полоса скроллбара — трек
+constexpr uint8_t kScrollThumbFg = 245; // полоса скроллбара — бегунок
 
 // Состояние сегмента полосы (одного варианта).
 enum class Seg { Pending, Running, Ok, Failed };
@@ -408,7 +410,7 @@ void compose_frame() {
         for (int y = 0; y < track; y++) {
             bool in = y >= thumb_y && y < thumb_y + thumb;
             g_screen.cell(y, g_width - 1) = {in ? L'█' : L'│',
-                                             in ? (uint8_t)kFooterFg : (uint8_t)8,
+                                             in ? (uint8_t)kScrollThumbFg : (uint8_t)kScrollTrackFg,
                                              kFooterBg, false};
         }
     }

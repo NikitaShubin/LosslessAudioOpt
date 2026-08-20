@@ -285,14 +285,20 @@ static bool decode_source_native(const config::Format* src_fmt, const std::strin
 
 // Кодирование кандидата (без валидации). Возвращает пустую строку при успехе,
 // иначе текст ошибки. При успехе candidate существует и непуст.
+// monitor — опциональный stall detection (файл не растёт + CPU ≈ 0 → kill).
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
-                             const std::vector<std::string>& params, const Env& env) {
+                             const std::vector<std::string>& params, const Env& env,
+                             const proc::OutputMonitor& monitor = {}) {
     const config::Format& f = *env.fmt;
     std::vector<std::string> encode_args =
         build_cmd(f.encode_cmd, env.encoder, wav, candidate, params, f.engine_codec,
                   f.engine_container);
-    proc::Result r = proc::run(encode_args, env.encode_timeout);
+    // Если monitor задан с hard_timeout_sec — он заменяет encode_timeout
+    // (пропорциональный лимит вместо фиксированного).
+    int effective_timeout = monitor.hard_timeout_sec > 0 ? 0 : env.encode_timeout;
+    proc::Result r = proc::run(encode_args, effective_timeout, "", monitor);
     if (!r.started) return i18n::str("could not launch the encoder: ") + r.error;
+    if (r.stalled) return i18n::str("encoder stalled (no progress)");
     if (r.timed_out) return i18n::str("encoder exceeded the timeout");
     if (r.exit_code != 0) {
         std::string out = util::trim(r.output);
@@ -480,12 +486,15 @@ struct Runner {
     }
 
     // Суммарный след задач «в полёте» по всем файлам (для бюджетов tmp/RAM).
+    // ref.wav — один на файл (file_base_footprint), кандидаты — по одному на задачу.
     uint64_t footprint_used_locked() const {
         uint64_t sum = 0;
         for (const auto& j : jobs) {
             if (!j.prep_done || j.done) continue;
             size_t jf = j.released > j.completed ? j.released - j.completed : 0;
-            if (jf > 0 && j.ref_size > 0) sum += (uint64_t)jf * task_footprint(j.ref_size);
+            if (jf == 0 || j.ref_size == 0) continue;
+            sum += file_base_footprint(j.ref_size);               // ref.wav + dec.wav (один раз)
+            sum += (uint64_t)jf * task_footprint(j.ref_size);     // кандидаты
         }
         return sum;
     }
@@ -504,6 +513,8 @@ struct Runner {
             if (j.released - j.completed >= (size_t)file_cap_locked(j)) continue;
             if (j.ref_size > 0) {
                 uint64_t foot = task_footprint(j.ref_size);
+                size_t jf = j.released > j.completed ? j.released - j.completed : 0;
+                if (jf == 0) foot += file_base_footprint(j.ref_size);
                 if (foot_used + foot > tmp_budget) continue;
                 if (ram_budget > 0 && foot_used + foot > ram_budget) continue;
             }
@@ -522,23 +533,32 @@ struct Runner {
         return rel - cpl;
     }
 
-    // След одной задачи «в полёте»: dec.wav (~размера эталона) + кандидат (~ref/2).
+    // След одной задачи «в полёте»: только кандидат (≤ ref_size, консервативно = ref_size).
     static uint64_t task_footprint(uint64_t ref_size) {
-        return ref_size + ref_size / 2;
+        return ref_size;
     }
 
-    // Резерв для бюджетов: след одной задачи самого «дорогого» файла, у которого
-    // ещё есть невыпущенные варианты. При высокой параллельности тяжело заранее
-    // сказать, насколько хорошо сожмётся следующий кандидат, поэтому держим запас
-    // в размере максимального следа, чтобы внезапно большой кандидат не упёрся
-    // в конец диска (сначала он пишется в tmp, потом сравнивается и удаляется).
+    // Фиксированный след файла: ref.wav (один на весь файл) + dec.wav (пик,
+    // только при verify=all — создаётся на миллисекунды, но место нужно).
+    uint64_t file_base_footprint(uint64_t ref_size) const {
+        bool vall = opts->verify == Verify::All;
+        return ref_size + (vall ? ref_size : 0);
+    }
+
+    // Резерв для бюджетов: худший случай для следующей задачи (файл ещё не
+    // активен — нужен и ref.wav, и первый кандидат). При высокой параллельности
+    // тяжело заранее сказать, насколько хорошо сожмётся следующий кандидат,
+    // поэтому держим запас, чтобы внезапно большой кандидат не упёрся в конец
+    // диска (сначала он пишется в tmp, потом сравнивается и удаляется).
     uint64_t reserve_footprint_locked() const {
         uint64_t reserve = 0;
         for (const auto& j : jobs) {
             if (!j.prep_done || j.done) continue;
             if (j.released >= j.tasks.size()) continue;  // задач на выпуск больше нет
-            if (j.ref_size > 0)
-                reserve = std::max<uint64_t>(reserve, task_footprint(j.ref_size));
+            if (j.ref_size > 0) {
+                uint64_t total = file_base_footprint(j.ref_size) + task_footprint(j.ref_size);
+                reserve = std::max<uint64_t>(reserve, total);
+            }
         }
         return reserve;
     }
@@ -562,16 +582,19 @@ struct Runner {
     }
 
     // Окно (лимит «в полёте») для одного файла: число потоков, бюджет tmp
-    // (свободное место на диске) и бюджет RAM по следу задачи.
+    // (свободное место на диске минус фиксированный след) и бюджет RAM.
     uint64_t file_cap_locked(const FileJob& j) const {
         uint64_t cap = (uint64_t)window;
         if (j.ref_size > 0) {
             uint64_t foot = task_footprint(j.ref_size);
-            uint64_t by_tmp = tmp_budget / foot;
+            uint64_t base = file_base_footprint(j.ref_size);
+            uint64_t avail_tmp = tmp_budget > base ? tmp_budget - base : 0;
+            uint64_t by_tmp = avail_tmp / foot;
             if (by_tmp < 1) by_tmp = 1;
             cap = std::min<uint64_t>(cap, by_tmp);
             if (ram_budget > 0) {
-                uint64_t by_ram = ram_budget / foot;
+                uint64_t avail_ram = ram_budget > base ? ram_budget - base : 0;
+                uint64_t by_ram = avail_ram / foot;
                 if (by_ram < 1) by_ram = 1;
                 cap = std::min<uint64_t>(cap, by_ram);
             }
@@ -605,14 +628,14 @@ struct Runner {
     };
 
     // Вызывается под qm. Свободный воркер берёт очередной незанятый вариант
-    // самого раннего готового файла (строгий приоритет по индексу: даже если
-    // более поздний файл распаковался раньше, как только более ранний готов —
-    // его варианты обрабатываются в первую очередь). Окно считается на файл:
-    // варианты файла не выпускаются, пока у него самого не освободится место
-    // (его лимит «в полёте»), поэтому большой файл с медленными вариантами не
-    // блокирует prep и варианты следующих файлов. Общие бюджеты tmp/RAM
-    // ограничивают суммарный след задач «в полёте» по всем файлам. Когда
-    // варианты брать нечего — берётся prep следующего файла.
+    // самого раннего готового файла. Личное окно считается на файл: варианты
+    // файла не выпускаются, пока у него самого не освободится место (его лимит
+    // «в полёте»), поэтому большой файл с медленными вариантами не блокирует
+    // prep и варианты следующих файлов. Общие бюджеты tmp/RAM ограничивают
+    // суммарный след задач «в полёте» по всем файлам. Файл, которому не хватает
+    // места, пропускается — берётся тот, для которого место есть. Со временем
+    // маленькие файлы освобождают место, и большой возвращается.
+    // Когда варианты брать нечего — берётся prep следующего файла.
     bool take_work_locked(Work* w) {
         if (abort.load()) return false;
         refresh_resources_locked();
@@ -624,7 +647,10 @@ struct Runner {
             size_t jf = j.released - j.completed;
             if (jf >= (size_t)file_cap_locked(j)) continue;  // личное окно файла занято
             if (j.ref_size > 0) {
+                // Инкрементальный расход: кандидат + ref.wav/dec.wav (только при
+                // первом запуске,jf == 0 — файл ещё не «активен»).
                 uint64_t foot = task_footprint(j.ref_size);
+                if (jf == 0) foot += file_base_footprint(j.ref_size);
                 if (foot_used + foot > tmp_budget) continue;  // общий tmp-бюджет
                 if (ram_budget > 0 && foot_used + foot > ram_budget) continue;  // RAM
             }
@@ -862,10 +888,23 @@ struct Runner {
             j.stat_records.push_back(std::move(rec));
         };
 
+        // Stall detection: если файл не растёт и CPU ≈ 0 120 сек → kill.
+        // Hard timeout: max(1800, wav_bytes/50KBps) — защита от infinite loop.
+        proc::OutputMonitor mon;
+        mon.path = candidate;
+        mon.stall_timeout_sec = 120;
+        mon.hard_timeout_sec = env.encode_timeout > 0 ? env.encode_timeout : 1800;
+        if (j.ref_size > 0) {
+            // Консервативная оценка: 50 КБ/с для самого медленного кодека.
+            uint64_t proportional = j.ref_size / 50000;
+            if (proportional > (uint64_t)mon.hard_timeout_sec)
+                mon.hard_timeout_sec = (int)std::min(proportional, (uint64_t)7200);
+        }
+
         // В режиме All каждый кандидат полностью проверяется здесь.
         // Winner/None — только кодирование; победитель валидируется в finalize_file
         // (режим Winner) или не проверяется вовсе (None).
-        std::string verr = encode_candidate(j.ref_wav, candidate, v.args, env);
+        std::string verr = encode_candidate(j.ref_wav, candidate, v.args, env, mon);
         if (verr.empty() && opts.verify == Verify::All)
             verr = validate_candidate(j.ref_wav, candidate, env);
         if (proc::cancelled() || proc::aborted()) {
