@@ -52,7 +52,8 @@ uint64_t thread_cpu_ms() {
     return 0;
 }
 
-Result run(const std::vector<std::string>& args, int timeout_sec, const std::string& cwd) {
+Result run(const std::vector<std::string>& args, int timeout_sec, const std::string& cwd,
+           const OutputMonitor& monitor) {
     Result res;
     if (args.empty()) return res;
 
@@ -144,37 +145,100 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
     });
 
     // Ожидание с опросом: пока процесс работает, каждые ~200 мс проверяем
-    // глобальный флаг отмены (Ctrl+C). При отмене или истечении таймаута
-    // процесс завершается принудительно.
-    DWORD timeout_ms = timeout_sec > 0 ? (DWORD)timeout_sec * 1000 : INFINITE;
+    // глобальный флаг отмены (Ctrl+C) и мониторинг прогресса. При отмене,
+    // истечении таймаута или stall (файл не растёт + CPU ≈ 0) процесс
+    // завершается принудительно.
+    DWORD effective_timeout_ms = INFINITE;
+    if (timeout_sec > 0 && monitor.hard_timeout_sec > 0)
+        effective_timeout_ms = (DWORD)std::min(timeout_sec, monitor.hard_timeout_sec) * 1000;
+    else if (timeout_sec > 0)
+        effective_timeout_ms = (DWORD)timeout_sec * 1000;
+    else if (monitor.hard_timeout_sec > 0)
+        effective_timeout_ms = (DWORD)monitor.hard_timeout_sec * 1000;
+
     constexpr DWORD kPollMs = 200;
     DWORD waited = 0;
     bool timed_out = false;
+    bool stalled = false;
+
+    // Stall detection: проверяем каждые ~5 сек. Если файл не ростёт и
+    // CPU процесса ≈ 0 stall_timeout_sec подряд → kill.
+    std::wstring wmonitor_path;
+    if (!monitor.path.empty()) wmonitor_path = util::u2w(monitor.path);
+    auto get_process_cpu_ms = [&](HANDLE hProc) -> uint64_t {
+        FILETIME ft_creation{}, ft_exit{}, ft_kernel{}, ft_user{};
+        if (GetProcessTimes(hProc, &ft_creation, &ft_exit, &ft_kernel, &ft_user))
+            return (ft_ticks(ft_kernel) + ft_ticks(ft_user)) / 10000;
+        return 0;
+    };
+
+    constexpr DWORD kMonitorPollMs = 5000;
+    DWORD monitor_waited = 0;
+    uint64_t prev_file_size = 0;
+    uint64_t prev_cpu_ms = get_process_cpu_ms(pi.hProcess);
+    DWORD stall_accum_ms = 0;  // суммарное время «stall» (файл не растёт + CPU ≈ 0)
+
     for (;;) {
         DWORD wait;
-        if (timeout_ms == INFINITE) {
-            wait = WaitForSingleObject(pi.hProcess, kPollMs);
-        } else {
-            DWORD remain = timeout_ms > waited ? timeout_ms - waited : 0;
-            wait = WaitForSingleObject(pi.hProcess, std::min(kPollMs, remain));
-            waited += kPollMs;
-            if (wait != WAIT_OBJECT_0 && waited >= timeout_ms) {
-                timed_out = true;
+        DWORD poll = std::min(kPollMs, effective_timeout_ms != INFINITE
+                                           ? effective_timeout_ms - waited
+                                           : kPollMs);
+        wait = WaitForSingleObject(pi.hProcess, poll);
+        waited += kPollMs;
+
+        if (wait == WAIT_OBJECT_0) break;
+
+        if (effective_timeout_ms != INFINITE && waited >= effective_timeout_ms) {
+            timed_out = true;
+            break;
+        }
+        if (cancelled()) { res.cancelled = true; break; }
+        if (aborted())   { res.aborted = true;   break; }
+
+        // Stall detection каждые ~5 сек.
+        monitor_waited += kPollMs;
+        if (monitor_waited >= kMonitorPollMs && !wmonitor_path.empty()) {
+            monitor_waited = 0;
+
+            uint64_t cur_file_size = 0;
+            DWORD attrs = GetFileAttributesW(wmonitor_path.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                WIN32_FILE_ATTRIBUTE_DATA fad{};
+                if (GetFileAttributesExW(wmonitor_path.c_str(),
+                                        GetFileExInfoStandard, &fad)) {
+                    cur_file_size =
+                        ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+                }
+            }
+
+            uint64_t cur_cpu_ms = get_process_cpu_ms(pi.hProcess);
+            bool cpu_active = (cur_cpu_ms > prev_cpu_ms);
+            prev_cpu_ms = cur_cpu_ms;
+
+            if (cur_file_size > prev_file_size) {
+                // Файл растёт — сбрасываем stall-счётчик.
+                prev_file_size = cur_file_size;
+                stall_accum_ms = 0;
+            } else if (cur_file_size == 0 && !cpu_active) {
+                // Файл не появился и CPU ≈ 0 → потенциальный stall.
+                stall_accum_ms += kMonitorPollMs;
+            } else if (cur_file_size > 0 && !cpu_active) {
+                // Файл есть, не растёт, CPU ≈ 0 → stall.
+                stall_accum_ms += kMonitorPollMs;
+            } else {
+                // CPU активен (или файл растёт) — терпим.
+                stall_accum_ms = 0;
+            }
+
+            if (stall_accum_ms >= (DWORD)monitor.stall_timeout_sec * 1000) {
+                stalled = true;
                 break;
             }
         }
-        if (wait == WAIT_OBJECT_0) break;
-        if (cancelled()) {
-            res.cancelled = true;
-            break;
-        }
-        if (aborted()) {
-            res.aborted = true;
-            break;
-        }
     }
-    if (timed_out || res.cancelled || res.aborted) {
+    if (timed_out || stalled || res.cancelled || res.aborted) {
         if (timed_out) res.timed_out = true;
+        if (stalled)   res.stalled   = true;
         TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 10000);
     }
