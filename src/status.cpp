@@ -638,13 +638,19 @@ void init(size_t total_files, bool no_status) {
 
     if (!forced) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (h == INVALID_HANDLE_VALUE || h == nullptr) return;
-        DWORD mode = 0;
-        if (!GetConsoleMode(h, &mode)) return;  // stdout не консоль (pipe/файл)
-        DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-        if (!SetConsoleMode(h, new_mode)) return;  // VT не поддерживается
-        g_orig_mode = mode;
-        g_orig_mode_valid = true;
+        if (h != INVALID_HANDLE_VALUE && h != nullptr) {
+            DWORD mode = 0;
+            if (GetConsoleMode(h, &mode)) {
+                // Настоящая Windows-консоль — включаем VT-обработку.
+                DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+                SetConsoleMode(h, new_mode);
+                g_orig_mode = mode;
+                g_orig_mode_valid = true;
+            }
+            // GetConsoleMode не удался (Wine / pipe / файл): продолжаем
+            // без SetConsoleMode — ANSI-коды и так работают через fwrite()
+            // в любом xterm-совместимом терминале.
+        }
     }
 
     // Размер окна: консоль -> переменные окружения COLUMNS/LINES -> 80x25.

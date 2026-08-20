@@ -4,5 +4,31 @@
 # По умолчанию WINEDEBUG=-all (как в CI-тестах проекта); своё значение сохраняется.
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
+
+# Автоопределение размера терминала. Wine не может определить размер окна
+# через Windows Console API (GetConsoleScreenBufferInfo) — Wine не эмулирует
+# консоль в Linux-терминале. Поэтому обёртка (живущая в Linux) определяет
+# размер и передаёт через LLAO_STATUS_SIZE. LLAO_STATUS_FORCE нужен, чтобы
+# обойти проверку GetConsoleMode (тоже не работает под Wine).
+if [ -z "$LLAO_STATUS_SIZE" ]; then
+    _cols="" ; _lines=""
+    if command -v stty >/dev/null 2>&1; then
+        eval "$(stty size 2>/dev/null)"  # Sets $LINES and $COLUMNS
+        _cols="$COLUMNS" ; _lines="$LINES"
+    fi
+    if [ -z "$_cols" ] || [ -z "$_lines" ] || [ "$_cols" -le 1 ] 2>/dev/null; then
+        if command -v tput >/dev/null 2>&1; then
+            _cols="$(tput cols 2>/dev/null)"
+            _lines="$(tput lines 2>/dev/null)"
+        fi
+    fi
+    if [ -n "$_cols" ] && [ -n "$_lines" ] && [ "$_cols" -gt 1 ] 2>/dev/null && \
+       [ "$_lines" -gt 1 ] 2>/dev/null; then
+        export LLAO_STATUS_SIZE="${_cols}x${_lines}"
+    fi
+fi
+: "${LLAO_STATUS_FORCE:=1}"
+export LLAO_STATUS_FORCE
+
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 exec wine "$DIR/llao.exe" "$@"
