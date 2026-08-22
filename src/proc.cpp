@@ -260,7 +260,7 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
     reader.join();
     CloseHandle(hRead);
     if (hJob) CloseHandle(hJob);
-    res.output = std::move(output);
+    res.output = util::normalize_output(output);
     return res;
 }
 

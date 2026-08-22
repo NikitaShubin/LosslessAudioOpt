@@ -92,6 +92,12 @@ bool from_base64(const std::string& s, std::vector<uint8_t>* out);
 // type_error 316 "invalid UTF-8").
 std::string sanitize_utf8(const std::string& s);
 
+// Нормализует вывод внешних процессов (аналог col -b): \r → \n, удаляет все
+// управляющие символы (< 0x20 кроме \n/\t), схлопывает пустые строки.
+// Превращает progress-бары ("42% done...\x08\x08...60% done...") в
+// последовательные строки. Результат trim().
+std::string normalize_output(const std::string& s);
+
 // Рекурсивно санитизирует все строки (включая ключи) в JSON-дереве.
 // Вызывать перед dump(), чтобы строки из внешних источников (вывод утилит,
 // теги в кодовой странице) не бросали type_error 316.

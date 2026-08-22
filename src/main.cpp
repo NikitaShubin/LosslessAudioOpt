@@ -171,10 +171,10 @@ int cmd_help(const std::vector<std::string>& args) {
             return 1;
         }
         std::string out = util::trim(r.output);
-        if (out.size() > 4000) {
-            out::print("%s\n... (truncated, %zu characters total)\n", out.substr(0, 4000).c_str(), out.size());
+        if (out.empty()) {
+            out::print("%s\n", i18n::str("(no output)").c_str());
         } else {
-            out::print("%s\n", out.empty() ? i18n::str("(no output)").c_str() : out.c_str());
+            out::print("%s\n", out.c_str());
         }
         out::print("\n[exit code: %d%s]\n", r.exit_code, r.timed_out ? i18n::str(", timed out").c_str() : "");
         return 0;

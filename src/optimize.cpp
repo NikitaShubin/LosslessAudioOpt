@@ -303,7 +303,7 @@ std::string encode_candidate(const std::string& wav, const std::string& candidat
     if (r.exit_code != 0) {
         std::string out = util::trim(r.output);
         return i18n::fmt("encoder returned code %d", r.exit_code) +
-               (out.empty() ? "" : ": " + out.substr(0, 2000));
+               (out.empty() ? "" : ": " + out);
     }
     if (!util::file_exists(candidate)) return i18n::str("encoder did not create the file");
     return {};
@@ -321,7 +321,7 @@ std::string validate_candidate(const std::string& wav, const std::string& candid
         proc::Result vr = proc::run(vargs, env.verify_timeout);
         if (!vr.started || vr.timed_out || vr.exit_code != 0) {
             return i18n::str("built-in verification failed") +
-                   (util::trim(vr.output).empty() ? "" : ": " + util::trim(vr.output).substr(0, 1000));
+                   (util::trim(vr.output).empty() ? "" : ": " + util::trim(vr.output));
         }
     }
 
@@ -342,7 +342,7 @@ std::string validate_candidate(const std::string& wav, const std::string& candid
         if (util::file_exists(dec_wav)) util::remove_file(dec_wav);
         std::string out = util::trim(dr.output);
         return i18n::fmt("candidate decode failed (code %d)", dr.exit_code) +
-               (out.empty() ? "" : ": " + out.substr(0, 1000));
+               (out.empty() ? "" : ": " + out);
     }
     std::string perr;
     bool same = media::wav_data_compare(wav, dec_wav, &perr);
