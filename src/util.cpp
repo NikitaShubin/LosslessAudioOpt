@@ -510,4 +510,39 @@ void sanitize_json(nlohmann::json& j) {
     }
 }
 
+std::string normalize_output(const std::string& s) {
+    // Шаг 1: \r → \n (возврат каретки = новая страница вывода)
+    std::string step1;
+    step1.reserve(s.size());
+    for (char c : s) {
+        if (c == '\r') step1 += '\n';
+        else step1 += c;
+    }
+    // Шаг 2: удалить все управляющие символы кроме \n и \t
+    std::string step2;
+    step2.reserve(step1.size());
+    for (char c : step1) {
+        unsigned char uc = (unsigned char)c;
+        if (uc == '\n' || uc == '\t' || uc >= 0x20) step2 += c;
+    }
+    // Шаг 3: схлопнуть последовательные пустые строки в одну
+    std::string out;
+    out.reserve(step2.size());
+    bool prev_nl = false;
+    for (char c : step2) {
+        if (c == '\n') {
+            if (!prev_nl) out += c;
+            prev_nl = true;
+        } else {
+            out += c;
+            prev_nl = false;
+        }
+    }
+    // Шаг 4: trim
+    size_t start = out.find_first_not_of(" \t\n");
+    if (start == std::string::npos) return {};
+    size_t end = out.find_last_not_of(" \t\n");
+    return out.substr(start, end - start + 1);
+}
+
 }  // namespace util
