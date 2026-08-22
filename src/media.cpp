@@ -1,5 +1,6 @@
 #include "media.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -34,22 +35,38 @@ bool Probe::is_lossless() const {
 }
 
 std::string find_ffprobe() {
+#ifdef _WIN32
     std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffprobe.exe");
     if (util::file_exists(local)) return local;
     return util::find_in_path("ffprobe.exe");
+#else
+    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffprobe");
+    if (util::file_exists(local)) return local;
+    return util::find_in_path("ffprobe");
+#endif
 }
 
 std::string find_ffmpeg() {
+#ifdef _WIN32
     std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffmpeg.exe");
     if (util::file_exists(local)) return local;
     return util::find_in_path("ffmpeg.exe");
+#else
+    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffmpeg");
+    if (util::file_exists(local)) return local;
+    return util::find_in_path("ffmpeg");
+#endif
 }
 
 Probe probe_file(const std::string& path, const std::string& ffprobe) {
     Probe p;
     std::string bin = ffprobe.empty() ? find_ffprobe() : ffprobe;
     if (bin.empty()) {
+#ifdef _WIN32
         p.error = i18n::str("ffprobe.exe not found (bin/ffmpeg/ or PATH)");
+#else
+        p.error = i18n::str("ffprobe not found (bin/ffmpeg/ or PATH)");
+#endif
         return p;
     }
     proc::Result r = proc::run({bin, "-v", "error", "-print_format", "json",
@@ -78,7 +95,7 @@ Probe probe_file(const std::string& path, const std::string& ffprobe) {
             const auto& v = fmt.at("size");
             if (v.is_number_unsigned()) p.size = v.get<uint64_t>();
             else if (v.is_number()) p.size = (uint64_t)v.get<double>();
-            else if (v.is_string()) p.size = _strtoui64(v.get<std::string>().c_str(), nullptr, 10);
+            else if (v.is_string()) p.size = (uint64_t)std::strtoull(v.get<std::string>().c_str(), nullptr, 10);
         }
         json::json tags = fmt.value("tags", json::json::object());
         if (tags.is_object()) {
@@ -129,7 +146,11 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
                    const std::string& ffmpeg, int bits, std::string* err) {
     std::string bin = ffmpeg.empty() ? find_ffmpeg() : ffmpeg;
     if (bin.empty()) {
+#ifdef _WIN32
         *err = i18n::str("ffmpeg.exe not found (bin/ffmpeg/ or PATH)");
+#else
+        *err = i18n::str("ffmpeg not found (bin/ffmpeg/ or PATH)");
+#endif
         return false;
     }
     std::string codec;

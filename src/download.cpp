@@ -1,7 +1,9 @@
 #include "download.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
+#endif
 
 #include <filesystem>
 #include <fstream>
@@ -14,6 +16,7 @@ namespace download {
 
 namespace {
 
+#ifdef _WIN32
 std::string last_error_text(const char* what) {
     DWORD err = GetLastError();
     return std::string(what) + i18n::str(": error code ") + std::to_string(err);
@@ -113,8 +116,6 @@ bool get_winhttp(const std::string& url, const std::string& dest, std::string* e
             WinHttpCloseHandle(hConn);
             break;
         }
-        // Receive-таймаут увеличен: некоторые серверы (monkeysaudio.com) сильно
-        // ограничивают скорость отдачи, медленное скачивание не должно обрываться.
         WinHttpSetTimeouts(hReq, 30000, 60000, 60000, 600000);
         if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0)) {
             *err = last_error_text("WinHttpSendRequest");
@@ -172,9 +173,10 @@ bool get_winhttp(const std::string& url, const std::string& dest, std::string* e
     if (!ok && util::file_exists(dest)) util::remove_file(dest);
     return ok;
 }
+#endif  // _WIN32
 
 bool get_curl(const std::string& url, const std::string& dest, std::string* err) {
-    // Поиск curl.exe: PATH или собственная копия рядом с exe (bin/curl/curl.exe).
+#ifdef _WIN32
     std::string curl = util::find_in_path("curl.exe");
     if (curl.empty()) {
         std::string local = util::join_path(util::exe_dir(), "bin");
@@ -183,6 +185,9 @@ bool get_curl(const std::string& url, const std::string& dest, std::string* err)
         if (!util::file_exists(curl)) curl = util::join_path(util::exe_dir(), "curl.exe");
         if (!util::file_exists(curl)) curl.clear();
     }
+#else
+    std::string curl = util::find_in_path("curl");
+#endif
     if (curl.empty()) {
         *err = i18n::str("curl.exe not found in PATH or bin/curl/");
         return false;
@@ -201,11 +206,17 @@ bool get_curl(const std::string& url, const std::string& dest, std::string* err)
 }  // namespace
 
 bool get(const std::string& url, const std::string& dest, std::string* err) {
+#ifdef _WIN32
     std::string w_err;
     if (get_winhttp(url, dest, &w_err)) return true;
     std::string c_err;
     if (get_curl(url, dest, &c_err)) return true;
     *err = "WinHTTP: " + w_err + "; curl: " + c_err;
+#else
+    std::string c_err;
+    if (get_curl(url, dest, &c_err)) return true;
+    *err = c_err;
+#endif
     return false;
 }
 

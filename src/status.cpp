@@ -1,6 +1,15 @@
 #include "status.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#include <termios.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <pthread.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -130,6 +139,7 @@ int content_width() {
 // Режим полосы: прогрессбар по умолчанию, Tab переключает на мозаику.
 BarMode g_mode = BarMode::Progress;
 
+#ifdef _WIN32
 DWORD g_orig_mode = 0;
 bool g_orig_mode_valid = false;
 
@@ -137,6 +147,12 @@ bool g_orig_mode_valid = false;
 HANDLE g_input = INVALID_HANDLE_VALUE;
 DWORD g_orig_in_mode = 0;
 bool g_orig_in_mode_valid = false;
+#else
+struct termios g_orig_termios{};
+bool g_orig_termios_valid = false;
+bool g_resize_received = false;
+void sigwinch_handler(int) { g_resize_received = true; }
+#endif
 
 std::wstring u2w(const std::string& s) { return util::u2w(s); }
 
@@ -456,6 +472,7 @@ void compose_frame() {
 // Размер, заданный через LLAO_STATUS_SIZE, не обновляется.
 bool refresh_size_locked() {
     if (g_size_forced) return false;
+#ifdef _WIN32
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     if (h == INVALID_HANDLE_VALUE || h == nullptr ||
@@ -463,6 +480,12 @@ bool refresh_size_locked() {
         return false;
     int w = csbi.srWindow.Right - csbi.srWindow.Left + 1;
     int hh = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+#else
+    struct winsize ws{};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0) return false;
+    int w = ws.ws_col;
+    int hh = ws.ws_row;
+#endif
     if (w < 1) w = 1;
     if (hh < 1) hh = 1;
     if (w == g_width && hh == g_height) return false;
@@ -486,9 +509,6 @@ void render_pass_locked() {
 // Вызывается только из потока отрисовки под g_m; блокировки нет — читаются
 // только уже накопленные события.
 bool handle_input_locked() {
-    if (g_input == INVALID_HANDLE_VALUE || g_input == nullptr) return false;
-    DWORD n = 0;
-    if (!GetNumberOfConsoleInputEvents(g_input, &n) || n == 0) return false;
     const int vis = g_height > 1 ? g_height - 1 : 0;
     int max_scroll = (int)g_total - vis;
     if (max_scroll < 0) max_scroll = 0;
@@ -497,6 +517,11 @@ bool handle_input_locked() {
         if (s > max_scroll) s = max_scroll;
     };
     bool changed = false;
+
+#ifdef _WIN32
+    if (g_input == INVALID_HANDLE_VALUE || g_input == nullptr) return false;
+    DWORD n = 0;
+    if (!GetNumberOfConsoleInputEvents(g_input, &n) || n == 0) return false;
     while (n > 0) {
         INPUT_RECORD rec;
         DWORD rd = 0;
@@ -527,10 +552,6 @@ bool handle_input_locked() {
             g_follow = false;
             changed = true;
         } else if (rec.EventType == MOUSE_EVENT && rec.Event.MouseEvent.dwEventFlags == 0) {
-            // Нажатие/отпускание кнопки. По колонке скроллбара: нажатие на сам
-            // бегунок — захват с сохранением смещения от его верха (затем движение
-            // перетаскивает бегунок), клик по треку — прыжок в позицию; отпускание
-            // завершает перетаскивание.
             const auto& me = rec.Event.MouseEvent;
             bool pressed = (me.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0;
             if (!pressed) {
@@ -548,13 +569,10 @@ bool handle_input_locked() {
             g_sb_drag = true;
             if (y >= thumb_y && y < thumb_y + thumb) g_sb_drag_off = y - thumb_y;
             else g_sb_drag_off = 0;
-            // Верх бегунка встаёт на точку захвата (для прыжка по треку off=0).
             sb_jump(y - g_sb_drag_off, track);
             changed = true;
         } else if (rec.EventType == MOUSE_EVENT &&
                    (rec.Event.MouseEvent.dwEventFlags & MOUSE_MOVED)) {
-            // Перетаскивание скроллбара: курсор движется с зажатой кнопкой —
-            // бегунок следует, сохраняя точку захвата.
             const auto& me = rec.Event.MouseEvent;
             if (g_sb_drag && (me.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) && vis > 0) {
                 int track = vis;
@@ -565,9 +583,69 @@ bool handle_input_locked() {
                 }
             }
         } else if (rec.EventType == WINDOW_BUFFER_SIZE_EVENT) {
-            changed = true;  // новый размер подхватит refresh_size_locked()
+            changed = true;
         }
     }
+#else
+    // SIGWINCH: ресайз окна.
+    if (g_resize_received) {
+        g_resize_received = false;
+        changed = true;
+    }
+
+    // Чтение клавиатуры (raw VT-последовательности).
+    struct pollfd pfd{STDIN_FILENO, POLLIN, 0};
+    while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+        unsigned char seq[32];
+        ssize_t n = read(STDIN_FILENO, seq, sizeof(seq));
+        if (n <= 0) break;
+        // Простейший декодер escape-последовательностей.
+        for (ssize_t i = 0; i < n; i++) {
+            if (seq[i] == '\x1b' && i + 1 < n) {
+                if (seq[i + 1] == '[') {
+                    // CSI: \x1b[ ...
+                    int code = 0;
+                    size_t j = i + 2;
+                    while (j < n && seq[j] >= '0' && seq[j] <= '9') {
+                        code = code * 10 + (seq[j] - '0');
+                        j++;
+                    }
+                    if (j < n && seq[j] == '~') {
+                        switch (code) {
+                            case 1: g_scroll = 0; g_follow = false; changed = true; break; // Home
+                            case 4: g_scroll = max_scroll; g_follow = false; changed = true; break; // End
+                            case 5: g_scroll -= vis; g_follow = false; changed = true; break; // PgUp
+                            case 6: g_scroll += vis; g_follow = false; changed = true; break; // PgDn
+                        }
+                        i = j;
+                    } else if (j < n) {
+                        switch (seq[j]) {
+                            case 'A': g_scroll--; g_follow = false; changed = true; break; // Up
+                            case 'B': g_scroll++; g_follow = false; changed = true; break; // Down
+                            case 'C': g_hscroll++; changed = true; break; // Right
+                            case 'D': g_hscroll--; changed = true; break; // Left
+                        }
+                        i = j;
+                    } else {
+                        i = j - 1;
+                    }
+                } else if (seq[i + 1] == 'O') {
+                    // SS3: \x1bO ...
+                    i++;
+                } else {
+                    // Однобайтовый escape-последовательность.
+                }
+            } else if (seq[i] == ' ' || seq[i] == 'f' || seq[i] == 'F') {
+                g_follow = !g_follow;
+                changed = true;
+            } else if (seq[i] == '\t') {
+                g_mode = g_mode == BarMode::Progress ? BarMode::Mosaic : BarMode::Progress;
+                changed = true;
+            }
+        }
+    }
+#endif
+
     clamp_scroll(g_scroll);
     if (g_hscroll < 0) g_hscroll = 0;
     int max_h = max_hscroll_locked();
@@ -579,9 +657,13 @@ bool handle_input_locked() {
 // kDebounce, чтобы собрать пачку обновлений в одну отрисовку. Параллельно
 // с ожиданием каждые kInputPoll опрашивает ввод и размер окна.
 void render_loop() {
-    // Поток ввода/отрисовки — выше приоритетом, чем воркеры и кодеки,
-    // чтобы навигация клавишами/мышью не тормозила под нагрузкой на CPU.
+#ifdef _WIN32
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+#else
+    struct sched_param sp{};
+    sp.sched_priority = 1;
+    pthread_setschedparam(pthread_self(), SCHED_BATCH, &sp);
+#endif
     std::unique_lock<std::mutex> lk(g_m);
     while (true) {
         g_cv.wait_for(lk, kInputPoll, [&] { return g_render_stop || g_pending; });
@@ -620,8 +702,13 @@ void init(size_t total_files, bool no_status) {
     g_width = 80;
     g_height = 25;
     g_size_forced = false;
+#ifdef _WIN32
     g_input = INVALID_HANDLE_VALUE;
     g_orig_in_mode_valid = false;
+#else
+    g_orig_termios_valid = false;
+    g_resize_received = false;
+#endif
     if (no_status) return;
 
     const char* force = getenv("LLAO_STATUS_FORCE");
@@ -636,24 +723,18 @@ void init(size_t total_files, bool no_status) {
         }
     }
 
+#ifdef _WIN32
     if (!forced) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (h != INVALID_HANDLE_VALUE && h != nullptr) {
-            DWORD mode = 0;
-            if (GetConsoleMode(h, &mode)) {
-                // Настоящая Windows-консоль — включаем VT-обработку.
-                DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-                SetConsoleMode(h, new_mode);
-                g_orig_mode = mode;
-                g_orig_mode_valid = true;
-            }
-            // GetConsoleMode не удался (Wine / pipe / файл): продолжаем
-            // без SetConsoleMode — ANSI-коды и так работают через fwrite()
-            // в любом xterm-совместимом терминале.
-        }
+        if (h == INVALID_HANDLE_VALUE || h == nullptr) return;
+        DWORD mode = 0;
+        if (!GetConsoleMode(h, &mode)) return;
+        DWORD new_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        if (!SetConsoleMode(h, new_mode)) return;
+        g_orig_mode = mode;
+        g_orig_mode_valid = true;
     }
 
-    // Размер окна: консоль -> переменные окружения COLUMNS/LINES -> 80x25.
     if (!g_size_forced) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -681,12 +762,6 @@ void init(size_t total_files, bool no_status) {
 
     g_interactive = true;
 
-    // Ввод: стрелки/PgUp/PgDn/Home/End — прокрутка, пробел/F — переключение
-    // автоследования, колесо мыши — прокрутка. Включаем обработку событий окна
-    // и мыши, отключаем QuickEdit (выделение мышью «зависает» консоль) и эхо
-    // ввода (иначе набранные символы печатались бы поверх статусбара). Если
-    // ввода нет (stdin не консоль, например pipe под wine) — вьюпорт остаётся
-    // без прокрутки, это не ошибка.
     g_input = GetStdHandle(STD_INPUT_HANDLE);
     if (g_input != INVALID_HANDLE_VALUE && g_input != nullptr) {
         DWORD imode = 0;
@@ -699,15 +774,54 @@ void init(size_t total_files, bool no_status) {
             SetConsoleMode(g_input, new_mode);
         }
     }
+#else
+    if (!g_size_forced) {
+        struct winsize ws{};
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+            g_width = ws.ws_col;
+            g_height = ws.ws_row;
+        } else {
+            const char* cols = getenv("COLUMNS");
+            const char* lines_env = getenv("LINES");
+            if (cols && *cols && lines_env && *lines_env) {
+                int w = atoi(cols), hh = atoi(lines_env);
+                if (w > 0 && hh > 0) {
+                    g_width = w;
+                    g_height = hh;
+                }
+            }
+        }
+    }
+
+    if (!isatty(STDOUT_FILENO)) return;
+    g_interactive = true;
+
+    // Raw mode для stdin: отключаем canonical echo, чтобы читать escape-последовательности.
+    if (isatty(STDIN_FILENO)) {
+        struct termios raw{};
+        if (tcgetattr(STDIN_FILENO, &raw) == 0) {
+            g_orig_termios = raw;
+            g_orig_termios_valid = true;
+            raw.c_lflag &= ~(ICANON | ECHO);
+            raw.c_cc[VMIN] = 0;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+        }
+    }
+
+    // SIGWINCH для отслеживания ресайза.
+    struct sigaction sa{};
+    sa.sa_handler = sigwinch_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa, nullptr);
+#endif
 
     // Весь псевдографический интерфейс живёт в альтернативном буфере экрана:
-    // исходный экран (с командной строкой и прежним выводом) сохраняется
-    // и восстанавливается в shutdown() — как у mc/opencode.
     out::text(stdout, "\x1b[?1049h");
     screen::cursor(false);
     g_screen.resize(g_width, g_height);
 
-    // Вся отрисовка — в отдельном потоке; воркеры его только будят.
     g_render_stop = false;
     g_pending = false;
     g_render_thread = std::thread(render_loop);
@@ -825,11 +939,11 @@ void shutdown() {
     g_render_stop = true;
     g_cv.notify_all();
     lk.unlock();
-    // Ждём, пока поток отрисовки сбросит накопленные изменения и завершится.
     if (g_render_thread.joinable()) g_render_thread.join();
     lk.lock();
     screen::cursor(true);
     out::text(stdout, "\x1b[0m\x1b[r\x1b[2J\x1b[?1049l");
+#ifdef _WIN32
     if (g_orig_mode_valid) {
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (h != INVALID_HANDLE_VALUE && h != nullptr) SetConsoleMode(h, g_orig_mode);
@@ -837,6 +951,11 @@ void shutdown() {
     if (g_orig_in_mode_valid && g_input != INVALID_HANDLE_VALUE && g_input != nullptr) {
         SetConsoleMode(g_input, g_orig_in_mode);
     }
+#else
+    if (g_orig_termios_valid) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
+    }
+#endif
     g_interactive = false;
     g_scroll = 0;
     g_follow = true;
@@ -844,8 +963,10 @@ void shutdown() {
     g_sb_drag = false;
     g_sb_drag_off = 0;
     g_mode = BarMode::Progress;
+#ifdef _WIN32
     g_orig_mode_valid = false;
     g_orig_in_mode_valid = false;
+#endif
 
     // Накопленные диагностические строки печатаем после восстановления
     // альтернативного буфера (см. kMaxBufLines): в интерактивном режиме они

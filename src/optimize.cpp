@@ -138,21 +138,64 @@ std::string ascii_tmp_name(const std::string& s) {
     return r;
 }
 
-// Каталог временных файлов текущего процесса: exe_dir/tmp/<pid>. Отдельная
+// Каталог временных файлов текущего процесса: base/<pid>. Отдельная
 // подпапка на процесс исключает конфликты имён между параллельными прогонами
 // llao (tok — хэш пути — у них одинаковый) и упрощает очистку: после прогона
 // подпапка удаляется целиком, а чужие подпапки не трогаются.
-std::string session_tmp_dir() {
-    std::string d = util::join_path(tmp_dir(), util::process_id());
+static std::string base_tmp_dir(const std::string& custom) {
+    return custom.empty() ? tmp_dir() : custom;
+}
+
+std::string session_tmp_dir(const std::string& custom) {
+    std::string d = util::join_path(base_tmp_dir(custom), util::process_id());
     util::mkdirs(d);
     return d;
 }
 
 // Удаляет подпапку временных файлов текущего процесса целиком (рекурсивно).
 // Вызывается при старте (остатки после обрыва) и после завершения прогона.
-void clear_session_tmp_dir() {
+void clear_session_tmp_dir(const std::string& custom) {
     std::error_code ec;
-    fs::remove_all(fs::u8path(session_tmp_dir()), ec);
+    fs::remove_all(fs::u8path(session_tmp_dir(custom)), ec);
+}
+
+struct DiskBudget {
+    std::mutex m;
+    uint64_t reserved = 0;
+    uint64_t min_free = 1ull << 30;  // 1 ГБ страховой запас
+
+    bool try_reserve(const std::string& tmp_path, uint64_t bytes) {
+        std::lock_guard<std::mutex> lk(m);
+        uint64_t free = util::disk_free_bytes(tmp_path);
+        uint64_t avail = free > (reserved + min_free) ? free - reserved - min_free : 0;
+        if (bytes > avail) return false;
+        reserved += bytes;
+        return true;
+    }
+
+    void release(uint64_t bytes) {
+        std::lock_guard<std::mutex> lk(m);
+        reserved = (bytes >= reserved) ? 0 : reserved - bytes;
+    }
+};
+
+// Оценка размера WAV-файла по данным ffprobe (до декодирования).
+static uint64_t estimated_wav_bytes(const media::Probe& probe, int bits) {
+    int bps = bits > 0 ? bits : 16;
+    uint64_t ch = probe.channels > 0 ? (uint64_t)probe.channels : 2;
+    uint64_t sr = probe.sample_rate > 0 ? (uint64_t)probe.sample_rate : 44100;
+    double dur = probe.duration > 0.0 ? probe.duration : 60.0;
+    return 44 + ch * (bps / 8) * sr * (uint64_t)(dur + 1.0);
+}
+
+// Пиковый след файла на диске (уровень 1 — файловый бюджет).
+static uint64_t file_peak_bytes(uint64_t wav, Verify v) {
+    return wav * ((v == Verify::None) ? 3 : 4);
+}
+
+// Инкрементальный след одного варианта (уровень 2 — задачевый бюджет).
+static uint64_t variant_peak_bytes(uint64_t wav, Verify v) {
+    return wav * ((v == Verify::None) ? 1 : 2);
 }
 
 // Расширение файла в нижнем регистре (без точки).
@@ -227,8 +270,13 @@ std::string decoder_path(const config::Format& fmt, const std::string& encoder) 
         cands.push_back(util::join_path(enc_dir, name));
     }
     cands.push_back(util::find_in_path(name));
+    cands.push_back(util::find_in_path(name + ".exe"));
     for (const auto& c : cands) {
-        if (!c.empty() && util::file_exists(c) && util::is_pe(c)) return c;
+        if (c.empty() || !util::file_exists(c)) continue;
+#ifdef _WIN32
+        if (!util::is_pe(c)) continue;
+#endif
+        return c;
     }
     return encoder;  // fallback
 }
@@ -417,6 +465,9 @@ struct FileJob {
     bool prep_ok = false;
     std::string ref_wav;
     uint64_t ref_size = 0;   // размер эталонного WAV (оценка размера dec.wav задачи)
+    uint64_t wav_est = 0;    // оценка размера WAV по probe (для бюджета)
+    uint64_t peak_file = 0;  // файловый бюджет (file_peak_bytes)
+    bool deferred = false;   // try_reserve не прошёл — повторить позже
     int bits = 16;
     media::Probe probe;
     tags::TagSet ts;
@@ -448,9 +499,10 @@ struct Runner {
     int window = 1;
     size_t n_files = 0;
 
+    DiskBudget disk;  // централизованный бюджет диска
+
     // --- кэш ресурсов для адаптивного окна (обновляется не чаще 10 с) ---
     std::chrono::steady_clock::time_point res_last{};
-    uint64_t tmp_budget = 8ull << 30;  // бюджет tmp: свободно на диске минус резерв, не меньше 1 ГБ
     uint64_t ram_budget = 0;           // бюджет RAM: 50% доступной памяти
 
     std::mutex qm;
@@ -485,137 +537,37 @@ struct Runner {
         }
     }
 
-    // Суммарный след задач «в полёте» по всем файлам (для бюджетов tmp/RAM).
-    // ref.wav — один на файл (file_base_footprint), кандидаты — по одному на задачу.
-    uint64_t footprint_used_locked() const {
-        uint64_t sum = 0;
-        for (const auto& j : jobs) {
-            if (!j.prep_done || j.done) continue;
-            size_t jf = j.released > j.completed ? j.released - j.completed : 0;
-            if (jf == 0 || j.ref_size == 0) continue;
-            sum += file_base_footprint(j.ref_size);               // ref.wav + dec.wav (один раз)
-            sum += (uint64_t)jf * task_footprint(j.ref_size);     // кандидаты
-        }
-        return sum;
-    }
-
-    // Есть ли хоть один готовый файл с невыпущенными задачами, для которого
-    // свободны личное окно и бюджеты (для cv-предиката; выпуск решает
-    // take_work_locked, а здесь важно не разбудить воркеров в горячем цикле).
+    // Есть ли хоть один готовый файл с невыпущенными задачами и свободным
+    // личным окном (для cv-предиката). Бюджет диска проверяется в take_work.
     bool variant_launchable_locked() {
         if (abort.load()) return false;
-        refresh_resources_locked();
-        uint64_t foot_used = footprint_used_locked();
         for (size_t i = 0; i < n_files; i++) {
             const FileJob& j = jobs[i];
             if (j.done || !j.prep_done) continue;
             if (j.released >= j.tasks.size()) continue;
-            if (j.released - j.completed >= (size_t)file_cap_locked(j)) continue;
-            if (j.ref_size > 0) {
-                uint64_t foot = task_footprint(j.ref_size);
-                size_t jf = j.released > j.completed ? j.released - j.completed : 0;
-                if (jf == 0) foot += file_base_footprint(j.ref_size);
-                if (foot_used + foot > tmp_budget) continue;
-                if (ram_budget > 0 && foot_used + foot > ram_budget) continue;
-            }
+            if (j.released - j.completed >= (size_t)window) continue;
             return true;
         }
         return false;
     }
 
-    // Задач «в полёте» (выпущено, но не завершено) по всем файлам.
-    size_t in_flight_locked() const {
-        size_t rel = 0, cpl = 0;
-        for (const auto& j : jobs) {
-            rel += j.released;
-            cpl += j.completed;
-        }
-        return rel - cpl;
-    }
-
-    // След одной задачи «в полёте»: только кандидат (≤ ref_size, консервативно = ref_size).
-    static uint64_t task_footprint(uint64_t ref_size) {
-        return ref_size;
-    }
-
-    // Фиксированный след файла: ref.wav (один на весь файл) + dec.wav (пик,
-    // только при verify=all — создаётся на миллисекунды, но место нужно).
-    uint64_t file_base_footprint(uint64_t ref_size) const {
-        bool vall = opts->verify == Verify::All;
-        return ref_size + (vall ? ref_size : 0);
-    }
-
-    // Резерв для бюджетов: худший случай для следующей задачи (файл ещё не
-    // активен — нужен и ref.wav, и первый кандидат). При высокой параллельности
-    // тяжело заранее сказать, насколько хорошо сожмётся следующий кандидат,
-    // поэтому держим запас, чтобы внезапно большой кандидат не упёрся в конец
-    // диска (сначала он пишется в tmp, потом сравнивается и удаляется).
-    uint64_t reserve_footprint_locked() const {
-        uint64_t reserve = 0;
-        for (const auto& j : jobs) {
-            if (!j.prep_done || j.done) continue;
-            if (j.released >= j.tasks.size()) continue;  // задач на выпуск больше нет
-            if (j.ref_size > 0) {
-                uint64_t total = file_base_footprint(j.ref_size) + task_footprint(j.ref_size);
-                reserve = std::max<uint64_t>(reserve, total);
-            }
-        }
-        return reserve;
-    }
-
-    // Обновляет кэш ресурсов (диск/RAM) не чаще 10 с.
-    void refresh_resources_locked() {
-        auto now = std::chrono::steady_clock::now();
-        if (res_last != std::chrono::steady_clock::time_point{} &&
-            now - res_last < std::chrono::seconds(10))
-            return;
-        uint64_t free = util::disk_free_bytes(tmp);
-        // Жадное использование диска: бюджет — почти всё свободное место, но с
-        // резервом под один максимальный след (см. reserve_footprint_locked).
-        uint64_t reserve = reserve_footprint_locked();
-        uint64_t b = free > reserve ? free - reserve : 0;
-        if (b < (1ull << 30)) b = 1ull << 30;  // но и не меньше 1 ГБ (чтобы не остановить прогон в самом начале)
-        tmp_budget = b;
-        uint64_t ram = util::avail_ram_bytes();
-        ram_budget = ram > (2ull << 30) ? ram / 2 : 0;  // 50% доступной памяти
-        res_last = now;
-    }
-
-    // Окно (лимит «в полёте») для одного файла: число потоков, бюджет tmp
-    // (свободное место на диске минус фиксированный след) и бюджет RAM.
-    uint64_t file_cap_locked(const FileJob& j) const {
-        uint64_t cap = (uint64_t)window;
-        if (j.ref_size > 0) {
-            uint64_t foot = task_footprint(j.ref_size);
-            uint64_t base = file_base_footprint(j.ref_size);
-            uint64_t avail_tmp = tmp_budget > base ? tmp_budget - base : 0;
-            uint64_t by_tmp = avail_tmp / foot;
-            if (by_tmp < 1) by_tmp = 1;
-            cap = std::min<uint64_t>(cap, by_tmp);
-            if (ram_budget > 0) {
-                uint64_t avail_ram = ram_budget > base ? ram_budget - base : 0;
-                uint64_t by_ram = avail_ram / foot;
-                if (by_ram < 1) by_ram = 1;
-                cap = std::min<uint64_t>(cap, by_ram);
-            }
-        }
-        return cap;
-    }
-
-    // Prep следующего файла: файлы готовятся строго по порядку (next_prep++),
-    // параллельно — не больше числа потоков (window). Жадный принцип: пока есть
-    // распакованный файл с ещё не выпущенными задачами, распаковка нового файла
-    // не начинается — сначала дорабатываем старый (его задачи будут выпущены,
-    // как только освободится бюджет/окно). Prep разрешён только когда для всех
-    // распакованных файлов либо всё выпущено, либо файл завершён.
+    // Prep разрешён, если есть хотя бы 1 распакованный файл без задач
+    // («запасной») — либо все распакованные уже выпустили задачи.
     bool prep_allowed_locked() const {
         if (abort.load()) return false;
         if (proc::cancelled()) return false;
         if (next_prep >= n_files) return false;
         if (prep_active >= window) return false;
+        bool has_idle = false;
         for (const auto& j : jobs) {
             if (j.done || !j.prep_done) continue;
-            if (j.released < j.tasks.size()) return false;  // есть невыпущенные задачи
+            if (j.released == 0) { has_idle = true; break; }
+        }
+        if (has_idle) {
+            for (const auto& j : jobs) {
+                if (j.done || !j.prep_done) continue;
+                if (j.released < j.tasks.size()) return false;
+            }
         }
         return true;
     }
@@ -627,42 +579,46 @@ struct Runner {
         size_t task = 0;
     };
 
-    // Вызывается под qm. Свободный воркер берёт очередной незанятый вариант
-    // самого раннего готового файла. Личное окно считается на файл: варианты
-    // файла не выпускаются, пока у него самого не освободится место (его лимит
-    // «в полёте»), поэтому большой файл с медленными вариантами не блокирует
-    // prep и варианты следующих файлов. Общие бюджеты tmp/RAM ограничивают
-    // суммарный след задач «в полёте» по всем файлам. Файл, которому не хватает
-    // места, пропускается — берётся тот, для которого место есть. Со временем
-    // маленькие файлы освобождают место, и большой возвращается.
-    // Когда варианты брать нечего — берётся prep следующего файла.
+    // Вызывается под qm. Свободный воркер берёт очередной незанятый вариант.
+    // Приоритет: варианты (уже распакованных файлов) > распаковка нового файла.
+    // Задачевый бюджет (variant_peak) запрашивается для 2-го и последующих
+    // воркеров файла; первый воркер работает в рамках файлового бюджета.
     bool take_work_locked(Work* w) {
         if (abort.load()) return false;
-        refresh_resources_locked();
-        uint64_t foot_used = footprint_used_locked();
         for (size_t i = 0; i < n_files; i++) {
-            const FileJob& j = jobs[i];
+            FileJob& j = jobs[i];
             if (j.done || !j.prep_done) continue;
             if (j.released >= j.tasks.size()) continue;
             size_t jf = j.released - j.completed;
-            if (jf >= (size_t)file_cap_locked(j)) continue;  // личное окно файла занято
-            if (j.ref_size > 0) {
-                // Инкрементальный расход: кандидат + ref.wav/dec.wav (только при
-                // первом запуске,jf == 0 — файл ещё не «активен»).
-                uint64_t foot = task_footprint(j.ref_size);
-                if (jf == 0) foot += file_base_footprint(j.ref_size);
-                if (foot_used + foot > tmp_budget) continue;  // общий tmp-бюджет
-                if (ram_budget > 0 && foot_used + foot > ram_budget) continue;  // RAM
+            if (jf >= (size_t)window) continue;
+            if (jf > 0 && j.ref_size > 0) {
+                uint64_t vpeak = variant_peak_bytes(j.ref_size, opts->verify);
+                if (!disk.try_reserve(tmp, vpeak)) continue;
             }
             *w = {WorkKind::Variant, i, j.released};
             jobs[i].released++;
             return true;
         }
         if (prep_allowed_locked()) {
-            size_t i = next_prep++;
-            prep_active++;
-            *w = {WorkKind::Prep, i, 0};
-            return true;
+            for (size_t i = 0; i < n_files; i++) {
+                FileJob& j = jobs[i];
+                if (j.done || j.prep_done || !j.deferred) continue;
+                if (j.probe.ok && j.wav_est > 0) {
+                    j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
+                    if (disk.try_reserve(tmp, j.peak_file)) {
+                        j.deferred = false;
+                        prep_active++;
+                        *w = {WorkKind::Prep, i, 0};
+                        return true;
+                    }
+                }
+            }
+            if (next_prep < n_files) {
+                size_t i = next_prep++;
+                prep_active++;
+                *w = {WorkKind::Prep, i, 0};
+                return true;
+            }
         }
         return false;
     }
@@ -672,12 +628,19 @@ struct Runner {
         const Options& opts = *this->opts;
         const auto& fmts = *this->fmts;
 
-        if (proc::cancelled() || proc::aborted()) return;
+        // Если это повторный вызов (deferred retry), budgets уже зарезервирован
+        // в take_work_locked. При любом раннем выходе — освобождаем.
+        auto release_deferred_budget = [&]() {
+            if (j.peak_file > 0) { disk.release(j.peak_file); j.peak_file = 0; }
+        };
+
+        if (proc::cancelled() || proc::aborted()) { release_deferred_budget(); return; }
         if (ffprobe.empty() || ffmpeg.empty()) {
             j.summary.path = j.path;
             j.summary.status = "error";
             j.summary.detail = i18n::str("ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)");
             status::log(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+            release_deferred_budget();
             return;
         }
 
@@ -685,7 +648,7 @@ struct Runner {
         bool src_decoded = false;
 
         media::Probe probe = media::probe_file(j.path, ffprobe);
-        if (proc::aborted()) return;  // прервано ошибкой другого файла
+        if (proc::aborted()) { release_deferred_budget(); return; }  // прервано ошибкой другого файла
         if (!probe.ok) {
             // ffprobe не смог прочитать файл (напр. OptimFROG высоких пресетов ffmpeg
             // не разбирает). Пробуем родной декодер формата по расширению: расжимаем в
@@ -694,6 +657,7 @@ struct Runner {
             if (src_fmt && decode_source_native(src_fmt, j.path, j.ref_wav, 16)) {
                 probe = media::probe_file(j.ref_wav, ffprobe);
                 if (proc::aborted()) {
+                    release_deferred_budget();
                     util::remove_file(j.ref_wav);
                     return;
                 }
@@ -705,7 +669,7 @@ struct Runner {
             }
             if (!probe.ok) {
                 util::remove_file(j.ref_wav);
-                if (proc::aborted()) return;  // прервано ошибкой другого файла
+                if (proc::aborted()) { release_deferred_budget(); return; }  // прервано ошибкой другого файла
                 j.summary.path = j.path;
                 j.summary.status = "error";
                 j.summary.detail = probe.error;
@@ -716,6 +680,7 @@ struct Runner {
                                    {"reason", probe.error}});
                 }
                 status::error("ERROR " + j.path + " — " + probe.error + "\n");
+                    release_deferred_budget();
                     return;
             }
         }
@@ -734,6 +699,7 @@ struct Runner {
                                {"reason", "video stream present"}});
             }
             status::log("SKIP " + j.path + " — " + i18n::str("video stream present (not audio)") + "\n");
+            release_deferred_budget();
             return;
         }
         if (!probe.is_lossless() && !opts.allow_lossy) {
@@ -748,6 +714,7 @@ struct Runner {
                                {"reason", "lossy input"}});
             }
             status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
+            release_deferred_budget();
             return;
         }
 
@@ -755,6 +722,18 @@ struct Runner {
         int bits = probe.bits_per_sample;
         if (bits <= 0) bits = 16;
         j.bits = bits;
+
+        // Файловый бюджет: оценка WAV + пиковый след. Если не влезает —
+        // помечаем deferred и выходим (без error). При повторном вызове (deferred retry)
+        // бюджет уже зарезервирован в take_work_locked — пропускаем.
+        j.wav_est = estimated_wav_bytes(probe, bits);
+        if (j.peak_file == 0) {
+            j.peak_file = file_peak_bytes(j.wav_est, opts.verify);
+            if (!disk.try_reserve(tmp, j.peak_file)) {
+                j.deferred = true;
+                return;
+            }
+        }
 
         // Декод исходника собственным декодером формата: для наших форматов это надёжнее
         // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
@@ -766,10 +745,12 @@ struct Runner {
         }
         if (!decoded) decoded = media::decode_to_wav(j.path, j.ref_wav, ffmpeg, bits, &derr);
         if (proc::aborted()) {  // прервано ошибкой другого файла — ошибкой не считаем
+            release_deferred_budget();
             util::remove_file(j.ref_wav);
             return;
         }
         if (!decoded) {
+            release_deferred_budget();
             util::remove_file(j.ref_wav);
             j.summary.path = j.path;
             j.summary.status = "error";
@@ -1246,7 +1227,8 @@ struct Runner {
             }
         }
 
-        // Чистка временных файлов файла.
+        // Освобождаем файловый бюджет и чистим временные файлы.
+        disk.release(j.peak_file);
         util::remove_file(j.ref_wav);
         for (const auto& [id, fp] : j.fmt_plans)
             if (fp.sidecar_size > 0) util::remove_file(fp.sidecar_path);
@@ -1357,6 +1339,11 @@ struct Runner {
                         j.done = true;
                         total_done++;
                         last = true;
+                    } else if (j.ref_size > 0) {
+                        // Освобождаем задачевый бюджет для завершённого варианта.
+                        // Первый воркер работал в рамках файлового бюджета,
+                        // все остальные получили variant_peak — освобождаем.
+                        disk.release(variant_peak_bytes(j.ref_size, opts->verify));
                     }
                     cv.notify_all();
                 }
@@ -1419,8 +1406,8 @@ int run(const Options& opts) {
 
     // Изолированный каталог tmp/<pid>: чужие прогоны не пересекаются. Остатки
     // своей подпапки (обрыв прошлого запуска с тем же PID) убираем заранее.
-    clear_session_tmp_dir();
-    std::string tmp = session_tmp_dir();
+    clear_session_tmp_dir(opts.tmp_dir);
+    std::string tmp = session_tmp_dir(opts.tmp_dir);
 
     // Журнал runs/*.jsonl — только в режиме отладки (stats.json накапливается всегда).
     report::Logger logger(opts.debug ? util::join_path(util::exe_dir(), "runs")
@@ -1495,7 +1482,7 @@ int run(const Options& opts) {
     }
 
     // Убираем свою подпапку временных файлов целиком (эталонные WAV, кандидаты).
-    clear_session_tmp_dir();
+    clear_session_tmp_dir(opts.tmp_dir);
 
     if (logger.ok()) {
         logger.event({{"type", "run_end"},
@@ -1554,7 +1541,7 @@ static int restore_one(const std::string& path, const config::Format& target,
     std::string base = util::base_name(path);
     std::string base_ne = base_no_ext(path);
     std::string dir = util::dir_name(path);
-    std::string tmp = session_tmp_dir();
+    std::string tmp = session_tmp_dir(std::string());
     util::mkdirs(tmp);
     std::string tok = tmp_token(path);
     std::string src_wav = util::join_path(tmp, tok + "_" + ascii_tmp_name(base_ne) + ".src.wav");
@@ -1771,7 +1758,7 @@ int restore_run(const RestoreOptions& opts) {
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
     if (jobs > (int)files.size()) jobs = (int)files.size();
 
-    clear_session_tmp_dir();
+    clear_session_tmp_dir(std::string());
     out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
                 variant->id.c_str(), files.size(), jobs);
 
@@ -1806,7 +1793,7 @@ int restore_run(const RestoreOptions& opts) {
     for (int i = 0; i < jobs; i++) threads.emplace_back(worker);
     for (auto& t : threads) t.join();
 
-    clear_session_tmp_dir();
+    clear_session_tmp_dir(std::string());
 
     out::print("Done: %zu files restored, errors: %d\n", done, failed.load());
     return failed.load() > 0 ? 1 : 0;

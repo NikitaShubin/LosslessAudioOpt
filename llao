@@ -1,34 +1,30 @@
 #!/bin/sh
-# LLAO: запуск llao.exe под wine без шума отладчика wine (err:winediag,
-# err:environ и т.п. — вывод wineserver'а идёт в терминал мимо перехвата llao).
-# По умолчанию WINEDEBUG=-all (как в CI-тестах проекта); своё значение сохраняется.
+# llao.sh: обёртка для запуска llao.exe под Wine.
+# Решает проблемы Wine:
+#   1) GetConsoleScreenBufferInfo падает → g_width=80 вместо реальной ширины.
+#      Решение: определяем размер через stty, передаём через LLAO_STATUS_SIZE.
+#   2) Wine пишет err:ntlm, err:winediag в stderr, ломая визуализацию.
+#      Решение: WINEDEBUG=-all подавляет все err-сообщения Wine.
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
-# Автоопределение размера терминала. Wine не может определить размер окна
-# через Windows Console API (GetConsoleScreenBufferInfo) — Wine не эмулирует
-# консоль в Linux-терминале. Поэтому обёртка (живущая в Linux) определяет
-# размер и передаёт через LLAO_STATUS_SIZE. LLAO_STATUS_FORCE нужен, чтобы
-# обойти проверку GetConsoleMode (тоже не работает под Wine).
-if [ -z "$LLAO_STATUS_SIZE" ]; then
-    _cols="" ; _lines=""
-    if command -v stty >/dev/null 2>&1; then
-        eval "$(stty size 2>/dev/null)"  # Sets $LINES and $COLUMNS
-        _cols="$COLUMNS" ; _lines="$LINES"
-    fi
-    if [ -z "$_cols" ] || [ -z "$_lines" ] || [ "$_cols" -le 1 ] 2>/dev/null; then
-        if command -v tput >/dev/null 2>&1; then
-            _cols="$(tput cols 2>/dev/null)"
-            _lines="$(tput lines 2>/dev/null)"
-        fi
-    fi
-    if [ -n "$_cols" ] && [ -n "$_lines" ] && [ "$_cols" -gt 1 ] 2>/dev/null && \
-       [ "$_lines" -gt 1 ] 2>/dev/null; then
-        export LLAO_STATUS_SIZE="${_cols}x${_lines}"
+# Определяем размер терминала (Wine не умеет GetConsoleScreenBufferInfo).
+SIZE=""
+if command -v stty >/dev/null 2>&1; then
+    SIZE="$(stty size 2>/dev/null | awk '{printf "%dx%d", $2, $1}')"
+fi
+if [ -z "$SIZE" ] && command -v tput >/dev/null 2>&1; then
+    COLS="$(tput cols 2>/dev/null)"
+    LINES="$(tput lines 2>/dev/null)"
+    if [ -n "$COLS" ] && [ -n "$LINES" ]; then
+        SIZE="${COLS}x${LINES}"
     fi
 fi
-: "${LLAO_STATUS_FORCE:=1}"
-export LLAO_STATUS_FORCE
+if [ -n "$SIZE" ]; then
+    export LLAO_STATUS_SIZE="$SIZE"
+    export LLAO_STATUS_FORCE=1
+fi
 
-DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-exec wine "$DIR/llao.exe" "$@"
+LOGFILE="${LLAO_LOG:-/tmp/llao-wine.log}"
+exec wine "$DIR/llao.exe" "$@" 2>"$LOGFILE"

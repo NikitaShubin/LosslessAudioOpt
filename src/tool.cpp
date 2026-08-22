@@ -45,8 +45,14 @@ std::string cached_binary(const config::Format& fmt) {
 std::string in_path(const config::Format& fmt) {
     std::string name = fmt.engine_kind == "binary" ? fmt.engine_executable : "ffmpeg";
     std::string p = util::find_in_path(name);
-    if (!p.empty() && util::is_pe(p)) return p;
+    if (p.empty()) return {};
+#ifdef _WIN32
+    if (util::is_pe(p)) return p;
     return {};
+#else
+    // На Linux принимаем нативные ELF-бинарики (flac, ffmpeg и т.д. из apt).
+    return p;
+#endif
 }
 
 std::vector<config::DownloadEntry> entries_for_os(const config::Format& fmt) {
@@ -107,11 +113,18 @@ std::string ensure_exe_extension(const std::string& src, const std::string& cach
 // Требуется полный 7z.exe (не 7zr): он умеет извлекать
 // самораспаковывающиеся NSIS-установщики.
 std::string find_7z() {
+#ifdef _WIN32
     std::string local = util::join_path(util::join_path(config::bin_dir(), "7z"), "7z.exe");
     if (util::file_exists(local)) return local;
     local = util::join_path(util::exe_dir(), "7z.exe");
     if (util::file_exists(local)) return local;
     return util::find_in_path("7z.exe");
+#else
+    // На Linux: p7zip (apt install p7zip-full) даёт команду 7z.
+    std::string p = util::find_in_path("7z");
+    if (!p.empty()) return p;
+    return util::find_in_path("7zr");
+#endif
 }
 
 // Рекурсивный поиск файла по имени (регистронезависимо) в каталоге.
