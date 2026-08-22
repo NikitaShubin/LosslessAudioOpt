@@ -1,6 +1,8 @@
 #include "out.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cstdarg>
 #include <mutex>
@@ -14,6 +16,7 @@ namespace {
 
 std::mutex g_mutex;
 
+#ifdef _WIN32
 HANDLE handle_of(FILE* f) {
     return (f == stderr) ? GetStdHandle(STD_ERROR_HANDLE)
                          : GetStdHandle(STD_OUTPUT_HANDLE);
@@ -25,11 +28,13 @@ bool is_console(FILE* f) {
     DWORD mode = 0;
     return GetConsoleMode(h, &mode) != 0;
 }
+#endif
 
 }  // namespace
 
 void text(FILE* f, const std::string& s) {
     std::lock_guard<std::mutex> lk(g_mutex);
+#ifdef _WIN32
     if (is_console(f)) {
         std::wstring w = util::u2w(s);
         if (!w.empty()) {
@@ -39,6 +44,9 @@ void text(FILE* f, const std::string& s) {
     } else {
         fwrite(s.data(), 1, s.size(), f);
     }
+#else
+    fwrite(s.data(), 1, s.size(), f);
+#endif
     fflush(f);
 }
 

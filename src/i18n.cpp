@@ -1,6 +1,8 @@
 #include "i18n.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
@@ -29,8 +31,10 @@ std::string auto_detect() {
         if (base == "ru") return "ru";
         if (base == "en") return "en";
     }
+#ifdef _WIN32
     LANGID lid = GetUserDefaultUILanguage();
     if (PRIMARYLANGID(lid) == LANG_RUSSIAN) return "ru";
+#endif
     return "en";
 }
 

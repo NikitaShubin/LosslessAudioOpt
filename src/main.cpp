@@ -1,9 +1,17 @@
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cstdio>
 #include <exception>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#include <csignal>
+#else
+#include <signal.h>
+#endif
 
 #include "config.h"
 #include "i18n.h"
@@ -16,11 +24,13 @@
 
 namespace {
 
+#ifdef _WIN32
 volatile LONG g_ctrl_count = 0;
+#else
+volatile sig_atomic_t g_ctrl_count = 0;
+#endif
 
-// Обработчик Ctrl+C/Ctrl+Break. Первое нажатие — аккуратная остановка:
-// proc::cancel() останавливает воркеры и завершает текущие кодеры, программа
-// сама завершится с кодом 130. Второе нажатие — принудительный выход.
+#ifdef _WIN32
 BOOL WINAPI ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
         if (InterlockedIncrement(&g_ctrl_count) == 1) {
@@ -32,7 +42,18 @@ BOOL WINAPI ctrl_handler(DWORD type) {
     }
     return FALSE;
 }
+#else
+void sigint_handler(int) {
+    if (g_ctrl_count == 0) {
+        g_ctrl_count = 1;
+        proc::cancel();
+    } else {
+        _exit(130);
+    }
+}
+#endif
 
+#ifdef _WIN32
 std::vector<std::string> wide_argv() {
     int argc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -42,20 +63,26 @@ std::vector<std::string> wide_argv() {
     LocalFree(wargv);
     return out;
 }
+#endif
 
 void usage() {
     out::print("LLAO — Lossless Audio Optimizer\n\n");
     out::print("Commands:\n");
-    out::print("  llao.exe check-formats                       validate the formats/*.json schema\n");
-    out::print("  llao.exe variants [fmt_id ...]               compression variants from formats/*.json\n");
-    out::print("  llao.exe tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n");
-    out::print("  llao.exe help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n");
-    out::print("  llao.exe stats                               show accumulated statistics\n");
-    out::print("  llao.exe optimize <file|folder> [...]        main enumeration\n");
+#ifdef _WIN32
+    const char* prog = "llao.exe";
+#else
+    const char* prog = "llao";
+#endif
+    out::print("  %s check-formats                       validate the formats/*.json schema\n", prog);
+    out::print("  %s variants [fmt_id ...]               compression variants from formats/*.json\n", prog);
+    out::print("  %s tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n", prog);
+    out::print("  %s help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n", prog);
+    out::print("  %s stats                               show accumulated statistics\n", prog);
+    out::print("  %s optimize <file|folder> [...]        main enumeration\n", prog);
     out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
-    out::print("             [--no-status] [--verify=all|winner|none] [--ignore-errors]\n");
-    out::print("  llao.exe restore <file|folder> [...]         decode + re-encode to the target format\n");
+    out::print("             [--no-status] [--verify=all|winner|none] [--ignore-errors] [--tmp=<path>]\n");
+    out::print("  %s restore <file|folder> [...]         decode + re-encode to the target format\n", prog);
     out::print("             [--jobs=N|M.F] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
     out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
@@ -239,6 +266,11 @@ int cmd_optimize(const std::vector<std::string>& args) {
             return 2;
         } else if (!no_more_opts && a == "--ignore-errors") {
             opts.ignore_errors = true;
+        } else if (!no_more_opts && a.rfind("--tmp=", 0) == 0) {
+            opts.tmp_dir = a.substr(6);
+        } else if (!no_more_opts && a == "--tmp") {
+            out::error("ERROR: use --tmp=<path>\n");
+            return 2;
         } else {
             opts.inputs.push_back(a);
         }
@@ -292,15 +324,27 @@ int cmd_restore(const std::vector<std::string>& args) {
 
 }  // namespace
 
-int main() {
+int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     SetConsoleCtrlHandler(ctrl_handler, TRUE);
+#else
+    struct sigaction sa{};
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+#endif
 
     try {
-        auto args = wide_argv();
+        std::vector<std::string> args;
+#ifdef _WIN32
+        args = wide_argv();
+#else
+        for (int i = 0; i < argc; i++) args.push_back(argv[i]);
+#endif
 
-        // Выделяем --lang=<код> / --lang <код> из любого места командной строки.
         std::string lang_flag;
         std::vector<std::string> filtered;
         for (size_t i = 0; i < args.size(); i++) {

@@ -26,6 +26,7 @@ struct Options {
     std::string report_path;           // путь к итоговому отчёту (пусто = не писать)
     Verify verify = Verify::All;       // режим верификации кандидатов
     bool ignore_errors = false;        // ошибки файлов помечать skip, прогон не прерывать
+    std::string tmp_dir;               // --tmp: путь к временной папке (пусто = exe_dir/tmp)
 };
 
 struct Candidate {

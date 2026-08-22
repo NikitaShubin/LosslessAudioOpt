@@ -26,3 +26,8 @@ __pycache__/
 # Артефакты сборки
 *.o
 llao.exe
+llao-linux
+
+# Тестовые артефакты
+scratch_err/
+tests/wine_*

@@ -25,12 +25,17 @@ import zipfile
 import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LLAO = os.path.join(ROOT, "llao.exe")
+LLAO_EXE = os.path.join(ROOT, "llao.exe")
+LLAO_NATIVE = os.path.join(ROOT, "llao-linux")
 WORK = os.path.join(ROOT, "scratch_test")
 FIX = os.path.join(WORK, "_fixtures")
 
 KEEP = "--keep" in sys.argv
 FORCE_BUILD = "--build" in sys.argv
+
+# Определяем: нативный Linux-бинарник или Windows (wine).
+NATIVE_LINUX = os.path.isfile(LLAO_NATIVE) and not os.path.isfile(LLAO_EXE)
+LLAO = LLAO_NATIVE if NATIVE_LINUX else LLAO_EXE
 
 # ---------------------------------------------------------------------------
 # Хелперы
@@ -92,7 +97,10 @@ def cp(src, dst):
 
 
 def run_tool(args, timeout=1200):
-    cmd = ["wine", LLAO] + args
+    if NATIVE_LINUX:
+        cmd = [LLAO] + args
+    else:
+        cmd = ["wine", LLAO] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
@@ -1126,6 +1134,14 @@ SCENARIOS = [
 
 def build():
     if os.path.exists(LLAO) and not FORCE_BUILD:
+        return
+    if NATIVE_LINUX:
+        print("Сборка llao (Linux)...")
+        r = subprocess.run(["make", "-s", "TARGET=linux"], capture_output=True,
+                           text=True, cwd=ROOT, timeout=1800)
+        if r.returncode != 0:
+            print(r.stdout, r.stderr)
+            sys.exit("ОШИБКА: сборка не удалась")
         return
     tc = None
     for p in sorted(glob.glob(os.path.expanduser("~") + "/opt/llvm-mingw*/bin"))[::-1]:
