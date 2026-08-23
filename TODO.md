@@ -23,6 +23,18 @@
 - **Очистка JSON-артефактов ffprobe**: `strip_ffprobe_json()` в `media.cpp`
   удаляет `{`, `}` и пустые строки из вывода ffprobe перед включением в
   `probe.error` — предотвращает утечку `{ \n\n }` в сообщения об ошибках.
+- **Единый механизм `files` для кэша кодеков**: во все archive-загрузки
+  (flac, wavpack, optimfrog, tak, alac, tta, mpeg4_als) добавлено поле
+  `files` — список файлов, копируемых в `bin/<id>/` при скачивании.
+  `tool.cpp`: archive-ветка при `files` копирует только перечисленные файлы
+  (аналогично extract7z), без `files` — обратная совместимость (sibling copy).
+  Удалён 32-битный `MACDll.dll` из monkeys_audio.json.
+- **Скрипт упаковки релиза парсит JSON**: `release.yml` вместо ручных
+  исключений (ffplay.exe) парсит `files` из `formats/*.json` и копирует в
+  релиз только нужные файлы + `.binary` маркеры. GUI (Tak.exe, off.exe),
+  инсталляторы (La04b.exe, x64.exe), документация и неиспользуемые CLI
+  (ofs.exe, ofr_sfx.exe, metaflac.exe, wvgain.exe, wvtag.exe) автоматически
+  исключаются. Экономия: ~8 MB в релизе, ~610 MB в локальном `bin/`.
 
 ### v1.9.0
 
