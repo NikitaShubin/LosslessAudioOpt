@@ -58,6 +58,20 @@ std::string find_ffmpeg() {
 #endif
 }
 
+// Удаляет JSON-скелет ffprobe из вывода при ошибке: строки "{", "}" и пустые.
+// При -print_format json ffprobe печатает {\r\n\r\n}\r\n на stdout даже при
+// ошибке; stdout и stderr сливаются в один pipe, и скобки попадают в error.
+static std::string strip_ffprobe_json(const std::string& s) {
+    std::string out;
+    for (const auto& line : util::split(s, '\n')) {
+        std::string trimmed = util::trim(line);
+        if (trimmed == "{" || trimmed == "}" || trimmed.empty()) continue;
+        if (!out.empty()) out += '\n';
+        out += line;
+    }
+    return out;
+}
+
 Probe probe_file(const std::string& path, const std::string& ffprobe) {
     Probe p;
     std::string bin = ffprobe.empty() ? find_ffprobe() : ffprobe;
@@ -77,8 +91,9 @@ Probe probe_file(const std::string& path, const std::string& ffprobe) {
         return p;
     }
     if (r.exit_code != 0) {
+        std::string cleaned = strip_ffprobe_json(r.output);
         p.error = i18n::fmt("ffprobe: code %d", r.exit_code) +
-                  (util::trim(r.output).empty() ? "" : ": " + util::trim(r.output));
+                  (cleaned.empty() ? "" : ": " + util::trim(cleaned));
         return p;
     }
     try {

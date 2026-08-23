@@ -424,6 +424,31 @@ bool copy_file(const std::string& src, const std::string& dst) {
 }
 #endif
 
+bool create_readonly_symlink(const std::string& target, const std::string& link_path) {
+#ifdef _WIN32
+    std::wstring wtarget = u2w(target);
+    std::wstring wlink   = u2w(link_path);
+    // SYMBOLIC_LINK_ALLOW_UNPRIVILEGED_CREATE (0x2) — Windows 10 1703+ без admin.
+    BOOL ok = CreateSymbolicLinkW(wlink.c_str(), wtarget.c_str(), 0x2);
+    if (!ok) ok = CreateSymbolicLinkW(wlink.c_str(), wtarget.c_str(), 0);
+    if (!ok) return false;
+    SetFileAttributesW(wlink.c_str(),
+                       FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+    if (::symlink(target.c_str(), link_path.c_str()) != 0) return false;
+    ::chmod(link_path.c_str(), 0444);
+#endif
+    return true;
+}
+
+bool create_hardlink(const std::string& target, const std::string& link_path) {
+#ifdef _WIN32
+    return CreateHardLinkW(u2w(link_path).c_str(), u2w(target).c_str(), nullptr);
+#else
+    return ::link(target.c_str(), link_path.c_str()) == 0;
+#endif
+}
+
 std::string read_text(const std::string& p) {
     auto d = read_file(p);
     return std::string(d.begin(), d.end());

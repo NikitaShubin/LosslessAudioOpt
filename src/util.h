@@ -117,4 +117,15 @@ std::string machine_host();  // имя компьютера ("unknown" при с
 // мешать отрисовке/вводу интерфейса под нагрузкой.
 void set_thread_below_normal();
 
+// Создаёт read-only символическую ссылку link_path → target.
+// Win32: CreateSymbolicLinkW + FILE_ATTRIBUTE_READONLY;
+// POSIX: symlink() + chmod(0444).
+// Возвращает true при успехе.
+bool create_readonly_symlink(const std::string& target, const std::string& link_path);
+
+// Создаёт жёсткую ссылку link_path → target.
+// Win32: CreateHardLinkW; POSIX: link().
+// Возвращает true при успехе.
+bool create_hardlink(const std::string& target, const std::string& link_path);
+
 }  // namespace util
