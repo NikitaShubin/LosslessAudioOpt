@@ -245,19 +245,32 @@ std::string prepare_entry(const config::Format& fmt, const config::DownloadEntry
     std::string binary = archive::find_binary(src_root, entry.file_glob);
     if (binary.empty()) {
         throw config::Error("[" + fmt_id + "] " + i18n::fmt("no binary matching '%s' found in the archive",
-                                                          entry.file_glob.c_str()));
+                                                           entry.file_glob.c_str()));
     }
     std::string dest = util::join_path(cache, util::base_name(binary));
     util::copy_file(binary, dest);
-    // Копируем соседние файлы бинарника (DLL и пр.) — без них exe может не запуститься.
-    std::error_code ec;
-    std::string parent = util::dir_name(binary);
-    for (const auto& e : std::filesystem::directory_iterator(std::filesystem::u8path(parent), ec)) {
-        if (ec) break;
-        if (!e.is_regular_file()) continue;
-        std::string fname = e.path().filename().u8string();
-        if (util::to_lower(fname) == util::to_lower(util::base_name(binary))) continue;
-        util::copy_file(e.path().u8string(), util::join_path(cache, fname));
+    // Копируем файлы из files (если заданы) или соседей (DLL и пр.).
+    if (!entry.files.empty()) {
+        // Точечное копирование: только файлы из списка files.
+        std::string parent = util::dir_name(binary);
+        for (const auto& name : entry.files) {
+            if (util::to_lower(name) == util::to_lower(util::base_name(binary))) continue;
+            std::string found = find_recursive(parent, name);
+            if (!found.empty()) {
+                util::copy_file(found, util::join_path(cache, name));
+            }
+        }
+    } else {
+        // Обратная совместимость: копируем всех соседей (DLL и пр.).
+        std::error_code ec;
+        std::string parent = util::dir_name(binary);
+        for (const auto& e : std::filesystem::directory_iterator(std::filesystem::u8path(parent), ec)) {
+            if (ec) break;
+            if (!e.is_regular_file()) continue;
+            std::string fname = e.path().filename().u8string();
+            if (util::to_lower(fname) == util::to_lower(util::base_name(binary))) continue;
+            util::copy_file(e.path().u8string(), util::join_path(cache, fname));
+        }
     }
     return dest;
 }

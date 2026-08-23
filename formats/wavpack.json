@@ -15,6 +15,7 @@
       "kind": "archive",
       "url": "https://github.com/dbry/WavPack/releases/download/5.9.0/wavpack-5.9.0-x64.zip",
       "file_glob": "**/wavpack.exe",
+      "files": ["wavpack.exe", "wvunpack.exe"],
       "checksum": { "type": "sha256", "value": "ad5e94bcde6f4edfc859210d98f144f225805a391c633c68f6dbb15a9e52570e" }
     }
   ],

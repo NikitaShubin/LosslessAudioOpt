@@ -17,6 +17,7 @@
       "kind": "archive",
       "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
       "file_glob": "**/ffmpeg.exe",
+      "files": ["ffmpeg.exe", "ffprobe.exe"],
       "checksum": { "type": "sha256", "value": "" },
       "notes": "Свежие сборки BtbN (win64-gpl). ffmpeg.exe скачивается один раз в bin/ffmpeg/ и используется всеми ffmpeg-форматами. 'latest' — плавающий тег, поэтому SHA-256 не фиксируется."
     }

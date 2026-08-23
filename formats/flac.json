@@ -15,6 +15,7 @@
       "kind": "archive",
       "url": "https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip",
       "file_glob": "**/flac.exe",
+      "files": ["flac.exe", "libFLAC.dll"],
       "checksum": { "type": "sha256", "value": "53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde" }
     }
   ],

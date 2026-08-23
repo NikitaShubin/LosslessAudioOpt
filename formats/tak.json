@@ -14,8 +14,9 @@
    "os": "windows",
    "kind": "archive",
    "url": "http://www.thbeck.de/Download/TAK_2.3.3.zip",
-   "file_glob": "**/takc.exe",
-   "checksum": {
+    "file_glob": "**/takc.exe",
+    "files": ["takc.exe"],
+    "checksum": {
     "type": "sha256",
     "value": "40d26992266f1377d576b88b84b88d2ab256dc321e47f90314402a80692aba6a"
    },
