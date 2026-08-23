@@ -3,6 +3,7 @@
 #endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <string>
 #include <vector>
@@ -29,6 +30,16 @@ volatile LONG g_ctrl_count = 0;
 #else
 volatile sig_atomic_t g_ctrl_count = 0;
 #endif
+
+std::string g_atexit_tmp_dir;
+
+void atexit_cleanup() {
+    if (!g_atexit_tmp_dir.empty()) {
+        optimize::clear_session_tmp_dir(g_atexit_tmp_dir);
+    } else {
+        optimize::clear_session_tmp_dir(std::string());
+    }
+}
 
 #ifdef _WIN32
 BOOL WINAPI ctrl_handler(DWORD type) {
@@ -280,6 +291,7 @@ int cmd_optimize(const std::vector<std::string>& args) {
                    "[--report=<file|folder>] [--no-download] [--dry-run]\n");
         return 2;
     }
+    g_atexit_tmp_dir = opts.tmp_dir;
     return optimize::run(opts);
 }
 
@@ -293,6 +305,8 @@ int cmd_restore(const std::vector<std::string>& args) {
             opts.no_download = true;
         } else if (!no_more_opts && a == "--allow-lossy") {
             opts.allow_lossy = true;
+        } else if (!no_more_opts && a == "--no-status") {
+            opts.no_status = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
             std::string jv = a.substr(7);
             opts.jobs = std::stod(jv);
@@ -316,9 +330,10 @@ int cmd_restore(const std::vector<std::string>& args) {
     }
     if (opts.inputs.empty()) {
         out::error("ERROR: restore <file|folder> [...] [--jobs=N|M.F] [--to=flac] [--variant=<id>] "
-                   "[--no-download]\n");
+                   "[--no-download] [--no-status]\n");
         return 2;
     }
+    g_atexit_tmp_dir.clear();
     return optimize::restore_run(opts);
 }
 
@@ -367,6 +382,8 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         }
         std::string cmd = args[1];
         std::vector<std::string> rest(args.begin() + 2, args.end());
+
+        atexit(atexit_cleanup);
 
         if (cmd == "check-formats") return cmd_check_formats();
         if (cmd == "variants") return optimize::list_variants(rest);

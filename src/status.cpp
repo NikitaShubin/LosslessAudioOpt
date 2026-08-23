@@ -43,9 +43,9 @@ constexpr uint8_t kPreppingBg = 130;   // тёмно-оранжевый — фа
 constexpr uint8_t kNotStartedBg = 0;   // чёрный — файл ещё не начат
 constexpr uint8_t kTextFg = 15;        // ярко-белый текст на полосе
 constexpr uint8_t kFooterFg = 252;    // приглушённый белый текст футера
-constexpr uint8_t kFooterBg = 235;    // тёмно-серый фон футера (≠ чёрный контента)
-constexpr uint8_t kScrollTrackFg = 238; // полоса скроллбара — трек
-constexpr uint8_t kScrollThumbFg = 245; // полоса скроллбара — бегунок
+constexpr uint8_t kFooterBg = 23;     // тёмный teal/cyan фон футера и скроллбара
+constexpr uint8_t kScrollTrackFg = 23; // трек скроллбара = фон футера (полупрозрачный)
+constexpr uint8_t kScrollThumbFg = 87; // яркий cyan — бегунок скроллбара
 
 // Состояние сегмента полосы (одного варианта).
 enum class Seg { Pending, Running, Ok, Failed };

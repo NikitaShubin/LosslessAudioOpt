@@ -32,13 +32,6 @@ namespace json = nlohmann;
 
 namespace {
 
-std::mutex g_print_mutex;
-
-void print_locked(const std::string& s) {
-    std::lock_guard<std::mutex> lk(g_print_mutex);
-    out::text(stdout, s);
-}
-
 // Число потоков из опций: целое jobs — как есть, вещественное — множитель числа
 // ядер; 0/отрицательное — авто (2× ядра). Не меньше 1.
 int resolve_jobs(double jobs, bool jobs_float) {
@@ -120,24 +113,6 @@ std::string tmp_token(const std::string& path) {
     return buf;
 }
 
-// ASCII-only имя для tmp-каталога: ANSI-кодеры (la.exe и др.) не могут открыть
-// пути с символами вне системной кодовой страницы (напр. японские имена
-// превращаются в '?' -> "File not found"), поэтому во временных именах оставляем
-// только безопасное подмножество ASCII, остальное (пробелы, спецсимволы) -> '_'.
-std::string ascii_tmp_name(const std::string& s) {
-    std::string r;
-    for (unsigned char c : s) {
-        bool ok = c >= 0x21 && c <= 0x7e;
-        switch (c) {
-            case '\\': case '/': case ':': case '*': case '?':
-            case '"': case '<': case '>': case '|': ok = false; break;
-            default: break;
-        }
-        r.push_back(ok ? (char)c : '_');
-    }
-    return r;
-}
-
 // Каталог временных файлов текущего процесса: base/<pid>. Отдельная
 // подпапка на процесс исключает конфликты имён между параллельными прогонами
 // llao (tok — хэш пути — у них одинаковый) и упрощает очистку: после прогона
@@ -154,10 +129,82 @@ std::string session_tmp_dir(const std::string& custom) {
 
 // Удаляет подпапку временных файлов текущего процесса целиком (рекурсивно).
 // Вызывается при старте (остатки после обрыва) и после завершения прогона.
-void clear_session_tmp_dir(const std::string& custom) {
+void clear_session_tmp_dir_impl(const std::string& custom) {
     std::error_code ec;
     fs::remove_all(fs::u8path(session_tmp_dir(custom)), ec);
 }
+
+// ---------------------------------------------------------------------------
+// FileSession: RAII-обёртка для tmp-файлов одного исходного файла.
+// Создаёт tmp-поддиректорию по токену пути; деструктор ГАРАНТИРУЕТ очистку
+// через remove_all — неважно, кто и когда создал файлы внутри.
+// ---------------------------------------------------------------------------
+
+class FileSession {
+public:
+    FileSession(const std::string& original_path, const std::string& tmp_base)
+        : path_(original_path) {
+        std::string tok = tmp_token(path_);
+        dir_ = util::join_path(tmp_base, tok);
+        util::mkdirs(dir_);
+    }
+
+    ~FileSession() { cleanup(); }
+
+    FileSession(const FileSession&) = delete;
+    FileSession& operator=(const FileSession&) = delete;
+
+    FileSession(FileSession&& o) noexcept
+        : dir_(std::move(o.dir_)), path_(std::move(o.path_)) {
+        o.dir_.clear();
+    }
+
+    FileSession& operator=(FileSession&& o) noexcept {
+        if (this != &o) {
+            cleanup();
+            dir_ = std::move(o.dir_);
+            path_ = std::move(o.path_);
+            o.dir_.clear();
+        }
+        return *this;
+    }
+
+    const std::string& dir() const { return dir_; }
+    const std::string& original_path() const { return path_; }
+
+    // Путь к референсному WAV (decode исходника).
+    std::string ref_wav_path() const {
+        return util::join_path(dir_, "ref.wav");
+    }
+
+    // Путь к кандидату: <dir>/<fmt>.<variant>.<ext>
+    std::string candidate_path(const std::string& fmt_id,
+                               const std::string& variant_id,
+                               const std::string& ext) const {
+        return util::join_path(dir_, fmt_id + "." + variant_id + "." + ext);
+    }
+
+    // Путь к sidecar: <dir>/<fmt>.tags.zip
+    std::string sidecar_path(const std::string& fmt_id) const {
+        return util::join_path(dir_, fmt_id + ".tags.zip");
+    }
+
+    // Явное удаление tmp-директории (до деструктора, для раннего освобождения
+    // места). После вызова dir_ пуста — деструктор ничего не удалит.
+    void cleanup() {
+        if (!dir_.empty()) {
+            std::error_code ec;
+            fs::remove_all(fs::u8path(dir_), ec);
+            dir_.clear();
+        }
+    }
+
+    bool ok() const { return !dir_.empty(); }
+
+private:
+    std::string dir_;   // tmp/<pid>/<tok>/
+    std::string path_;  // оригинальный путь к файлу
+};
 
 struct DiskBudget {
     std::mutex m;
@@ -302,16 +349,39 @@ static const char* pcm_codec(int bits) {
     return "pcm_s16le";
 }
 
+// ---------------------------------------------------------------------------
+// Алиас исходного файла для ANSI-декодеров (la.exe, ofr.exe и т.п.)
+// ---------------------------------------------------------------------------
+
+enum class DecodeStatus { Ok, NeedsCopy, Failed };
+
 // Декод исходника собственным декодером формата (без скачивания: только кэш/PATH).
-// Возвращает true, если out_wav создан; иначе false и out_wav удалён.
-// Для наших форматов родной декодер надёжнее ffmpeg (есть известное расхождение
-// ffmpeg и wvunpack для wavpack 5.9), а некоторые форматы (OptimFROG высоких
-// пресетов) ffmpeg вообще не разбирает — родной декод используется и как фолбэк probe.
-static bool decode_source_native(const config::Format* src_fmt, const std::string& path,
-                                 const std::string& out_wav, int bits) {
-    if (!src_fmt) return false;
+// Перед вызовом декодера создаёт алиас (symlink → hardlink → оригинал) в каталоге
+// out_wav, чтобы ANSI-API декодеров не ломались на не-ASCII путях.
+// Алиас удаляется сразу после завершения декодера.
+// Возвращает:
+//   Ok        — out_wav создан
+//   Failed    — декод упал (алиас создавался; проблема не в имени)
+//   NeedsCopy — декод упал + алиас не создался (нужна полная копия файла)
+static DecodeStatus decode_source_native(const config::Format* src_fmt, const std::string& path,
+                                         const std::string& out_wav, int bits) {
+    if (!src_fmt) return DecodeStatus::Failed;
     tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
-    if (sst.path.empty()) return false;
+    if (sst.path.empty()) return DecodeStatus::Failed;
+
+    // Создаём алиас: symlink → hardlink → оригинал.
+    std::string alias_path = util::join_path(util::dir_name(out_wav),
+                                             "src_link." + lower_ext(path));
+    std::string input_path = path;
+    bool alias_created = false;
+    if (util::create_readonly_symlink(path, alias_path)) {
+        input_path = alias_path;
+        alias_created = true;
+    } else if (util::create_hardlink(path, alias_path)) {
+        input_path = alias_path;
+        alias_created = true;
+    }
+
     Env senv;
     senv.fmt = src_fmt;
     senv.encoder = sst.path;
@@ -319,16 +389,21 @@ static bool decode_source_native(const config::Format* src_fmt, const std::strin
     senv.bits = bits;
     std::vector<std::string> sargs;
     if (src_fmt->engine_kind == "ffmpeg") {
-        sargs = {senv.decoder, "-y", "-loglevel", "error", "-i", path,
+        sargs = {senv.decoder, "-y", "-loglevel", "error", "-i", input_path,
                  "-c:a", pcm_codec(bits), out_wav};
     } else {
-        sargs = build_cmd(src_fmt->decode_cmd, senv.decoder, path, out_wav, {},
+        sargs = build_cmd(src_fmt->decode_cmd, senv.decoder, input_path, out_wav, {},
                           src_fmt->engine_codec, src_fmt->engine_container);
     }
     proc::Result dr = proc::run(sargs, senv.decode_timeout);
     bool ok = dr.started && !dr.timed_out && dr.exit_code == 0 && util::file_exists(out_wav);
     if (!ok) util::remove_file(out_wav);
-    return ok;
+
+    // Удаляем алиас сразу — он больше не нужен (WAV уже создан или декод провалился).
+    if (alias_created) util::remove_file(alias_path);
+
+    if (ok) return DecodeStatus::Ok;
+    return alias_created ? DecodeStatus::Failed : DecodeStatus::NeedsCopy;
 }
 
 // Кодирование кандидата (без валидации). Возвращает пустую строку при успехе,
@@ -454,6 +529,9 @@ struct FileJob {
     std::string dir;
     std::string tok;
 
+    // --- RAII-сессия tmp-файлов (создаётся в prep_file) ---
+    std::unique_ptr<FileSession> session;
+
     // --- планировщик (под g_qm) ---
     std::vector<TaskDesc> tasks;
     size_t released = 0;
@@ -463,7 +541,6 @@ struct FileJob {
 
     // --- подготовка (один поток prep, до выпуска задач) ---
     bool prep_ok = false;
-    std::string ref_wav;
     uint64_t ref_size = 0;   // размер эталонного WAV (оценка размера dec.wav задачи)
     uint64_t wav_est = 0;    // оценка размера WAV по probe (для бюджета)
     uint64_t peak_file = 0;  // файловый бюджет (file_peak_bytes)
@@ -489,6 +566,92 @@ struct FileJob {
     report::FileSummary summary;
 };
 
+// ---------------------------------------------------------------------------
+// ResourceManager: брокер ресурсов (дисковое пространство, планирование).
+// Принимает заявки от FileSession, удовлетворяет/ставит на паузу.
+// Правила выделения могут меняться без правки FileSession.
+// ---------------------------------------------------------------------------
+
+struct ResourceRequest {
+    uint64_t disk_bytes = 0;
+    enum class Status { Granted, Deferred, Denied };
+    Status status = Status::Deferred;
+};
+
+class ResourceManager {
+public:
+    ResourceManager() = default;
+
+    ResourceManager(const std::string& tmp_path, int max_workers, uint64_t min_free = 1ull << 30)
+        : tmp_path_(tmp_path), max_workers_(max_workers) {
+        disk_.min_free = min_free;
+    }
+
+    // --- Дисковые ресурсы ---
+    ResourceRequest request_disk(uint64_t bytes) {
+        ResourceRequest req;
+        req.disk_bytes = bytes;
+        req.status = disk_.try_reserve(tmp_path_, bytes)
+                         ? ResourceRequest::Status::Granted
+                         : ResourceRequest::Status::Deferred;
+        return req;
+    }
+
+    void release_disk(uint64_t bytes) { disk_.release(bytes); }
+
+    // --- Планирование (определения — ниже) ---
+    bool can_start_new_file(size_t next_prep, int prep_active,
+                            const std::vector<FileJob>& jobs, bool aborted) const;
+    bool can_start_new_variant(const FileJob& j, int window, bool aborted) const;
+
+    void on_prep_started() { active_preps_++; }
+    void on_prep_completed() { if (active_preps_ > 0) active_preps_--; }
+
+    const std::string& tmp_path() const { return tmp_path_; }
+    int max_workers() const { return max_workers_; }
+
+    void set_max_workers(int w) { max_workers_ = w; }
+    void set_tmp_path(const std::string& p) { tmp_path_ = p; }
+
+private:
+    DiskBudget disk_;
+    std::string tmp_path_;
+    int max_workers_ = 1;
+    int active_preps_ = 0;
+};
+
+// --- Определения методов ResourceManager ---
+
+bool ResourceManager::can_start_new_file(size_t next_prep, int prep_active_r,
+                                         const std::vector<FileJob>& jobs,
+                                         bool aborted) const {
+    if (aborted) return false;
+    if (proc::cancelled()) return false;
+    if (next_prep >= jobs.size()) return false;
+    if (prep_active_r >= max_workers_) return false;
+    bool has_idle = false;
+    for (const auto& j : jobs) {
+        if (j.done || !j.prep_done) continue;
+        if (j.released == 0) { has_idle = true; break; }
+    }
+    if (has_idle) {
+        for (const auto& j : jobs) {
+            if (j.done || !j.prep_done) continue;
+            if (j.released < j.tasks.size()) return false;
+        }
+    }
+    return true;
+}
+
+bool ResourceManager::can_start_new_variant(const FileJob& j, int window,
+                                            bool aborted) const {
+    if (aborted) return false;
+    if (j.done || !j.prep_done) return false;
+    if (j.released >= j.tasks.size()) return false;
+    if (j.released - j.completed >= (size_t)window) return false;
+    return true;
+}
+
 struct Runner {
     const Options* opts = nullptr;
     const std::vector<config::Format>* fmts = nullptr;
@@ -499,7 +662,7 @@ struct Runner {
     int window = 1;
     size_t n_files = 0;
 
-    DiskBudget disk;  // централизованный бюджет диска
+    ResourceManager rm;  // брокер ресурсов: диск + планирование
 
     // --- кэш ресурсов для адаптивного окна (обновляется не чаще 10 с) ---
     std::chrono::steady_clock::time_point res_last{};
@@ -542,11 +705,8 @@ struct Runner {
     bool variant_launchable_locked() {
         if (abort.load()) return false;
         for (size_t i = 0; i < n_files; i++) {
-            const FileJob& j = jobs[i];
-            if (j.done || !j.prep_done) continue;
-            if (j.released >= j.tasks.size()) continue;
-            if (j.released - j.completed >= (size_t)window) continue;
-            return true;
+            if (rm.can_start_new_variant(jobs[i], window, false))
+                return true;
         }
         return false;
     }
@@ -554,22 +714,7 @@ struct Runner {
     // Prep разрешён, если есть хотя бы 1 распакованный файл без задач
     // («запасной») — либо все распакованные уже выпустили задачи.
     bool prep_allowed_locked() const {
-        if (abort.load()) return false;
-        if (proc::cancelled()) return false;
-        if (next_prep >= n_files) return false;
-        if (prep_active >= window) return false;
-        bool has_idle = false;
-        for (const auto& j : jobs) {
-            if (j.done || !j.prep_done) continue;
-            if (j.released == 0) { has_idle = true; break; }
-        }
-        if (has_idle) {
-            for (const auto& j : jobs) {
-                if (j.done || !j.prep_done) continue;
-                if (j.released < j.tasks.size()) return false;
-            }
-        }
-        return true;
+        return rm.can_start_new_file(next_prep, prep_active, jobs, abort.load());
     }
 
     enum class WorkKind { None, Prep, Variant };
@@ -587,13 +732,11 @@ struct Runner {
         if (abort.load()) return false;
         for (size_t i = 0; i < n_files; i++) {
             FileJob& j = jobs[i];
-            if (j.done || !j.prep_done) continue;
-            if (j.released >= j.tasks.size()) continue;
+            if (!rm.can_start_new_variant(j, window, false)) continue;
             size_t jf = j.released - j.completed;
-            if (jf >= (size_t)window) continue;
             if (jf > 0 && j.ref_size > 0) {
                 uint64_t vpeak = variant_peak_bytes(j.ref_size, opts->verify);
-                if (!disk.try_reserve(tmp, vpeak)) continue;
+                if (rm.request_disk(vpeak).status != ResourceRequest::Status::Granted) continue;
             }
             *w = {WorkKind::Variant, i, j.released};
             jobs[i].released++;
@@ -605,8 +748,9 @@ struct Runner {
                 if (j.done || j.prep_done || !j.deferred) continue;
                 if (j.probe.ok && j.wav_est > 0) {
                     j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
-                    if (disk.try_reserve(tmp, j.peak_file)) {
+                    if (rm.request_disk(j.peak_file).status == ResourceRequest::Status::Granted) {
                         j.deferred = false;
+                        rm.on_prep_started();
                         prep_active++;
                         *w = {WorkKind::Prep, i, 0};
                         return true;
@@ -615,6 +759,7 @@ struct Runner {
             }
             if (next_prep < n_files) {
                 size_t i = next_prep++;
+                rm.on_prep_started();
                 prep_active++;
                 *w = {WorkKind::Prep, i, 0};
                 return true;
@@ -631,7 +776,7 @@ struct Runner {
         // Если это повторный вызов (deferred retry), budgets уже зарезервирован
         // в take_work_locked. При любом раннем выходе — освобождаем.
         auto release_deferred_budget = [&]() {
-            if (j.peak_file > 0) { disk.release(j.peak_file); j.peak_file = 0; }
+            if (j.peak_file > 0) { rm.release_disk(j.peak_file); j.peak_file = 0; }
         };
 
         if (proc::cancelled() || proc::aborted()) { release_deferred_budget(); return; }
@@ -644,32 +789,41 @@ struct Runner {
             return;
         }
 
-        j.ref_wav = util::join_path(tmp, j.tok + "_" + ascii_tmp_name(j.base_ne) + ".ref.wav");
+        // RAII-сессия: tmp-поддиректория для всех временных файлов этого исходника.
+        j.session = std::make_unique<FileSession>(j.path, tmp);
+        std::string ref_wav = j.session->ref_wav_path();
         bool src_decoded = false;
 
         media::Probe probe = media::probe_file(j.path, ffprobe);
-        if (proc::aborted()) { release_deferred_budget(); return; }  // прервано ошибкой другого файла
+        if (proc::aborted()) { release_deferred_budget(); return; }
         if (!probe.ok) {
-            // ffprobe не смог прочитать файл (напр. OptimFROG высоких пресетов ffmpeg
-            // не разбирает). Пробуем родной декодер формата по расширению: расжимаем в
-            // WAV и пробируем уже WAV — его ffprobe читает всегда.
             const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
-            if (src_fmt && decode_source_native(src_fmt, j.path, j.ref_wav, 16)) {
-                probe = media::probe_file(j.ref_wav, ffprobe);
-                if (proc::aborted()) {
-                    release_deferred_budget();
-                    util::remove_file(j.ref_wav);
-                    return;
+            if (src_fmt && src_fmt->id != probe.format_name) {
+                DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, 16);
+                if (ds == DecodeStatus::NeedsCopy) {
+                    std::string copy = util::join_path(j.session->dir(), "src_copy." + lower_ext(j.path));
+                    if (util::copy_file(j.path, copy)) {
+                        ds = decode_source_native(src_fmt, copy, ref_wav, 16);
+                        util::remove_file(copy);
+                    }
                 }
-                if (probe.ok) {
-                    probe.format_name = src_fmt->id;
-                    probe.size = util::file_size(j.path);
-                    src_decoded = true;
+                if (ds == DecodeStatus::Ok) {
+                    probe = media::probe_file(ref_wav, ffprobe);
+                    if (proc::aborted()) {
+                        release_deferred_budget();
+                        j.session->cleanup();
+                        return;
+                    }
+                    if (probe.ok) {
+                        probe.format_name = src_fmt->id;
+                        probe.size = util::file_size(j.path);
+                        src_decoded = true;
+                    }
                 }
             }
             if (!probe.ok) {
-                util::remove_file(j.ref_wav);
-                if (proc::aborted()) { release_deferred_budget(); return; }  // прервано ошибкой другого файла
+                j.session->cleanup();
+                if (proc::aborted()) { release_deferred_budget(); return; }
                 j.summary.path = j.path;
                 j.summary.status = "error";
                 j.summary.detail = probe.error;
@@ -729,7 +883,7 @@ struct Runner {
         j.wav_est = estimated_wav_bytes(probe, bits);
         if (j.peak_file == 0) {
             j.peak_file = file_peak_bytes(j.wav_est, opts.verify);
-            if (!disk.try_reserve(tmp, j.peak_file)) {
+            if (rm.request_disk(j.peak_file).status != ResourceRequest::Status::Granted) {
                 j.deferred = true;
                 return;
             }
@@ -741,17 +895,28 @@ struct Runner {
         bool decoded = src_decoded;
         if (!decoded) {
             const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
-            if (src_fmt) decoded = decode_source_native(src_fmt, j.path, j.ref_wav, bits);
+            if (src_fmt) {
+                DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, bits);
+                if (ds == DecodeStatus::NeedsCopy) {
+                    std::string copy = util::join_path(j.session->dir(),
+                                                       "src_copy." + lower_ext(j.path));
+                    if (util::copy_file(j.path, copy)) {
+                        ds = decode_source_native(src_fmt, copy, ref_wav, bits);
+                        util::remove_file(copy);
+                    }
+                }
+                decoded = (ds == DecodeStatus::Ok);
+            }
         }
-        if (!decoded) decoded = media::decode_to_wav(j.path, j.ref_wav, ffmpeg, bits, &derr);
-        if (proc::aborted()) {  // прервано ошибкой другого файла — ошибкой не считаем
+        if (!decoded) decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr);
+        if (proc::aborted()) {
             release_deferred_budget();
-            util::remove_file(j.ref_wav);
+            j.session->cleanup();
             return;
         }
         if (!decoded) {
             release_deferred_budget();
-            util::remove_file(j.ref_wav);
+            j.session->cleanup();
             j.summary.path = j.path;
             j.summary.status = "error";
             j.summary.detail = i18n::str("decode to reference WAV: ") + derr;
@@ -764,7 +929,7 @@ struct Runner {
             status::error("ERROR " + j.path + " — " + j.summary.detail + "\n");
             return;
         }
-        j.ref_size = util::file_size(j.ref_wav);
+        j.ref_size = util::file_size(ref_wav);
 
         // Задачи: формат + вариант. Порядок = детерминированный тай-брейк.
         for (size_t fi = 0; fi < fmts.size(); fi++) {
@@ -831,9 +996,7 @@ struct Runner {
         // не зависящие от планировщика/приоритета окна.
         uint64_t cpu0 = proc::child_cpu_ms() + proc::thread_cpu_ms();
 
-        std::string cand_name = j.tok + "_" + ascii_tmp_name(j.base_ne) + "." + f.id + "." + v.id + "." +
-                                f.extension;
-        std::string candidate = util::join_path(tmp, cand_name);
+        std::string candidate = j.session->candidate_path(f.id, v.id, f.extension);
         util::remove_file(candidate);
 
         json::json rec = {
@@ -885,9 +1048,9 @@ struct Runner {
         // В режиме All каждый кандидат полностью проверяется здесь.
         // Winner/None — только кодирование; победитель валидируется в finalize_file
         // (режим Winner) или не проверяется вовсе (None).
-        std::string verr = encode_candidate(j.ref_wav, candidate, v.args, env, mon);
+        std::string verr = encode_candidate(j.session->ref_wav_path(), candidate, v.args, env, mon);
         if (verr.empty() && opts.verify == Verify::All)
-            verr = validate_candidate(j.ref_wav, candidate, env);
+            verr = validate_candidate(j.session->ref_wav_path(), candidate, env);
         if (proc::cancelled() || proc::aborted()) {
             util::remove_file(candidate);
             return VariantOutcome::Cancelled;
@@ -913,16 +1076,17 @@ struct Runner {
             if (it == j.fmt_plans.end()) {
                 fp.plan = tags::plan_tags(j.ts, native_types(f), f, false);
                 if (!fp.plan.sidecar.empty()) {
-                    std::string sc_base = util::join_path(tmp, j.tok + "_" + ascii_tmp_name(j.base_ne) + "." +
-                                                                f.id);
-                    util::remove_file(sc_base + ".tags.zip");
+                    std::string sc_path = j.session->sidecar_path(f.id);
+                    util::remove_file(sc_path);
                     std::string terr;
+                    // write_sidecar ожидает базу без .tags.zip — передаём dir + fmt_id
+                    std::string sc_base = util::join_path(j.session->dir(), f.id);
                     fp.sidecar_size = tags::write_sidecar(sc_base, fp.plan.sidecar, &terr);
                     if (!terr.empty()) {
-                        util::remove_file(sc_base + ".tags.zip");
+                        util::remove_file(sc_path);
                         fp.sidecar_size = 0;
                     }
-                    fp.sidecar_path = sc_base + ".tags.zip";
+                    fp.sidecar_path = sc_path;
                 }
                 j.fmt_plans[f.id] = fp;
             } else {
@@ -1093,7 +1257,7 @@ struct Runner {
                 auto eit = j.envs.find(best.format);
                 std::string werr =
                     eit == j.envs.end() ? "internal: no Env for " + best.format
-                                        : validate_candidate(j.ref_wav, best.path, eit->second);
+                                        : validate_candidate(j.session->ref_wav_path(), best.path, eit->second);
                 if (!werr.empty()) {
                     winner_fail = i18n::fmt("winner %s/%s failed verification: %s",
                                             best.format.c_str(), best.variant.c_str(),
@@ -1228,11 +1392,11 @@ struct Runner {
         }
 
         // Освобождаем файловый бюджет и чистим временные файлы.
-        disk.release(j.peak_file);
-        util::remove_file(j.ref_wav);
-        for (const auto& [id, fp] : j.fmt_plans)
-            if (fp.sidecar_size > 0) util::remove_file(fp.sidecar_path);
+        rm.release_disk(j.peak_file);
+        // Удаляем побеждшего кандидата из tmp (он уже скопирован на место).
         if (j.best_valid) util::remove_file(j.best.path);
+        // RAII: remove_all почистит ref.wav, dec.wav, sidecar, losers.
+        j.session.reset();
 
         if (!msg.empty()) status::log(msg);
         if (j.summary.status == "error") status::mark_error(j.idx);
@@ -1343,7 +1507,7 @@ struct Runner {
                         // Освобождаем задачевый бюджет для завершённого варианта.
                         // Первый воркер работал в рамках файлового бюджета,
                         // все остальные получили variant_peak — освобождаем.
-                        disk.release(variant_peak_bytes(j.ref_size, opts->verify));
+                        rm.release_disk(variant_peak_bytes(j.ref_size, opts->verify));
                     }
                     cv.notify_all();
                 }
@@ -1354,6 +1518,10 @@ struct Runner {
 };
 
 }  // namespace
+
+void clear_session_tmp_dir(const std::string& custom) {
+    clear_session_tmp_dir_impl(custom);
+}
 
 int run(const Options& opts) {
     std::vector<config::Format> fmts;
@@ -1444,6 +1612,8 @@ int run(const Options& opts) {
     r.ffmpeg = media::find_ffmpeg();
     r.tmp = tmp;
     r.window = jobs;
+    r.rm.set_tmp_path(tmp);
+    r.rm.set_max_workers(jobs);
     r.n_files = files.size();
     r.jobs.resize(files.size());
     for (size_t i = 0; i < files.size(); i++) {
@@ -1528,13 +1698,14 @@ int run(const Options& opts) {
 // Восстановление (restore): декод -> пережатие в целевой формат -> теги обратно
 // ---------------------------------------------------------------------------
 
-static int restore_one(const std::string& path, const config::Format& target,
+static int restore_one(size_t idx, const std::string& path, const config::Format& target,
                        const config::Variant& variant, bool no_download, bool allow_lossy,
                        const std::vector<config::Format>& fmts) {
     std::string ffprobe = media::find_ffprobe();
     std::string ffmpeg = media::find_ffmpeg();
     if (ffprobe.empty() || ffmpeg.empty()) {
-        print_locked(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+        status::error(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+        status::mark_error(idx);
         return 1;
     }
 
@@ -1542,47 +1713,60 @@ static int restore_one(const std::string& path, const config::Format& target,
     std::string base_ne = base_no_ext(path);
     std::string dir = util::dir_name(path);
     std::string tmp = session_tmp_dir(std::string());
-    util::mkdirs(tmp);
-    std::string tok = tmp_token(path);
-    std::string src_wav = util::join_path(tmp, tok + "_" + ascii_tmp_name(base_ne) + ".src.wav");
+
+    // RAII-сессия для tmp-файлов этого restore.
+    FileSession session(path, tmp);
+    std::string src_wav = session.ref_wav_path();
 
     media::Probe probe = media::probe_file(path, ffprobe);
     bool src_decoded = false;
     if (!probe.ok && lower_ext(path) != util::to_lower(target.extension)) {
-        // ffprobe не смог прочитать файл (напр. OptimFROG высоких пресетов ffmpeg
-        // не разбирает). Пробуем родной декодер формата по расширению: расжимаем в
-        // WAV и пробируем уже WAV — его ffprobe читает всегда.
         const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
-        if (src_fmt && src_fmt->id != target.id &&
-            decode_source_native(src_fmt, path, src_wav, 16)) {
-            probe = media::probe_file(src_wav, ffprobe);
-            if (probe.ok) {
-                probe.format_name = src_fmt->id;
-                probe.size = util::file_size(path);
-                src_decoded = true;
+        if (src_fmt && src_fmt->id != target.id) {
+            DecodeStatus ds = decode_source_native(src_fmt, path, src_wav, 16);
+            if (ds == DecodeStatus::NeedsCopy) {
+                std::string copy = util::join_path(session.dir(),
+                                                   "src_copy." + lower_ext(path));
+                if (util::copy_file(path, copy)) {
+                    ds = decode_source_native(src_fmt, copy, src_wav, 16);
+                    util::remove_file(copy);
+                }
+            }
+            if (ds == DecodeStatus::Ok) {
+                probe = media::probe_file(src_wav, ffprobe);
+                if (probe.ok) {
+                    probe.format_name = src_fmt->id;
+                    probe.size = util::file_size(path);
+                    src_decoded = true;
+                }
             }
         }
         if (!probe.ok) {
-            util::remove_file(src_wav);
-            print_locked("ERROR " + path + " — " + probe.error + "\n");
+            session.cleanup();
+            status::error("ERROR " + path + " — " + probe.error + "\n");
+            status::mark_error(idx);
             return 1;
         }
     }
     if (lower_ext(path) == util::to_lower(target.extension)) {
-        print_locked("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
+        status::log("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
+        status::mark_skip(idx);
         return 0;
     }
     if (probe.has_video) {
-        print_locked("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
+        status::log("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
+        status::mark_skip(idx);
         return 0;
     }
     if (!probe.is_lossless() && !allow_lossy) {
-        print_locked("SKIP " + path + " — " +
+        status::log("SKIP " + path + " — " +
                      i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str()) + "\n");
+        status::mark_skip(idx);
         return 0;
     }
 
-    // Теги: источник — встроенные группы + sidecar (объединение групп).
+    status::prep(idx);
+
     tags::TagSet embed_ts = tags::extract_tags(path, probe, target.tag_native_reader);
     tags::TagSet ts;
     std::string serr;
@@ -1594,27 +1778,39 @@ static int restore_one(const std::string& path, const config::Format& target,
     int bits = probe.bits_per_sample;
     if (bits <= 0) bits = 16;
 
-    // Декод исходника собственным декодером формата: для наших форматов это надёжнее
-    // ffmpeg (есть известное расхождение ffmpeg и wvunpack для wavpack 5.9). Иначе — ffmpeg.
     const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
     std::string dec_err;
     bool decoded = src_decoded;
-    if (!decoded && src_fmt && src_fmt->id != target.id)
-        decoded = decode_source_native(src_fmt, path, src_wav, bits);
+    if (!decoded && src_fmt && src_fmt->id != target.id) {
+        DecodeStatus ds = decode_source_native(src_fmt, path, src_wav, bits);
+        if (ds == DecodeStatus::NeedsCopy) {
+            std::string copy = util::join_path(session.dir(),
+                                               "src_copy." + lower_ext(path));
+            if (util::copy_file(path, copy)) {
+                ds = decode_source_native(src_fmt, copy, src_wav, bits);
+                util::remove_file(copy);
+            }
+        }
+        decoded = (ds == DecodeStatus::Ok);
+    }
     if (!decoded) decoded = media::decode_to_wav(path, src_wav, ffmpeg, bits, &dec_err);
     if (!decoded) {
-        util::remove_file(src_wav);
-        print_locked("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
+        session.cleanup();
+        status::error("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
+        status::mark_error(idx);
         return 1;
     }
 
     tool::Status st = tool::ensure(target, !no_download, "[" + target.id + "] ");
     if (st.path.empty()) {
-        util::remove_file(src_wav);
-        print_locked(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
+        session.cleanup();
+        status::error(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
                                 target.id.c_str(), st.status.c_str()));
+        status::mark_error(idx);
         return 1;
     }
+
+    status::set_tasks(idx, 1);
 
     Env env;
     env.fmt = &target;
@@ -1622,27 +1818,31 @@ static int restore_one(const std::string& path, const config::Format& target,
     env.decoder = decoder_path(target, st.path);
     env.bits = bits;
 
-    std::string cand_name = tok + "_" + ascii_tmp_name(base_ne) + ".restore." + target.extension;
-    std::string candidate = util::join_path(tmp, cand_name);
-    util::remove_file(candidate);
+    std::string candidate = session.candidate_path("restore", variant.id, target.extension);
+
+    status::task(idx, 0, status::TaskState::Running);
 
     // Restore всегда выполняет полную проверку кандидата (единственный вариант).
     std::string verr = encode_candidate(src_wav, candidate, variant.args, env);
     if (verr.empty()) verr = validate_candidate(src_wav, candidate, env);
-    util::remove_file(src_wav);
     if (!verr.empty()) {
-        util::remove_file(candidate);
-        print_locked("ERROR " + path + " — " + verr + "\n");
+        status::task(idx, 0, status::TaskState::Failed);
+        status::mark_error(idx);
+        session.cleanup();
+        status::error("ERROR " + path + " — " + verr + "\n");
         return 1;
     }
     uint64_t size = util::file_size(candidate);
     if (size == 0) {
-        util::remove_file(candidate);
-        print_locked("ERROR " + path + " — " + i18n::str("empty file") + "\n");
+        status::task(idx, 0, status::TaskState::Failed);
+        status::mark_error(idx);
+        session.cleanup();
+        status::error("ERROR " + path + " — " + i18n::str("empty file") + "\n");
         return 1;
     }
 
-    // Теги: план встраивания/сайдкара (восстановление: с мержем групп).
+    status::task(idx, 0, status::TaskState::Ok);
+
     tags::TagPlan plan = tags::plan_tags(ts, native_types(target), target, true);
     std::string terr;
     uint64_t sidecar = 0;
@@ -1657,53 +1857,58 @@ static int restore_one(const std::string& path, const config::Format& target,
             has_tags = true;
         }
         if (!plan.sidecar.empty()) {
-            sidecar = tags::write_sidecar(candidate, plan.sidecar, &terr);
+            std::string sc_base = util::join_path(session.dir(), target.id);
+            sidecar = tags::write_sidecar(sc_base, plan.sidecar, &terr);
         }
     }
     if (!terr.empty()) {
-        util::remove_file(candidate);
-        print_locked("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
+        session.cleanup();
+        status::error("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
+        status::mark_error(idx);
         return 1;
     }
     if (has_tags && ts.present) {
         std::string v2 = tags::validate_groups(candidate, target, plan.embed, ffprobe);
         if (!v2.empty()) {
-            util::remove_file(candidate);
-            if (sidecar) util::remove_file(candidate + ".tags.zip");
-            print_locked("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
+            session.cleanup();
+            status::error("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
+            status::mark_error(idx);
             return 1;
         }
     }
 
-    // Новый файл в целевом формате создаётся рядом с исходником; источник удаляется
-    // только после полной записи нового файла. Потеря данных исключена: даже если
-    // удаление не пройдёт, останутся оба файла (replace_file на месте здесь не подходит —
-    // restore меняет имя файла, а не содержимое).
     std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
     if (!util::copy_file(candidate, new_path)) {
-        print_locked(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
+        session.cleanup();
+        status::error(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
+        status::mark_error(idx);
         return 1;
     }
     if (!util::remove_file(path)) {
-        print_locked(i18n::fmt("WARNING %s — the new file is saved as %s, but the old file "
+        status::log(i18n::fmt("WARNING %s — the new file is saved as %s, but the old file "
                                "could not be removed and is left in place\n",
                                path.c_str(), new_path.c_str()));
     }
 
     std::string old_sc = util::join_path(dir, base_ne + ".tags.zip");
     if (sidecar > 0) {
-        if (util::copy_file(candidate + ".tags.zip", old_sc)) {
-            print_locked(i18n::fmt("OK   %s -> %s (%s), tags in sidecar\n", base.c_str(),
+        std::string sc_src = util::join_path(session.dir(), target.id + ".tags.zip");
+        bool sc_ok = util::copy_file(sc_src, old_sc);
+        session.cleanup();
+        if (sc_ok) {
+            status::log(i18n::fmt("OK   %s -> %s (%s), tags in sidecar\n", base.c_str(),
                                     target.id.c_str(), target.extension.c_str()));
         } else {
-            print_locked(i18n::fmt("!    %s -> %s, but the sidecar was not copied\n", base.c_str(),
+            status::log(i18n::fmt("!    %s -> %s, but the sidecar was not copied\n", base.c_str(),
                                     target.id.c_str()));
         }
     } else {
+        session.cleanup();
         util::remove_file(old_sc);
-        print_locked(i18n::fmt("OK   %s -> %s (%s): %d KB, tags embedded\n", base.c_str(),
+        status::log(i18n::fmt("OK   %s -> %s (%s): %d KB, tags embedded\n", base.c_str(),
                                 target.id.c_str(), target.extension.c_str(), (int)(size / 1024)));
     }
+    status::end_file(idx, 0.0);
     return 0;
 }
 
@@ -1751,16 +1956,20 @@ int restore_run(const RestoreOptions& opts) {
         out::error("ERROR: no audio files found\n");
         return 1;
     }
-    std::vector<std::string> files;
-    files.reserve(items.size());
-    for (const auto& it : items) files.push_back(it.path);
 
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
-    if (jobs > (int)files.size()) jobs = (int)files.size();
+    if (jobs > (int)items.size()) jobs = (int)items.size();
 
     clear_session_tmp_dir(std::string());
-    out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
-                variant->id.c_str(), files.size(), jobs);
+
+    status::init(items.size(), opts.no_status);
+    if (status::interactive()) {
+        for (size_t i = 0; i < items.size(); i++)
+            status::begin_file(i, items[i].rel);
+    } else {
+        out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
+                    variant->id.c_str(), items.size(), jobs);
+    }
 
     std::atomic<int> failed{0};
     std::atomic<size_t> next{0};
@@ -1773,15 +1982,16 @@ int restore_run(const RestoreOptions& opts) {
             size_t idx;
             {
                 std::lock_guard<std::mutex> lk(m);
-                if (next >= files.size()) break;
+                if (next >= items.size()) break;
                 idx = next++;
             }
             try {
-                if (restore_one(files[idx], *target, *variant, opts.no_download, opts.allow_lossy,
-                                fmts) != 0)
+                if (restore_one(idx, items[idx].path, *target, *variant, opts.no_download,
+                                opts.allow_lossy, fmts) != 0)
                     failed++;
             } catch (const std::exception& exc) {
-                out::error("ERROR [%s]: %s\n", files[idx].c_str(), exc.what());
+                status::error("ERROR [" + items[idx].path + "]: " + exc.what() + "\n");
+                status::mark_error(idx);
                 failed++;
             }
             {
@@ -1793,9 +2003,11 @@ int restore_run(const RestoreOptions& opts) {
     for (int i = 0; i < jobs; i++) threads.emplace_back(worker);
     for (auto& t : threads) t.join();
 
+    status::shutdown();
     clear_session_tmp_dir(std::string());
 
-    out::print("Done: %zu files restored, errors: %d\n", done, failed.load());
+    if (!status::interactive())
+        out::print("Done: %zu files restored, errors: %d\n", done, failed.load());
     return failed.load() > 0 ? 1 : 0;
 }
 

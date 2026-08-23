@@ -62,6 +62,7 @@ struct RestoreOptions {
     std::string variant;               // пусто = последний вариант (максимальное сжатие)
     bool no_download = false;
     bool allow_lossy = false;          // восстанавливать и lossy-входы
+    bool no_status = false;            // без интерактивного статусбара
 };
 
 // Восстановление: декод оптимизированного файла -> пережатие в целевой формат
@@ -71,5 +72,8 @@ int restore_run(const RestoreOptions& opts);
 // Список вариантов сжатия (комбинации параметров кодера) для каждого формата
 // из formats/*.json; ids пуст = все форматы. Возвращает код выхода.
 int list_variants(const std::vector<std::string>& ids);
+
+// Очистка tmp-директории текущего процесса (вызывается из atexit).
+void clear_session_tmp_dir(const std::string& custom_tmp);
 
 }  // namespace optimize
