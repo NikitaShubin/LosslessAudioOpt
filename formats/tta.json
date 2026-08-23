@@ -17,6 +17,7 @@
       "kind": "archive",
       "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
       "file_glob": "**/ffmpeg.exe",
+      "files": ["ffmpeg.exe", "ffprobe.exe"],
       "checksum": { "type": "sha256", "value": "" },
       "notes": "Встроенный кодер ffmpeg (-c:a tta). ffmpeg.exe из BtbN (win64-gpl), общий для ffmpeg-форматов. Альтернативный кодер ttaenc с режимом -a не используется."
     }

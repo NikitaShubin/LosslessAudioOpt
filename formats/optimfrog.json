@@ -15,6 +15,7 @@
       "kind": "archive",
       "url": "http://losslessaudio.org/Downloads/A1C0/5100/Win/OptimFROG_Win_x64_5100.zip",
       "file_glob": "**/ofr.exe",
+      "files": ["ofr.exe"],
       "checksum": { "type": "sha256", "value": "fde2909a35131f88d470c1248df0d741a4959465f48986a15808ea40096fd698" },
       "notes": "Windows x64, v5.100."
     }

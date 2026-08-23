@@ -96,16 +96,34 @@ jobs:
           cp -r formats lang "$DEST/"
           mkdir -p "$DEST/bin"
           python3 - "$DEST/bin" <<'PY'
-          import os, shutil, sys
+          import json, os, shutil, sys
           dst = sys.argv[1]
-          for fmt in os.listdir('bin'):
-              src = os.path.join('bin', fmt)
-              if not os.path.isdir(src):
-                  continue
+          # Собираем allowed-списки из formats/*.json: bin_id -> set filenames (lowercase).
+          allowed = {}
+          for fname in os.listdir('formats'):
+              if not fname.endswith('.json'): continue
+              with open(os.path.join('formats', fname), encoding='utf-8') as f:
+                  fmt = json.load(f)
+              is_ffmpeg = fmt.get('engine', {}).get('kind') == 'ffmpeg'
+              bin_id = 'ffmpeg' if is_ffmpeg else fmt['id']
+              if bin_id not in allowed: allowed[bin_id] = set()
+              for dl in fmt.get('downloads', []):
+                  for fn in dl.get('files', []):
+                      allowed[bin_id].add(fn.lower())
+          for fmt_dir in os.listdir('bin'):
+              src = os.path.join('bin', fmt_dir)
+              if not os.path.isdir(src): continue
+              fmt_allowed = allowed.get(fmt_dir)
               for root, dirs, files in os.walk(src):
                   dirs[:] = [d for d in dirs if d != '.download']
                   for f in files:
-                      if f.lower() == 'ffplay.exe':
+                      if f == '.binary':
+                          rel = os.path.relpath(os.path.join(root, f), 'bin')
+                          out = os.path.join(dst, rel)
+                          os.makedirs(os.path.dirname(out), exist_ok=True)
+                          shutil.copy2(os.path.join(root, f), out)
+                          continue
+                      if fmt_allowed is not None and f.lower() not in fmt_allowed:
                           continue
                       rel = os.path.relpath(os.path.join(root, f), 'bin')
                       out = os.path.join(dst, rel)

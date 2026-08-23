@@ -15,7 +15,7 @@ struct DownloadEntry {
     std::string file_glob;          // archive: где в архиве бинарник (glob)
     std::string checksum;           // sha256 hex (может быть пусто)
     std::string notes;
-    std::vector<std::string> files; // extract7z: имена файлов, копируемых из установщика в кэш
+    std::vector<std::string> files; // extract7z/archive: имена файлов для копирования в кэш
 };
 
 struct Variant {
