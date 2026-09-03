@@ -30,4 +30,6 @@ llao-linux
 
 # Тестовые артефакты
 scratch_err/
+test-unit
+test-daemon-core
 tests/wine_*
