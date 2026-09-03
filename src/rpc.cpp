@@ -64,7 +64,13 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
         return ok({{"deleted", existed}});
     }
 
-    if (cmd == "cancel-all") {
+    if (cmd == "remove") {
+        uint64_t id = args.is_object() && args.contains("id") ? args["id"].get<uint64_t>() : 0;
+        bool ok_ = d.remove(id);
+        return ok({{"removed", ok_}});
+    }
+
+    if (cmd == "cancel-all" || cmd == "pause") {
         d.set_paused(true);
         return ok({{"paused", true}});
     }
@@ -72,6 +78,20 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
     if (cmd == "resume") {
         d.set_paused(false);
         return ok({{"paused", false}});
+    }
+
+    if (cmd == "reorder") {
+        std::vector<size_t> order;
+        if (args.is_object() && args.contains("order") && args["order"].is_array()) {
+            for (const auto& v : args["order"]) order.push_back(v.get<size_t>());
+        } else if (args.is_object() && args.contains("ids") && args["ids"].is_array()) {
+            for (const auto& v : args["ids"]) order.push_back(v.get<size_t>());
+        } else {
+            return err("bad_args", "missing order array");
+        }
+        bool ok_ = d.reorder(order);
+        if (!ok_) return err("bad_args", "invalid order");
+        return ok({{"reordered", true}});
     }
 
     if (cmd == "shutdown") {

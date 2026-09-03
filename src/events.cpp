@@ -1,4 +1,5 @@
 #include "events.h"
+#include <algorithm>
 
 namespace dsvc {
 
@@ -34,7 +35,12 @@ uint64_t EventBuffer::last_seq() const {
 
 void StateMirror::upsert(const Row& r) {
     std::lock_guard<std::mutex> lk(m_);
+    bool is_new = rows_.find(r.id) == rows_.end();
     rows_[r.id] = r;
+    if (is_new) {
+        if (std::find(order_.begin(), order_.end(), r.id) == order_.end())
+            order_.push_back(r.id);
+    }
 }
 
 void StateMirror::set_label(size_t id, const std::string& label) {
@@ -64,11 +70,32 @@ void StateMirror::set_pct(size_t id, double pct) {
     rows_[id].pct = pct;
 }
 
+void StateMirror::remove(size_t id) {
+    std::lock_guard<std::mutex> lk(m_);
+    rows_.erase(id);
+    order_.erase(std::remove(order_.begin(), order_.end(), id), order_.end());
+}
+
+void StateMirror::reorder(const std::vector<size_t>& order) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (order.size() != rows_.size()) return;
+    // Проверка что все ids присутствуют
+    for (size_t id : order) if (rows_.find(id) == rows_.end()) return;
+    order_ = order;
+}
+
 std::vector<Row> StateMirror::snapshot() const {
     std::lock_guard<std::mutex> lk(m_);
     std::vector<Row> out;
     out.reserve(rows_.size());
-    for (const auto& kv : rows_) out.push_back(kv.second);
+    if (!order_.empty() && order_.size() == rows_.size()) {
+        for (size_t id : order_) {
+            auto it = rows_.find(id);
+            if (it != rows_.end()) out.push_back(it->second);
+        }
+    } else {
+        for (const auto& kv : rows_) out.push_back(kv.second);
+    }
     return out;
 }
 

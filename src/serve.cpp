@@ -229,8 +229,21 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
                 continue;
             }
             if (added_paths_.count(p)) {
-                result["rejected"].push_back({{"path", p}, {"reason", "already in queue"}});
-                continue;
+                // Если файл был удалён/завершён — разрешить повторное добавление
+                bool still_active = false;
+                if (engine_) {
+                    auto snap = engine_->snapshot();
+                    for (const auto& f : snap) if (f.path == p) {
+                        if (f.state == "queued" || f.state == "prep" || f.state == "running" || f.state == "removed") still_active = true;
+                        break;
+                    }
+                }
+                if (still_active) {
+                    result["rejected"].push_back({{"path", p}, {"reason", "already in queue"}});
+                    continue;
+                } else {
+                    added_paths_.erase(p);
+                }
             }
             added_paths_.insert(p);
             accepted.push_back(p);
@@ -253,6 +266,39 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
 
 bool DaemonSession::cancel_file(uint64_t id) {
     return engine_ && engine_->remove(id);
+}
+
+bool DaemonSession::remove(uint64_t id) {
+    if (!engine_) return false;
+    std::string path_to_remove;
+    auto snap_before = engine_->snapshot();
+    for (const auto& f : snap_before) if (f.idx == (size_t)id) { path_to_remove = f.path; break; }
+    bool ok = engine_->remove((size_t)id);
+    bool is_done = false;
+    for (const auto& f : snap_before) if (f.idx == (size_t)id) {
+        is_done = (f.state == "ok" || f.state == "skip" || f.state == "error" || f.state == "removed");
+        break;
+    }
+    if (!ok && is_done) ok = true;
+    if (ok) {
+        st_->remove((size_t)id);
+        if (!path_to_remove.empty()) {
+            std::lock_guard<std::mutex> lk(mt_);
+            added_paths_.erase(path_to_remove);
+        }
+        ev_->push("removed", {{"id", id}});
+    }
+    return ok;
+}
+
+bool DaemonSession::reorder(const std::vector<size_t>& order) {
+    if (!engine_) return false;
+    bool ok = engine_->reorder(order);
+    if (ok) {
+        st_->reorder(order);
+        ev_->push("reordered", {{"order", order}});
+    }
+    return ok;
 }
 
 void DaemonSession::request_shutdown(bool /*force*/) {

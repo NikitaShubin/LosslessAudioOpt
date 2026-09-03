@@ -145,6 +145,7 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
             {"options", ctx.daemon->session_options()},
         };
         out["counters"] = ctx.daemon->counters();
+        out["paused"] = ctx.daemon->paused();
         out["last_seq"] = ctx.events->last_seq();
         out["rows"] = rows_json(*ctx.state);
         send_json(res, out);

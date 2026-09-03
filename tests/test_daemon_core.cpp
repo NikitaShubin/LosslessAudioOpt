@@ -149,6 +149,14 @@ struct FakeDaemon : Daemon {
         cancelled_id = id;
         return cancel_exists;
     }
+    bool remove(uint64_t id) override {
+        cancelled_id = id;
+        return cancel_exists;
+    }
+    bool reorder(const std::vector<size_t>& order) override {
+        (void)order;
+        return true;
+    }
     void request_shutdown(bool force) override { shut_force = force; }
     nlohmann::json formats() const override {
         return {{"formats", nlohmann::json::array(

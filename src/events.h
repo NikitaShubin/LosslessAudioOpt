@@ -73,6 +73,8 @@ public:
     void set_tasks(size_t id, std::vector<std::string> tasks);
     void set_task(size_t id, size_t idx, const std::string& st);
     void set_pct(size_t id, double pct);
+    void remove(size_t id);
+    void reorder(const std::vector<size_t>& order);
 
     std::vector<Row> snapshot() const;
     size_t size() const;
@@ -80,6 +82,7 @@ public:
 private:
     mutable std::mutex m_;
     std::map<size_t, Row> rows_;
+    std::vector<size_t> order_;  // порядок очереди (ids); пусто = по id
 };
 
 }  // namespace dsvc

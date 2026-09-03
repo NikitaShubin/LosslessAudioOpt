@@ -604,7 +604,7 @@ public:
 
     // --- Планирование (определения — ниже) ---
     bool can_start_new_file(size_t next_prep, int prep_active,
-                            const std::vector<FileJob>& jobs, bool aborted) const;
+                            const std::vector<std::unique_ptr<FileJob>>& jobs, bool aborted) const;
     bool can_start_new_variant(const FileJob& j, int window, bool aborted) const;
 
     void on_prep_started() { active_preps_++; }
@@ -626,25 +626,25 @@ private:
 // --- Определения методов ResourceManager ---
 
 bool ResourceManager::can_start_new_file(size_t /*next_prep*/, int prep_active_r,
-                                         const std::vector<FileJob>& jobs,
+                                         const std::vector<std::unique_ptr<FileJob>>& jobs,
                                          bool aborted) const {
     if (aborted) return false;
     if (proc::cancelled()) return false;
     if (prep_active_r >= max_workers_) return false;
     bool has_idle = false;
-    for (const auto& j : jobs) {
+    for (const auto& jp : jobs) { const FileJob& j = *jp;
         if (j.done || !j.prep_done) continue;
         if (j.released == 0) { has_idle = true; break; }
     }
     if (has_idle) {
-        for (const auto& j : jobs) {
+        for (const auto& jp : jobs) { const FileJob& j = *jp;
             if (j.done || !j.prep_done) continue;
             if (j.released < j.tasks.size()) return false;
         }
     }
     // Есть ли хотя бы один файл, ещё не прошедший prep? (динамическая очередь:
     // jobs может расти, поэтому не `next_prep < jobs.size()`, а живой поиск.)
-    for (const auto& j : jobs) {
+    for (const auto& jp : jobs) { const FileJob& j = *jp;
         if (!j.done && !j.prep_done) return true;
     }
     return false;
@@ -679,7 +679,7 @@ struct Runner {
     size_t next_prep = 0;
     int prep_active = 0;  // число выполняющихся prep (могут идти параллельно)
     size_t total_done = 0;
-    std::vector<FileJob> jobs;
+    std::vector<std::unique_ptr<FileJob>> jobs;
     std::atomic<int> failed{0};
     std::atomic<bool> abort{false};  // при ошибке файла без --ignore-errors: прекращаем прогон
     std::atomic<bool> shutdown_requested{false};  // демон: остановить воркеры (graceful shutdown)
@@ -707,8 +707,8 @@ struct Runner {
             std::lock_guard<std::mutex> lk(qm);
             for (const auto& it : items) {
                 size_t i = jobs.size();
-                jobs.emplace_back();
-                make_job(jobs[i], i, it);
+                jobs.emplace_back(std::make_unique<FileJob>());
+                make_job(*jobs[i], i, it);
                 idx.push_back(i);
                 labels.push_back(it.rel);
             }
@@ -738,7 +738,7 @@ struct Runner {
     void remove_file(size_t idx) {
         std::lock_guard<std::mutex> lk(qm);
         if (idx >= jobs.size()) return;
-        FileJob& j = jobs[idx];
+        FileJob& j = *jobs[idx];
         if (j.done) return;
         if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
@@ -770,10 +770,10 @@ struct Runner {
             if (id >= jobs.size() || seen[id]) return;
             seen[id] = true;
         }
-        std::vector<FileJob> reordered;
+        std::vector<std::unique_ptr<FileJob>> reordered;
         reordered.reserve(jobs.size());
         for (size_t id : ids) reordered.push_back(std::move(jobs[id]));
-        for (size_t i = 0; i < reordered.size(); i++) reordered[i].idx = i;
+        for (size_t i = 0; i < reordered.size(); i++) reordered[i]->idx = i;
         jobs = std::move(reordered);
         next_prep = 0;  // курсор переинициализируется (find_next_prep всё равно сканирует)
         cv.notify_all();
@@ -811,7 +811,7 @@ struct Runner {
         if (abort.load()) return false;
         if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
         for (size_t i = 0; i < jobs.size(); i++) {
-            if (rm.can_start_new_variant(jobs[i], window, false))
+            if (rm.can_start_new_variant(*jobs[i], window, false))
                 return true;
         }
         return false;
@@ -825,7 +825,7 @@ struct Runner {
         if (jobs.empty()) return false;
         for (size_t k = 0; k < jobs.size(); k++) {
             size_t i = (next_prep + k) % jobs.size();
-            FileJob& j = jobs[i];
+            FileJob& j = *jobs[i];
             if (j.done || j.prep_done) continue;
             *out = i;
             return true;
@@ -855,7 +855,7 @@ struct Runner {
         if (abort.load()) return false;
         if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
         for (size_t i = 0; i < jobs.size(); i++) {
-            FileJob& j = jobs[i];
+            FileJob& j = *jobs[i];
             if (!rm.can_start_new_variant(j, window, false)) continue;
             size_t jf = j.released - j.completed;
             if (jf > 0 && j.ref_size > 0) {
@@ -863,12 +863,12 @@ struct Runner {
                 if (rm.request_disk(vpeak).status != ResourceRequest::Status::Granted) continue;
             }
             *w = {WorkKind::Variant, i, j.released};
-            jobs[i].released++;
+            jobs[i]->released++;
             return true;
         }
         if (prep_allowed_locked()) {
             for (size_t i = 0; i < jobs.size(); i++) {
-                FileJob& j = jobs[i];
+                FileJob& j = *jobs[i];
                 if (j.done || j.prep_done || !j.deferred) continue;
                 if (j.probe.ok && j.wav_est > 0) {
                     j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
@@ -885,7 +885,7 @@ struct Runner {
             size_t i;
             if (find_next_prep_locked(&i)) {
                 if (next_prep < jobs.size()) next_prep = i + 1;
-                jobs[i].prep_running = true;
+                jobs[i]->prep_running = true;
                 rm.on_prep_started();
                 prep_active++;
                 *w = {WorkKind::Prep, i, 0};
@@ -1568,13 +1568,13 @@ struct Runner {
                 obs::sink()->prep(w.idx);
                 std::string perr;
                 try {
-                    prep_file(jobs[w.idx]);
+                    prep_file(*jobs[w.idx]);
                 } catch (const std::exception& exc) {
                     perr = exc.what();
                 }
                 if (proc::cancelled() || proc::aborted()) break;  // отмена — счётчики не трогаем, tmp почистит main
                 if (!perr.empty()) {
-                    FileJob& j = jobs[w.idx];
+                    FileJob& j = *jobs[w.idx];
                     std::lock_guard<std::mutex> jl(*j.m);
                     j.summary.path = j.path;
                     j.summary.status = "error";
@@ -1585,7 +1585,7 @@ struct Runner {
                 size_t n_tasks = 0;
                 {
                     std::lock_guard<std::mutex> lk(qm);
-                    FileJob& j = jobs[w.idx];
+                    FileJob& j = *jobs[w.idx];
                     j.prep_done = true;
                     j.prep_running = false;
                     if (prep_active > 0) prep_active--;
@@ -1599,12 +1599,12 @@ struct Runner {
                     cv.notify_all();
                 }
                 if (!finish_now) obs::sink()->set_tasks(w.idx, n_tasks);
-                if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(jobs[w.idx]);
+                if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(*jobs[w.idx]);
             } else {
                 std::string verr;
                 VariantOutcome oc = VariantOutcome::Failed;
                 try {
-                    oc = run_variant(jobs[w.idx], w.task);
+                    oc = run_variant(*jobs[w.idx], w.task);
                 } catch (const std::exception& exc) {
                     verr = exc.what();
                 }
@@ -1614,7 +1614,7 @@ struct Runner {
                 // задачи, а файл ниже финализируется как ошибка (см. finalize_file).
                 if (!opts->ignore_errors && opts->mode != SessionMode::Daemon &&
                     (oc == VariantOutcome::Failed || !verr.empty())) {
-                    count_error(jobs[w.idx]);
+                    count_error(*jobs[w.idx]);
                 }
                 obs::sink()->task(w.idx, w.task,
                              oc == VariantOutcome::Ok ? obs::TaskState::Ok
@@ -1622,7 +1622,7 @@ struct Runner {
                 bool last = false;
                 {
                     std::lock_guard<std::mutex> lk(qm);
-                    FileJob& j = jobs[w.idx];
+                    FileJob& j = *jobs[w.idx];
                     if (!verr.empty()) {
                         std::lock_guard<std::mutex> jl(*j.m);
                         j.failures.push_back("variant: " + verr);
@@ -1646,7 +1646,7 @@ struct Runner {
                     }
                     cv.notify_all();
                 }
-                if (last && !proc::cancelled() && !proc::aborted()) finalize_file(jobs[w.idx]);
+                if (last && !proc::cancelled() && !proc::aborted()) finalize_file(*jobs[w.idx]);
             }
         }
     }
@@ -1768,17 +1768,17 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
     r.jobs.reserve(items.size());
     for (const auto& it : items) {
         size_t idx = r.jobs.size();
-        r.jobs.emplace_back();
-        r.make_job(r.jobs[idx], idx, it);
+        r.jobs.emplace_back(std::make_unique<FileJob>());
+        r.make_job(*r.jobs[idx], idx, it);
     }
     for (size_t k = 0; k < r.jobs.size(); k++)
-        obs::sink()->begin_file(r.jobs[k].idx, r.jobs[k].rel);
+        obs::sink()->begin_file(r.jobs[k]->idx, r.jobs[k]->rel);
     if (r.jobs.size() > 1) {
         std::vector<size_t> idx(r.jobs.size());
         std::vector<std::string> labels;
         for (size_t k = 0; k < r.jobs.size(); k++) {
             idx[k] = k;
-            labels.push_back(r.jobs[k].rel);
+            labels.push_back(r.jobs[k]->rel);
         }
         obs::sink()->files_added(idx, labels);
     }
@@ -1828,7 +1828,7 @@ std::vector<EngineFile> Engine::snapshot() {
     std::lock_guard<std::mutex> lk(i.r.qm);
     out.reserve(i.r.jobs.size());
     for (size_t k = 0; k < i.r.jobs.size(); k++) {
-        const FileJob& j = i.r.jobs[k];
+        const FileJob& j = *i.r.jobs[k];
         EngineFile e;
         e.idx = j.idx;
         e.path = j.path;
@@ -1978,9 +1978,9 @@ int run(const Options& opts) {
     r.window = jobs;
     r.rm.set_tmp_path(tmp);
     r.rm.set_max_workers(jobs);
-    r.jobs.resize(files.size());
-    for (size_t i = 0; i < files.size(); i++) r.make_job(r.jobs[i], i, items[i]);
-    for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i].rel);
+    r.jobs.clear(); r.jobs.reserve(files.size()); for (size_t _i=0;_i<files.size();_i++) r.jobs.emplace_back(std::make_unique<FileJob>());
+    for (size_t i = 0; i < files.size(); i++) r.make_job(*r.jobs[i], i, items[i]);
+    for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i]->rel);
 
     std::vector<std::thread> threads;
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);
@@ -1997,7 +1997,7 @@ int run(const Options& opts) {
     // прерывании/изменении размера окна.
     {
         bool any = false;
-        for (auto& j : r.jobs) {
+        for (auto& _j : r.jobs) { auto& j = *_j;
             if (j.summary.replacement_error.empty()) continue;
             if (!any) out::print("%s", i18n::str("Replacement failed:\n").c_str());
             out::print("  %s — %s\n", j.path.c_str(), j.summary.replacement_error.c_str());
@@ -2015,7 +2015,7 @@ int run(const Options& opts) {
     }
 
     std::vector<report::FileSummary> summaries;
-    for (auto& j : r.jobs) summaries.push_back(j.summary);
+    for (auto& _j : r.jobs) summaries.push_back(_j->summary);
 
     if (!opts.report_path.empty()) {
         std::string rp = opts.report_path;

@@ -46,6 +46,8 @@ public:
     void add(const std::vector<std::string>& paths, bool recursive,
              nlohmann::json& result) override;
     bool cancel_file(uint64_t id) override;
+    bool remove(uint64_t id) override;
+    bool reorder(const std::vector<size_t>& order) override;
     void request_shutdown(bool force) override;
     nlohmann::json formats() const override;
 
