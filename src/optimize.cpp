@@ -539,6 +539,7 @@ struct FileJob {
     size_t completed = 0;
     bool prep_done = false;
     bool done = false;
+    bool cancelled = false;  // файл снят из очереди (remove/cancel-file): не запускать
 
     // --- подготовка (один поток prep, до выпуска задач) ---
     bool prep_ok = false;
@@ -623,12 +624,11 @@ private:
 
 // --- Определения методов ResourceManager ---
 
-bool ResourceManager::can_start_new_file(size_t next_prep, int prep_active_r,
+bool ResourceManager::can_start_new_file(size_t /*next_prep*/, int prep_active_r,
                                          const std::vector<FileJob>& jobs,
                                          bool aborted) const {
     if (aborted) return false;
     if (proc::cancelled()) return false;
-    if (next_prep >= jobs.size()) return false;
     if (prep_active_r >= max_workers_) return false;
     bool has_idle = false;
     for (const auto& j : jobs) {
@@ -641,13 +641,19 @@ bool ResourceManager::can_start_new_file(size_t next_prep, int prep_active_r,
             if (j.released < j.tasks.size()) return false;
         }
     }
-    return true;
+    // Есть ли хотя бы один файл, ещё не прошедший prep? (динамическая очередь:
+    // jobs может расти, поэтому не `next_prep < jobs.size()`, а живой поиск.)
+    for (const auto& j : jobs) {
+        if (!j.done && !j.prep_done) return true;
+    }
+    return false;
 }
 
 bool ResourceManager::can_start_new_variant(const FileJob& j, int window,
                                             bool aborted) const {
     if (aborted) return false;
     if (j.done || !j.prep_done) return false;
+    if (j.cancelled) return false;
     if (j.released >= j.tasks.size()) return false;
     if (j.released - j.completed >= (size_t)window) return false;
     return true;
@@ -661,10 +667,8 @@ struct Runner {
     std::string ffmpeg;
     std::string tmp;
     int window = 1;
-    size_t n_files = 0;
 
     ResourceManager rm;  // брокер ресурсов: диск + планирование
-
     // --- кэш ресурсов для адаптивного окна (обновляется не чаще 10 с) ---
     std::chrono::steady_clock::time_point res_last{};
     uint64_t ram_budget = 0;           // бюджет RAM: 50% доступной памяти
@@ -677,8 +681,104 @@ struct Runner {
     std::vector<FileJob> jobs;
     std::atomic<int> failed{0};
     std::atomic<bool> abort{false};  // при ошибке файла без --ignore-errors: прекращаем прогон
+    std::atomic<bool> shutdown_requested{false};  // демон: остановить воркеры (graceful shutdown)
+    std::atomic<bool> queue_paused{false};        // демон: не запускать новые задачи (pause/resume)
 
-    bool all_done_locked() const { return total_done == n_files; }
+    // Создаёт FileJob из FileItem. idx — позиция в векторе jobs (уже назначена).
+    void make_job(FileJob& j, size_t idx, const FileItem& it) {
+        j.idx = idx;
+        j.path = it.path;
+        j.base = util::base_name(it.path);
+        j.rel = it.rel;
+        j.base_ne = base_no_ext(it.path);
+        j.dir = util::dir_name(it.path);
+        j.tok = tmp_token(it.path);
+        j.m = std::make_unique<std::mutex>();
+    }
+
+    // Добавляет файлы в очередь на лету (демон). Вызывается вне qm, берёт
+    // лок сам. Инвариант: только целые файлы (не задачи). Эмитит begin_file
+    // для новых строк и будит воркеры.
+    void append_files(const std::vector<FileItem>& items) {
+        std::vector<size_t> idx;
+        std::vector<std::string> labels;
+        {
+            std::lock_guard<std::mutex> lk(qm);
+            for (const auto& it : items) {
+                size_t i = jobs.size();
+                jobs.emplace_back();
+                make_job(jobs[i], i, it);
+                idx.push_back(i);
+                labels.push_back(it.rel);
+            }
+            cv.notify_all();
+        }
+        for (size_t k = 0; k < idx.size(); k++) obs::sink()->begin_file(idx[k], labels[k]);
+        if (idx.size() > 1) obs::sink()->files_added(idx, labels);
+    }
+
+    // Пауза/продолжение всей очереди (демон). Приостанавливает запуск новых
+    // задач; активные процессы дорабатывают. Вызывается вне qm.
+    void pause_queue() {
+        queue_paused.store(true);
+        cv.notify_all();
+    }
+    void resume_queue() {
+        queue_paused.store(false);
+        cv.notify_all();
+    }
+    bool is_paused() const { return queue_paused.load(); }
+
+    // Снимает файл из очереди (remove/cancel-file). Для файла, ещё не
+    // запущенного (pending: не в prep, задач не выпущено) — немедленно
+    // завершает его (done + skip, tmp чистится). Для уже запущенного —
+    // помечает cancelled: новые задачи не запускаются, текущие дорабатывают.
+    // Вызывается вне qm.
+    void remove_file(size_t idx) {
+        std::lock_guard<std::mutex> lk(qm);
+        if (idx >= jobs.size()) return;
+        FileJob& j = jobs[idx];
+        if (j.done) return;
+        if (!j.prep_done && j.released == 0) {
+            // pending: снимаем сразу.
+            j.cancelled = true;
+            j.done = true;
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail = i18n::str("removed from queue");
+            j.session.reset();
+            total_done++;
+            cv.notify_all();
+            obs::sink()->mark_skip(idx);
+        } else {
+            // запущен: запрещаем новые задачи, текущие доработают.
+            std::lock_guard<std::mutex> jl(*j.m);
+            j.cancelled = true;
+        }
+    }
+
+    // Переупорядочивает очередь (reorder): ids — новый порядок индексов
+    // файлов (как их видит клиент). Применяется ко всем файлам; для уже
+    // запущенных порядок не влияет на текущую задачу, но меняет приоритет
+    // последующих. Вызывается вне qm.
+    void reorder(const std::vector<size_t>& ids) {
+        std::lock_guard<std::mutex> lk(qm);
+        if (ids.size() != jobs.size()) return;
+        std::vector<bool> seen(jobs.size(), false);
+        for (size_t id : ids) {
+            if (id >= jobs.size() || seen[id]) return;
+            seen[id] = true;
+        }
+        std::vector<FileJob> reordered;
+        reordered.reserve(jobs.size());
+        for (size_t id : ids) reordered.push_back(std::move(jobs[id]));
+        for (size_t i = 0; i < reordered.size(); i++) reordered[i].idx = i;
+        jobs = std::move(reordered);
+        next_prep = 0;  // курсор переинициализируется (find_next_prep всё равно сканирует)
+        cv.notify_all();
+    }
+
+    bool all_done_locked() const { return total_done == jobs.size(); }
 
     // Учитывает ошибку файла в счётчике failed (не чаще одного раза на файл) и
     // останавливает прогон. Вызывается при статусе "error" в finalize_file и при
@@ -708,9 +808,26 @@ struct Runner {
     // личным окном (для cv-предиката). Бюджет диска проверяется в take_work.
     bool variant_launchable_locked() {
         if (abort.load()) return false;
-        for (size_t i = 0; i < n_files; i++) {
+        if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
+        for (size_t i = 0; i < jobs.size(); i++) {
             if (rm.can_start_new_variant(jobs[i], window, false))
                 return true;
+        }
+        return false;
+    }
+
+    // Находит следующий файл, требующий prep (не done, не prep_done), начиная
+    // с курсора next_prep по кругу. Динамическая очередь: файлы могут быть
+    // добавлены (append_files) — они всегда c индексом >= текущего, курсор
+    // их естественно достигнет; повторный круг ловит промежуточные (deferred).
+    bool find_next_prep_locked(size_t* out) {
+        if (jobs.empty()) return false;
+        for (size_t k = 0; k < jobs.size(); k++) {
+            size_t i = (next_prep + k) % jobs.size();
+            FileJob& j = jobs[i];
+            if (j.done || j.prep_done) continue;
+            *out = i;
+            return true;
         }
         return false;
     }
@@ -718,6 +835,7 @@ struct Runner {
     // Prep разрешён, если есть хотя бы 1 распакованный файл без задач
     // («запасной») — либо все распакованные уже выпустили задачи.
     bool prep_allowed_locked() const {
+        if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
         return rm.can_start_new_file(next_prep, prep_active, jobs, abort.load());
     }
 
@@ -734,7 +852,8 @@ struct Runner {
     // воркеров файла; первый воркер работает в рамках файлового бюджета.
     bool take_work_locked(Work* w) {
         if (abort.load()) return false;
-        for (size_t i = 0; i < n_files; i++) {
+        if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
+        for (size_t i = 0; i < jobs.size(); i++) {
             FileJob& j = jobs[i];
             if (!rm.can_start_new_variant(j, window, false)) continue;
             size_t jf = j.released - j.completed;
@@ -747,7 +866,7 @@ struct Runner {
             return true;
         }
         if (prep_allowed_locked()) {
-            for (size_t i = 0; i < n_files; i++) {
+            for (size_t i = 0; i < jobs.size(); i++) {
                 FileJob& j = jobs[i];
                 if (j.done || j.prep_done || !j.deferred) continue;
                 if (j.probe.ok && j.wav_est > 0) {
@@ -761,8 +880,9 @@ struct Runner {
                     }
                 }
             }
-            if (next_prep < n_files) {
-                size_t i = next_prep++;
+            size_t i;
+            if (find_next_prep_locked(&i)) {
+                if (next_prep < jobs.size()) next_prep = i + 1;
                 rm.on_prep_started();
                 prep_active++;
                 *w = {WorkKind::Prep, i, 0};
@@ -1428,10 +1548,13 @@ struct Runner {
             {
                 std::unique_lock<std::mutex> lk(qm);
                 cv.wait_for(lk, std::chrono::milliseconds(50), [&] {
-                    return proc::cancelled() || variant_launchable_locked() ||
-                           prep_allowed_locked() || all_done_locked();
+                    return proc::cancelled() || shutdown_requested.load() ||
+                           variant_launchable_locked() || prep_allowed_locked() ||
+                           (opts->mode == SessionMode::OneShot && all_done_locked());
                 });
-                if (proc::cancelled() || all_done_locked()) break;
+                if (proc::cancelled()) break;
+                if (shutdown_requested.load()) break;   // демон: штатное завершение
+                if (opts->mode == SessionMode::OneShot && all_done_locked()) break;
                 if (abort.load()) break;
                 if (!take_work_locked(&w)) continue;
                 if (w.kind == WorkKind::Variant)
@@ -1462,7 +1585,7 @@ struct Runner {
                     FileJob& j = jobs[w.idx];
                     j.prep_done = true;
                     if (prep_active > 0) prep_active--;
-                    if (j.tasks.empty()) {
+                    if (j.tasks.empty() || j.cancelled) {
                         j.done = true;
                         total_done++;
                         finish_now = true;
@@ -1503,7 +1626,11 @@ struct Runner {
                                     obs::sink()->error("ERROR [" + j.path + "]: " + verr + "\n");
                     }
                     j.completed++;
-                    if (j.completed == j.tasks.size()) {
+                    // Файл завершён, когда обработаны все задачи — либо, если
+                    // он снят из очереди (cancelled), когда обработаны все
+                    // уже выпущенные задачи (остальные не будут запущены).
+                    if (j.completed == j.tasks.size() ||
+                        (j.cancelled && j.completed == j.released)) {
                         j.done = true;
                         total_done++;
                         last = true;
@@ -1618,18 +1745,8 @@ int run(const Options& opts) {
     r.window = jobs;
     r.rm.set_tmp_path(tmp);
     r.rm.set_max_workers(jobs);
-    r.n_files = files.size();
     r.jobs.resize(files.size());
-    for (size_t i = 0; i < files.size(); i++) {
-        r.jobs[i].idx = i;
-        r.jobs[i].path = files[i];
-        r.jobs[i].base = util::base_name(files[i]);
-        r.jobs[i].rel = items[i].rel;
-        r.jobs[i].base_ne = base_no_ext(files[i]);
-        r.jobs[i].dir = util::dir_name(files[i]);
-        r.jobs[i].tok = tmp_token(files[i]);
-        r.jobs[i].m = std::make_unique<std::mutex>();
-    }
+    for (size_t i = 0; i < files.size(); i++) r.make_job(r.jobs[i], i, items[i]);
     for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i].rel);
 
     std::vector<std::thread> threads;
