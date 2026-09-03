@@ -16,6 +16,7 @@
 #include "config.h"
 #include "i18n.h"
 #include "media.h"
+#include "obs.h"
 #include "proc.h"
 #include "report.h"
 #include "out.h"
@@ -687,6 +688,9 @@ struct Runner {
             std::lock_guard<std::mutex> jl(*j.m);
             count_error_locked(j);
         }
+        // В режиме демона ошибка файла не прерывает очередь (семантика
+        // вечного --ignore-errors): только учитываем в счётчике failed.
+        if (opts->ignore_errors || opts->mode == SessionMode::Daemon) return;
         abort.store(true);
         proc::abort_all();  // не ждём завершения активных процессов — прерываем их
         cv.notify_all();
@@ -784,7 +788,7 @@ struct Runner {
             j.summary.path = j.path;
             j.summary.status = "error";
             j.summary.detail = i18n::str("ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)");
-            status::log(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+            obs::sink()->log(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
             release_deferred_budget();
             return;
         }
@@ -833,7 +837,7 @@ struct Runner {
                                    {"status", "error"},
                                    {"reason", probe.error}});
                 }
-                status::error("ERROR " + j.path + " — " + probe.error + "\n");
+                obs::sink()->error("ERROR " + j.path + " — " + probe.error + "\n");
                     release_deferred_budget();
                     return;
             }
@@ -852,7 +856,7 @@ struct Runner {
                                {"status", "skip"},
                                {"reason", "video stream present"}});
             }
-            status::log("SKIP " + j.path + " — " + i18n::str("video stream present (not audio)") + "\n");
+            obs::sink()->log("SKIP " + j.path + " — " + i18n::str("video stream present (not audio)") + "\n");
             release_deferred_budget();
             return;
         }
@@ -867,7 +871,7 @@ struct Runner {
                                {"status", "skip"},
                                {"reason", "lossy input"}});
             }
-            status::log("SKIP " + j.path + " — " + j.summary.detail + "\n");
+            obs::sink()->log("SKIP " + j.path + " — " + j.summary.detail + "\n");
             release_deferred_budget();
             return;
         }
@@ -926,7 +930,7 @@ struct Runner {
                                {"status", "error"},
                                {"reason", j.summary.detail}});
             }
-            status::error("ERROR " + j.path + " — " + j.summary.detail + "\n");
+            obs::sink()->error("ERROR " + j.path + " — " + j.summary.detail + "\n");
             return;
         }
         j.ref_size = util::file_size(ref_wav);
@@ -1210,7 +1214,7 @@ struct Runner {
             if (hard) {
                 j.summary.status = "error";
                 j.summary.detail = reason;
-                status::error("ERROR " + j.path + " — " + reason + "\n");
+                obs::sink()->error("ERROR " + j.path + " — " + reason + "\n");
                 if (!opts.no_stats) stats::append_all(records);
                 if (logger) {
                     logger->event({{"type", "file_done"},
@@ -1237,7 +1241,7 @@ struct Runner {
                 j.failures.empty() ? i18n::str("variant failed") : j.failures[0];
             j.summary.status = "error";
             j.summary.detail = reason;
-            status::error("ERROR " + j.path + " — " + reason + "\n");
+            obs::sink()->error("ERROR " + j.path + " — " + reason + "\n");
             if (!opts.no_stats) stats::append_all(records);
             if (logger) {
                 logger->event({{"type", "file_done"},
@@ -1273,7 +1277,7 @@ struct Runner {
                 if (!opts.no_stats) stats::append_all(records);
                 j.summary.status = "error";
                 j.summary.detail = winner_fail;
-                status::error("ERROR " + j.path + " — " + winner_fail + "\n");
+                obs::sink()->error("ERROR " + j.path + " — " + winner_fail + "\n");
                 if (logger) {
                     logger->event({{"type", "file_done"},
                                    {"file", j.path},
@@ -1398,12 +1402,12 @@ struct Runner {
         // RAII: remove_all почистит ref.wav, dec.wav, sidecar, losers.
         j.session.reset();
 
-        if (!msg.empty()) status::log(msg);
-        if (j.summary.status == "error") status::mark_error(j.idx);
-        else if (j.summary.status == "skip") status::mark_skip(j.idx);
-        else status::end_file(j.idx, j.summary.savings_pct);
+        if (!msg.empty()) obs::sink()->log(msg);
+        if (j.summary.status == "error") obs::sink()->mark_error(j.idx);
+        else if (j.summary.status == "skip") obs::sink()->mark_skip(j.idx);
+        else obs::sink()->end_file(j.idx, j.summary.savings_pct);
         if (j.summary.status == "error") {
-            if (opts.ignore_errors) {
+            if (opts.ignore_errors || opts.mode == SessionMode::Daemon) {
                 // Игнорируем ошибку: файл помечается skip, прогон продолжается.
                 j.summary.status = "skip";
                 if (j.summary.detail.empty()) j.summary.detail = i18n::str("error ignored");
@@ -1431,11 +1435,11 @@ struct Runner {
                 if (abort.load()) break;
                 if (!take_work_locked(&w)) continue;
                 if (w.kind == WorkKind::Variant)
-                    status::task(w.idx, w.task, status::TaskState::Running);
+                    obs::sink()->task(w.idx, w.task, obs::TaskState::Running);
             }
 
             if (w.kind == WorkKind::Prep) {
-                status::prep(w.idx);
+                obs::sink()->prep(w.idx);
                 std::string perr;
                 try {
                     prep_file(jobs[w.idx]);
@@ -1449,7 +1453,7 @@ struct Runner {
                     j.summary.path = j.path;
                     j.summary.status = "error";
                     j.summary.detail = perr;
-                            status::error("ERROR [" + j.path + "]: " + perr + "\n");
+                            obs::sink()->error("ERROR [" + j.path + "]: " + perr + "\n");
                 }
                 bool finish_now = false;
                 size_t n_tasks = 0;
@@ -1467,7 +1471,7 @@ struct Runner {
                     }
                     cv.notify_all();
                 }
-                if (!finish_now) status::set_tasks(w.idx, n_tasks);
+                if (!finish_now) obs::sink()->set_tasks(w.idx, n_tasks);
                 if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(jobs[w.idx]);
             } else {
                 std::string verr;
@@ -1478,16 +1482,16 @@ struct Runner {
                     verr = exc.what();
                 }
                 if (proc::cancelled() || proc::aborted()) break;  // отмена/прерывание — счётчики не трогаем
-                // Без --ignore-errors любая ошибка варианта останавливает прогон:
-                // воркеры перестают брать новые задачи, а файл ниже финализируется
-                // как ошибка (см. finalize_file).
-                if (!opts->ignore_errors &&
+                // Без --ignore-errors (и не в режиме демона) любая ошибка
+                // варианта останавливает прогон: воркеры перестают брать новые
+                // задачи, а файл ниже финализируется как ошибка (см. finalize_file).
+                if (!opts->ignore_errors && opts->mode != SessionMode::Daemon &&
                     (oc == VariantOutcome::Failed || !verr.empty())) {
                     count_error(jobs[w.idx]);
                 }
-                status::task(w.idx, w.task,
-                             oc == VariantOutcome::Ok ? status::TaskState::Ok
-                                                       : status::TaskState::Failed);
+                obs::sink()->task(w.idx, w.task,
+                             oc == VariantOutcome::Ok ? obs::TaskState::Ok
+                                                       : obs::TaskState::Failed);
                 bool last = false;
                 {
                     std::lock_guard<std::mutex> lk(qm);
@@ -1496,7 +1500,7 @@ struct Runner {
                         std::lock_guard<std::mutex> jl(*j.m);
                         j.failures.push_back("variant: " + verr);
                         j.variant_errors++;
-                                    status::error("ERROR [" + j.path + "]: " + verr + "\n");
+                                    obs::sink()->error("ERROR [" + j.path + "]: " + verr + "\n");
                     }
                     j.completed++;
                     if (j.completed == j.tasks.size()) {
@@ -1626,7 +1630,7 @@ int run(const Options& opts) {
         r.jobs[i].tok = tmp_token(files[i]);
         r.jobs[i].m = std::make_unique<std::mutex>();
     }
-    for (size_t i = 0; i < files.size(); i++) status::begin_file(i, r.jobs[i].rel);
+    for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i].rel);
 
     std::vector<std::thread> threads;
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);
@@ -1704,8 +1708,8 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     std::string ffprobe = media::find_ffprobe();
     std::string ffmpeg = media::find_ffmpeg();
     if (ffprobe.empty() || ffmpeg.empty()) {
-        status::error(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
-        status::mark_error(idx);
+        obs::sink()->error(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
+        obs::sink()->mark_error(idx);
         return 1;
     }
 
@@ -1743,29 +1747,29 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
         }
         if (!probe.ok) {
             session.cleanup();
-            status::error("ERROR " + path + " — " + probe.error + "\n");
-            status::mark_error(idx);
+            obs::sink()->error("ERROR " + path + " — " + probe.error + "\n");
+            obs::sink()->mark_error(idx);
             return 1;
         }
     }
     if (lower_ext(path) == util::to_lower(target.extension)) {
-        status::log("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
-        status::mark_skip(idx);
+        obs::sink()->log("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
+        obs::sink()->mark_skip(idx);
         return 0;
     }
     if (probe.has_video) {
-        status::log("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
-        status::mark_skip(idx);
+        obs::sink()->log("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
+        obs::sink()->mark_skip(idx);
         return 0;
     }
     if (!probe.is_lossless() && !allow_lossy) {
-        status::log("SKIP " + path + " — " +
+        obs::sink()->log("SKIP " + path + " — " +
                      i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str()) + "\n");
-        status::mark_skip(idx);
+        obs::sink()->mark_skip(idx);
         return 0;
     }
 
-    status::prep(idx);
+    obs::sink()->prep(idx);
 
     tags::TagSet embed_ts = tags::extract_tags(path, probe, target.tag_native_reader);
     tags::TagSet ts;
@@ -1796,21 +1800,21 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     if (!decoded) decoded = media::decode_to_wav(path, src_wav, ffmpeg, bits, &dec_err);
     if (!decoded) {
         session.cleanup();
-        status::error("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
-        status::mark_error(idx);
+        obs::sink()->error("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
+        obs::sink()->mark_error(idx);
         return 1;
     }
 
     tool::Status st = tool::ensure(target, !no_download, "[" + target.id + "] ");
     if (st.path.empty()) {
         session.cleanup();
-        status::error(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
+        obs::sink()->error(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
                                 target.id.c_str(), st.status.c_str()));
-        status::mark_error(idx);
+        obs::sink()->mark_error(idx);
         return 1;
     }
 
-    status::set_tasks(idx, 1);
+    obs::sink()->set_tasks(idx, 1);
 
     Env env;
     env.fmt = &target;
@@ -1820,28 +1824,28 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
 
     std::string candidate = session.candidate_path("restore", variant.id, target.extension);
 
-    status::task(idx, 0, status::TaskState::Running);
+    obs::sink()->task(idx, 0, obs::TaskState::Running);
 
     // Restore всегда выполняет полную проверку кандидата (единственный вариант).
     std::string verr = encode_candidate(src_wav, candidate, variant.args, env);
     if (verr.empty()) verr = validate_candidate(src_wav, candidate, env);
     if (!verr.empty()) {
-        status::task(idx, 0, status::TaskState::Failed);
-        status::mark_error(idx);
+        obs::sink()->task(idx, 0, obs::TaskState::Failed);
+        obs::sink()->mark_error(idx);
         session.cleanup();
-        status::error("ERROR " + path + " — " + verr + "\n");
+        obs::sink()->error("ERROR " + path + " — " + verr + "\n");
         return 1;
     }
     uint64_t size = util::file_size(candidate);
     if (size == 0) {
-        status::task(idx, 0, status::TaskState::Failed);
-        status::mark_error(idx);
+        obs::sink()->task(idx, 0, obs::TaskState::Failed);
+        obs::sink()->mark_error(idx);
         session.cleanup();
-        status::error("ERROR " + path + " — " + i18n::str("empty file") + "\n");
+        obs::sink()->error("ERROR " + path + " — " + i18n::str("empty file") + "\n");
         return 1;
     }
 
-    status::task(idx, 0, status::TaskState::Ok);
+    obs::sink()->task(idx, 0, obs::TaskState::Ok);
 
     tags::TagPlan plan = tags::plan_tags(ts, native_types(target), target, true);
     std::string terr;
@@ -1863,16 +1867,16 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     }
     if (!terr.empty()) {
         session.cleanup();
-        status::error("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
-        status::mark_error(idx);
+        obs::sink()->error("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
+        obs::sink()->mark_error(idx);
         return 1;
     }
     if (has_tags && ts.present) {
         std::string v2 = tags::validate_groups(candidate, target, plan.embed, ffprobe);
         if (!v2.empty()) {
             session.cleanup();
-            status::error("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
-            status::mark_error(idx);
+            obs::sink()->error("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
+            obs::sink()->mark_error(idx);
             return 1;
         }
     }
@@ -1880,12 +1884,12 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
     if (!util::copy_file(candidate, new_path)) {
         session.cleanup();
-        status::error(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
-        status::mark_error(idx);
+        obs::sink()->error(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
+        obs::sink()->mark_error(idx);
         return 1;
     }
     if (!util::remove_file(path)) {
-        status::log(i18n::fmt("WARNING %s — the new file is saved as %s, but the old file "
+        obs::sink()->log(i18n::fmt("WARNING %s — the new file is saved as %s, but the old file "
                                "could not be removed and is left in place\n",
                                path.c_str(), new_path.c_str()));
     }
@@ -1896,19 +1900,19 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
         bool sc_ok = util::copy_file(sc_src, old_sc);
         session.cleanup();
         if (sc_ok) {
-            status::log(i18n::fmt("OK   %s -> %s (%s), tags in sidecar\n", base.c_str(),
+            obs::sink()->log(i18n::fmt("OK   %s -> %s (%s), tags in sidecar\n", base.c_str(),
                                     target.id.c_str(), target.extension.c_str()));
         } else {
-            status::log(i18n::fmt("!    %s -> %s, but the sidecar was not copied\n", base.c_str(),
+            obs::sink()->log(i18n::fmt("!    %s -> %s, but the sidecar was not copied\n", base.c_str(),
                                     target.id.c_str()));
         }
     } else {
         session.cleanup();
         util::remove_file(old_sc);
-        status::log(i18n::fmt("OK   %s -> %s (%s): %d KB, tags embedded\n", base.c_str(),
+        obs::sink()->log(i18n::fmt("OK   %s -> %s (%s): %d KB, tags embedded\n", base.c_str(),
                                 target.id.c_str(), target.extension.c_str(), (int)(size / 1024)));
     }
-    status::end_file(idx, 0.0);
+    obs::sink()->end_file(idx, 0.0);
     return 0;
 }
 
@@ -1965,7 +1969,7 @@ int restore_run(const RestoreOptions& opts) {
     status::init(items.size(), opts.no_status);
     if (status::interactive()) {
         for (size_t i = 0; i < items.size(); i++)
-            status::begin_file(i, items[i].rel);
+            obs::sink()->begin_file(i, items[i].rel);
     } else {
         out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
                     variant->id.c_str(), items.size(), jobs);
@@ -1990,8 +1994,8 @@ int restore_run(const RestoreOptions& opts) {
                                 opts.allow_lossy, fmts) != 0)
                     failed++;
             } catch (const std::exception& exc) {
-                status::error("ERROR [" + items[idx].path + "]: " + exc.what() + "\n");
-                status::mark_error(idx);
+                obs::sink()->error("ERROR [" + items[idx].path + "]: " + exc.what() + "\n");
+                obs::sink()->mark_error(idx);
                 failed++;
             }
             {

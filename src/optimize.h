@@ -12,6 +12,14 @@ enum class Verify {
     None,    // никакой проверки, замена сразу
 };
 
+// Режим выполнения сессии.
+enum class SessionMode {
+    OneShot,  // одноразовый прогон (llao.exe optimize): ошибка файла без
+              // --ignore-errors останавливает прогон
+    Daemon,   // долгоживущий демон: ошибки файлов не прерывают очередь
+              // (эквивалентно вечному --ignore-errors)
+};
+
 struct Options {
     std::vector<std::string> inputs;   // файлы/папки
     double jobs = 2.0;                 // число потоков: целое — как есть, вещественное — множитель ядер
@@ -27,6 +35,7 @@ struct Options {
     Verify verify = Verify::All;       // режим верификации кандидатов
     bool ignore_errors = false;        // ошибки файлов помечать skip, прогон не прерывать
     std::string tmp_dir;               // --tmp: путь к временной папке (пусто = exe_dir/tmp)
+    SessionMode mode = SessionMode::OneShot;  // режим выполнения сессии
 };
 
 struct Candidate {

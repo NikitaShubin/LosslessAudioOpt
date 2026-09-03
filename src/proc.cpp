@@ -52,6 +52,11 @@ std::string quote_arg(const std::string& a) {
 void cancel() { g_cancel.store(true, std::memory_order_relaxed); }
 bool cancelled() { return g_cancel.load(std::memory_order_relaxed); }
 
+void reset_cancel_and_abort() {
+    g_cancel.store(false, std::memory_order_relaxed);
+    g_abort.store(false, std::memory_order_relaxed);
+}
+
 void abort_all() { g_abort.store(true, std::memory_order_relaxed); }
 bool aborted() { return g_abort.load(std::memory_order_relaxed); }
 

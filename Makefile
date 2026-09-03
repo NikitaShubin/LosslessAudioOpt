@@ -21,6 +21,8 @@ SRCS := src/main.cpp \
         src/tags.cpp \
         src/status.cpp \
         src/screen.cpp \
+        src/obs.cpp \
+        src/status_sink.cpp \
         src/optimize.cpp \
         third_party/miniz/miniz.c
 
@@ -55,6 +57,9 @@ $(TARGET_BIN): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET_BIN) llao.exe llao-linux
+	rm -f $(OBJS) $(TARGET_BIN) llao.exe llao-linux test-unit
 
-.PHONY: all clean
+test-unit: tests/test_resource_manager.cpp
+	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
+
+.PHONY: all clean test-unit
