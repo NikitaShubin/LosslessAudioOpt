@@ -45,3 +45,10 @@ td.empty{color:#6b7280;text-align:center;padding:24px}
 .statusbar{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:space-between;padding:8px 12px;background:#1a1d24;border-top:1px solid #2a2f3a;color:#9aa3b2;font-size:12px}
 .conn.ok{color:#4ade80}.conn.err{color:#f87171}
 .seq{color:#6b7280}
+.muted{color:#6b7280}
+.saving{color:#86efac;font-size:12px}
+.drag-handle{cursor:grab;padding:4px 8px;color:#9aa3b2;user-select:none}
+.drag-handle:active{cursor:grabbing}
+tr.drag-over{background:#1e293b}
+.move-btns{display:inline-flex;gap:2px;margin-left:6px}
+.move-btns button{padding:2px 6px;font-size:12px}

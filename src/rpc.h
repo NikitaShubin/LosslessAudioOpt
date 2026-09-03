@@ -39,6 +39,13 @@ struct Daemon {
     // Снять файл из очереди (cancel-file). true если id существовал.
     virtual bool cancel_file(uint64_t id) = 0;
 
+    // Удалить файл из очереди (remove). Для pending/running — как cancel,
+    // для завершённых (ok/skip/error) — убрать строку из списка.
+    virtual bool remove(uint64_t id) = 0;
+
+    // Переупорядочить очередь (ids — новый порядок индексов файлов).
+    virtual bool reorder(const std::vector<size_t>& order) = 0;
+
     // Запрос остановки демона (graceful|force).
     virtual void request_shutdown(bool force) = 0;
 
