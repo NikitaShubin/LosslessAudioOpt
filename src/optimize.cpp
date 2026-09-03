@@ -1654,6 +1654,235 @@ void clear_session_tmp_dir(const std::string& custom) {
     clear_session_tmp_dir_impl(custom);
 }
 
+// ---------------------------------------------------------------------------
+// Engine: долгоживущий движок для демона (Phase 0).
+// Владеет копией Options, набором форматов, Runner + пулом воркеров.
+// Принимает файлы на лету (add), отдаёт снимок очереди (snapshot),
+// позволяет управлять очередью (remove/reorder/pause/resume) и завершает
+// воркеры (shutdown).
+// ---------------------------------------------------------------------------
+
+struct Engine::Impl {
+    Options opts;
+    std::vector<config::Format> fmts;
+    std::unique_ptr<report::Logger> logger;
+    Runner r;
+    std::vector<std::thread> threads;
+    std::string tmp;
+    int jobs = 1;
+    bool started = false;
+
+    // Загрузка конфигов и сортировка по статистике (общая для run() и демона).
+    bool load_formats(std::string* err) {
+        try {
+            fmts = config::load_all();
+        } catch (const std::exception& exc) {
+            if (err) *err = exc.what();
+            return false;
+        }
+        auto ranks = stats::ranking(stats::load());
+        std::stable_sort(fmts.begin(), fmts.end(), [&](const config::Format& a,
+                                                       const config::Format& b) {
+            double ra = -1.0, rb = -1.0;
+            for (const auto& rk : ranks) {
+                if (rk.format == a.id) ra = rk.savings;
+                if (rk.format == b.id) rb = rk.savings;
+            }
+            bool ha = ra >= 0.0, hb = rb >= 0.0;
+            if (ha != hb) return ha;
+            if (ha && hb) return ra > rb;
+            return false;
+        });
+        return true;
+    }
+
+    // Собирает входы в FileItems. Возвращает false, если не найдено ни одного.
+    bool collect(const std::vector<std::string>& inputs, std::vector<FileItem>& items,
+                 std::string* err) {
+        for (const auto& p : inputs) {
+            std::string e;
+            collect_files(p, items, &e);
+            if (!e.empty() && err && err->empty()) *err = e;
+        }
+        if (items.empty() && err && err->empty()) *err = "no audio files found";
+        return !items.empty();
+    }
+};
+
+Engine::Engine() : impl_(std::make_unique<Impl>()) {}
+Engine::~Engine() { shutdown(); }
+
+int Engine::init(const Options& opts, const std::vector<std::string>& initial_inputs,
+                 std::string* err) {
+    Impl& i = *impl_;
+    if (i.started) return 0;
+
+    // Демон всегда работает в режиме Daemon: ошибки файлов не прерывают
+    // очередь, воркеры живут до shutdown, а не до опустошения очереди.
+    i.opts = opts;
+    i.opts.mode = SessionMode::Daemon;
+
+    if (!i.load_formats(err)) return 1;
+
+    std::vector<FileItem> items;
+    i.collect(initial_inputs, items, nullptr);
+
+    i.jobs = resolve_jobs(i.opts.jobs, i.opts.jobs_float);
+
+    // Изолированный tmp-каталог демона (текущий PID).
+    clear_session_tmp_dir(i.opts.tmp_dir);
+    i.tmp = session_tmp_dir(i.opts.tmp_dir);
+
+    if (i.opts.debug)
+        i.logger = std::make_unique<report::Logger>(
+            util::join_path(util::exe_dir(), "runs"));
+
+    Runner& r = i.r;
+    r.opts = &i.opts;
+    r.fmts = &i.fmts;
+    r.logger = (i.logger && i.logger->ok()) ? i.logger.get() : nullptr;
+    r.ffprobe = media::find_ffprobe();
+    r.ffmpeg = media::find_ffmpeg();
+    r.tmp = i.tmp;
+    r.window = i.jobs;
+    r.rm.set_tmp_path(i.tmp);
+    r.rm.set_max_workers(i.jobs);
+
+    if (i.logger && i.logger->ok()) {
+        i.logger->event({{"type", "run_start"},
+                        {"jobs", i.jobs},
+                        {"files", (size_t)items.size()},
+                        {"dry_run", i.opts.dry_run},
+                        {"verify", verify_name(i.opts.verify)},
+                        {"ignore_errors", i.opts.ignore_errors},
+                        {"report", i.opts.report_path},
+                        {"machine_id", util::machine_id()},
+                        {"machine_cpu", util::machine_cpu()},
+                        {"machine_host", util::machine_host()}});
+    }
+
+    r.jobs.reserve(items.size());
+    for (const auto& it : items) {
+        size_t idx = r.jobs.size();
+        r.jobs.emplace_back();
+        r.make_job(r.jobs[idx], idx, it);
+    }
+    for (size_t k = 0; k < r.jobs.size(); k++)
+        obs::sink()->begin_file(r.jobs[k].idx, r.jobs[k].rel);
+    if (r.jobs.size() > 1) {
+        std::vector<size_t> idx(r.jobs.size());
+        std::vector<std::string> labels;
+        for (size_t k = 0; k < r.jobs.size(); k++) {
+            idx[k] = k;
+            labels.push_back(r.jobs[k].rel);
+        }
+        obs::sink()->files_added(idx, labels);
+    }
+
+    for (int t = 0; t < i.jobs; t++) i.threads.emplace_back(&Runner::worker, &r);
+    i.started = true;
+    return 0;
+}
+
+void Engine::add(const std::vector<std::string>& inputs) {
+    Impl& i = *impl_;
+    if (!i.started) return;
+    std::vector<FileItem> items;
+    i.collect(inputs, items, nullptr);
+    if (items.empty()) return;
+    i.r.append_files(items);
+}
+
+bool Engine::remove(size_t idx) {
+    Impl& i = *impl_;
+    if (!i.started) return false;
+    i.r.remove_file(idx);
+    return true;
+}
+
+bool Engine::reorder(const std::vector<size_t>& ids) {
+    Impl& i = *impl_;
+    if (!i.started) return false;
+    i.r.reorder(ids);
+    return true;
+}
+
+void Engine::pause() {
+    Impl& i = *impl_;
+    if (i.started) i.r.pause_queue();
+}
+
+void Engine::resume() {
+    Impl& i = *impl_;
+    if (i.started) i.r.resume_queue();
+}
+
+std::vector<EngineFile> Engine::snapshot() {
+    std::vector<EngineFile> out;
+    Impl& i = *impl_;
+    if (!i.started) return out;
+    std::lock_guard<std::mutex> lk(i.r.qm);
+    out.reserve(i.r.jobs.size());
+    for (size_t k = 0; k < i.r.jobs.size(); k++) {
+        const FileJob& j = i.r.jobs[k];
+        EngineFile e;
+        e.idx = j.idx;
+        e.path = j.path;
+        e.rel = j.rel;
+        e.completed = j.completed;
+        e.total_tasks = j.tasks.size();
+        if (j.m) {
+            std::lock_guard<std::mutex> jl(*j.m);
+            if (j.done) {
+                e.state = j.summary.status;
+                e.detail = j.summary.detail;
+                e.pct = j.summary.savings_pct;
+                e.original = j.summary.original;
+                e.best = j.summary.best;
+                e.best_format = j.summary.best_format;
+            } else if (j.cancelled) {
+                e.state = "removed";
+            } else if (j.prep_done) {
+                e.state = (j.released > 0) ? "running" : "queued";
+            } else {
+                e.state = "queued";
+            }
+        }
+        out.push_back(std::move(e));
+    }
+    return out;
+}
+
+size_t Engine::done_count() {
+    Impl& i = *impl_;
+    std::lock_guard<std::mutex> lk(i.r.qm);
+    return i.r.total_done;
+}
+
+size_t Engine::total_count() {
+    Impl& i = *impl_;
+    std::lock_guard<std::mutex> lk(i.r.qm);
+    return i.r.jobs.size();
+}
+
+void Engine::shutdown() {
+    Impl& i = *impl_;
+    if (!i.started) return;
+    i.r.shutdown_requested.store(true);
+    i.r.cv.notify_all();
+    for (auto& t : i.threads) {
+        if (t.joinable()) t.join();
+    }
+    i.threads.clear();
+    if (i.logger && i.logger->ok()) {
+        i.logger->event({{"type", "run_end"},
+                        {"done", i.r.total_done},
+                        {"failed", i.r.failed.load()}});
+    }
+    clear_session_tmp_dir(i.opts.tmp_dir);
+    i.started = false;
+}
+
 int run(const Options& opts) {
     std::vector<config::Format> fmts;
     try {
