@@ -1,0 +1,47 @@
+*{box-sizing:border-box}body{margin:0;font:14px/1.4 system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#0f1115;color:#e6e8eb}
+.hidden{display:none!important}
+.login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0f1115;z-index:10}
+.login-box{background:#1a1d24;padding:32px;border-radius:12px;max-width:480px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.4)}
+.login-box h1{margin:0 0 12px;font-size:22px}
+.login-box p{color:#9aa3b2;margin:8px 0}
+.login-box input{width:100%;padding:10px 12px;border:1px solid #2a2f3a;border-radius:8px;background:#0f1115;color:#e6e8eb;margin:12px 0}
+.login-box button{width:100%;padding:10px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+.login-box button:hover{background:#2563eb}
+.error{color:#f87171}
+.topbar{display:flex;align-items:center;gap:16px;padding:12px 16px;background:#1a1d24;border-bottom:1px solid #2a2f3a;flex-wrap:wrap}
+.topbar h1{margin:0;font-size:18px;flex:1}
+.counters{display:flex;gap:12px;color:#9aa3b2}
+.counters b{color:#e6e8eb}
+.top-actions button{padding:6px 10px;border:1px solid #2a2f3a;background:#0f1115;color:#e6e8eb;border-radius:6px;cursor:pointer}
+.panel{margin:16px;background:#1a1d24;border:1px solid #2a2f3a;border-radius:10px;padding:16px}
+.panel h2{margin:0 0 12px;font-size:15px;color:#9aa3b2}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row input[type=text]{flex:1;min-width:280px;padding:8px 10px;border:1px solid #2a2f3a;border-radius:8px;background:#0f1115;color:#e6e8eb}
+.chk{color:#9aa3b2;display:flex;gap:6px;align-items:center}
+button{padding:8px 12px;border:1px solid #2a2f3a;border-radius:8px;background:#2a2f3a;color:#e6e8eb;cursor:pointer}
+button:hover{border-color:#3b82f6}
+button.danger{background:#7f1d1d;border-color:#991b1b}
+button.danger:hover{background:#991b1b}
+.msg{min-height:18px;color:#9aa3b2;margin:8px 0 0}
+.msg.ok{color:#4ade80}.msg.err{color:#f87171}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #2a2f3a}
+th{color:#9aa3b2;font-weight:600;font-size:12px;text-transform:uppercase}
+td.empty{color:#6b7280;text-align:center;padding:24px}
+.chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600}
+.chip-queued{background:#374151;color:#d1d5db}
+.chip-prep{background:#1e40af;color:#bfdbfe}
+.chip-running{background:#0e7490;color:#a5f3fc}
+.chip-ok{background:#14532d;color:#86efac}
+.chip-skip{background:#422006;color:#fdba74}
+.chip-error{background:#7f1d1d;color:#fca5a5}
+.bar{width:120px;height:8px;background:#0f1115;border-radius:999px;overflow:hidden;border:1px solid #2a2f3a;display:inline-block;vertical-align:middle}
+.bar-fill{height:100%;background:#3b82f6;transition:width .3s}
+.tasks{display:flex;gap:4px;flex-wrap:wrap}
+.task-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.task-ok{background:#22c55e}.task-running{background:#06b6d4;animation:pulse 1s infinite}
+.task-failed{background:#ef4444}.task-pend{background:#374151}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.statusbar{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:space-between;padding:8px 12px;background:#1a1d24;border-top:1px solid #2a2f3a;color:#9aa3b2;font-size:12px}
+.conn.ok{color:#4ade80}.conn.err{color:#f87171}
+.seq{color:#6b7280}

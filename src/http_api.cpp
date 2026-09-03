@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "version.h"
+#include "web_assets.h"
 
 namespace dsvc {
 
@@ -68,8 +69,20 @@ uint64_t clamp_since(const std::string& s) {
 int mount(httplib::Server& svr, const ApiContext& ctx) {
     const std::string token = ctx.token;
 
-    // Страница логина/информации — единственный неавторизованный эндпоинт.
-    svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
+    // Инициализация встроенных веб-ассетов (zip → память через miniz).
+    std::string werr;
+    bool have_web = web_assets::init(&werr);
+    // Веб-UI — публичные эндпоинты (без авторизации): GET / и /static/* .
+
+    svr.Get("/", [have_web](const httplib::Request&, httplib::Response& res) {
+        if (have_web) {
+            const std::string* data = web_assets::get("index.html");
+            if (data) {
+                res.set_content(*data, "text/html; charset=utf-8");
+                return;
+            }
+        }
+        // Фолбэк, если ассеты не вшиты (dev-сборка без embed).
         res.set_content(
             "<!doctype html><html><head><meta charset=\"utf-8\">"
             "<title>LLAO daemon</title></head><body>"
@@ -78,8 +91,31 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
             LLAO_VERSION ".</p>"
             "<p>Управление через API с заголовком "
             "<code>Authorization: Bearer &lt;token&gt;</code>.</p>"
-            "<p>Web UI появится в следующей фазе.</p></body></html>",
+            "<p>Web UI: ассеты не вшиты — пересоберите с tools/embed_assets.py.</p></body></html>",
             "text/html; charset=utf-8");
+    });
+
+    // Статика: /static/<path> → файл из web/* (напр. /static/app.js → app.js).
+    svr.Get(R"(/static/(.*))", [have_web](const httplib::Request& req, httplib::Response& res) {
+        if (!have_web) {
+            res.status = 404;
+            res.set_content("Web assets not embedded", "text/plain");
+            return;
+        }
+        std::string sub = req.matches[1].str();
+        // Защита от path traversal.
+        if (sub.find("..") != std::string::npos) {
+            res.status = 400;
+            res.set_content("Bad path", "text/plain");
+            return;
+        }
+        const std::string* data = web_assets::get(sub);
+        if (!data) {
+            res.status = 404;
+            res.set_content("Not found", "text/plain");
+            return;
+        }
+        res.set_content(*data, web_assets::mime_type(sub));
     });
 
     svr.Post("/rpc", [ctx, token](const httplib::Request& req, httplib::Response& res) {

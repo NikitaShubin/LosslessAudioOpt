@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLAO daemon</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <div class="login-box">
+    <h1>LLAO daemon</h1>
+    <p>Введите токен доступа (Bearer). Токен показан при запуске демона и хранится в discovery-файле.</p>
+    <form id="login-form">
+      <input id="token-input" type="password" placeholder="токен (64 hex)" autocomplete="off" spellcheck="false">
+      <button type="submit">Войти</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header class="topbar">
+    <h1>LLAO daemon <span id="version"></span></h1>
+    <div class="counters">
+      <span>Всего: <b id="c-total">0</b></span>
+      <span>Готово: <b id="c-done">0</b></span>
+      <span>Ошибок: <b id="c-failed">0</b></span>
+    </div>
+    <div class="top-actions">
+      <button id="btn-logout" title="Сменить токен">Выйти</button>
+    </div>
+  </header>
+
+  <section class="panel add-panel">
+    <h2>Добавить</h2>
+    <form id="add-form" class="row">
+      <input id="add-path" type="text" placeholder="Путь на хосте демона, напр. Z:\music\album или /data/flac" spellcheck="false">
+      <label class="chk"><input id="add-recursive" type="checkbox" checked> рекурсивно</label>
+      <button type="submit">Добавить</button>
+    </form>
+    <p id="add-msg" class="msg"></p>
+  </section>
+
+  <section class="panel actions">
+    <button id="btn-cancel-all">Отменить все (пауза)</button>
+    <button id="btn-shutdown" class="danger">Выключить демон</button>
+  </section>
+
+  <section class="panel queue">
+    <h2>Очередь</h2>
+    <table id="queue-table">
+      <thead><tr><th>#</th><th>Файл</th><th>Состояние</th><th>Прогресс</th><th>Задачи</th><th></th></tr></thead>
+      <tbody id="queue-body"><tr><td colspan="6" class="empty">Очередь пуста</td></tr></tbody>
+    </table>
+  </section>
+
+  <footer class="statusbar">
+    <span id="conn-status" class="conn">Подключение...</span>
+    <span id="last-seq" class="seq"></span>
+  </footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

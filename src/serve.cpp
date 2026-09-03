@@ -383,9 +383,14 @@ int main(int argc, char** argv) {
     if (!disc_ok)
         std::fprintf(stderr, "WARNING: could not write discovery file %s\n", disc.c_str());
     std::fprintf(stdout, "LLAO daemon %s listening on %s:%d (pid %s)\n",
-                 LLAO_VERSION, bind.c_str(), port, pid.c_str());
+                  LLAO_VERSION, bind.c_str(), port, pid.c_str());
     std::fprintf(stdout, "Token: %s\n", token.c_str());
     if (disc_ok) std::fprintf(stdout, "Discovery: %s\n", disc.c_str());
+    if (bind == "0.0.0.0") {
+        std::fprintf(stderr,
+                     "WARNING: демон слушает на всех интерфейсах (0.0.0.0) — "
+                     "доступен из сети. Убедитесь, что токен надёжен.\n");
+    }
     std::fflush(stdout);
 
     // Блокирующий приём. svr.stop() (по RPC shutdown) прерывает listen и
