@@ -9,7 +9,7 @@
 // rpc — диспетчер команд управления демоном (§6.1 REFACTOR_TODO.md).
 // Платформонезависимый (nlohmann + ссылки на интерфейс Daemon): юнит-тестируется
 // нативно. Разбор/исполнение команд `POST /rpc` и поддержка `GET /api/formats`.
-namespace daemon {
+namespace dsvc {
 
 struct EngineFile;
 
@@ -51,4 +51,4 @@ struct Daemon {
 // {"ok":false,"code":"...","error":"..."}.
 nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& args);
 
-}  // namespace daemon
+}  // namespace dsvc

@@ -1,12 +1,16 @@
-# Makefile: сборка llao-linux (native) или llao.exe (Windows cross-compile).
+# Makefile: сборка llao (монолит) и llao-daemon (headless-демон с HTTP-API).
 #
-# Linux:   make TARGET=linux
-# Windows: make TARGET=windows  (по умолчанию)
+# Linux:   make TARGET=linux   -> llao-linux, llao-daemon-linux
+# Windows: make TARGET=windows -> llao.exe,  llao-daemon.exe (по умолчанию)
+#
+# Объектные файлы разделяются по таргетам (build/<target>/..): чередование
+# TARGET не требует make clean и исключает смешивание libcpp/libstdc++.
 
 TARGET ?= windows
 
-SRCS := src/main.cpp \
-        src/util.cpp \
+# Движок + инфраструктура демона (общие для монолита и демона).
+# main.cpp (монолит) и serve.cpp (демон) линкуются отдельно.
+ENGINE_SRCS := src/util.cpp \
         src/sha256.cpp \
         src/config.cpp \
         src/i18n.cpp \
@@ -24,40 +28,58 @@ SRCS := src/main.cpp \
         src/obs.cpp \
         src/status_sink.cpp \
         src/optimize.cpp \
+        src/events.cpp \
+        src/daemon_sink.cpp \
+        src/rpc.cpp \
+        src/http_api.cpp \
         third_party/miniz/miniz.c
 
 ifeq ($(TARGET),linux)
   CXX := g++
   CC := gcc
-  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc
+  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Ithird_party -Ithird_party/httplib -Isrc
   CFLAGS := -O2 -Ithird_party
   LDFLAGS := -lpthread
-  TARGET_BIN := llao-linux
+  MONO_BIN := llao-linux
+  DAEMON_BIN := llao-daemon-linux
 else
   CXX := x86_64-w64-mingw32-g++
   CC := x86_64-w64-mingw32-gcc
-  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc
-  CFLAGS := -O2 -Ithird_party
-  LDFLAGS := -static -static-libgcc -static-libstdc++ -lwinhttp
-  TARGET_BIN := llao.exe
+  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DWIN32_LEAN_AND_MEAN -Ithird_party -Ithird_party/httplib -Isrc
+  CFLAGS := -O2 -DWIN32_LEAN_AND_MEAN -Ithird_party
+  LDFLAGS := -static -static-libgcc -static-libstdc++ -lwinhttp -lws2_32 -lbcrypt -lshell32
+  MONO_BIN := llao.exe
+  DAEMON_BIN := llao-daemon.exe
 endif
 
-OBJS := $(SRCS:.cpp=.o)
-OBJS := $(OBJS:.c=.o)
+OBJDIR := build/$(TARGET)
+OBJS := $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(ENGINE_SRCS)))
+OBJS := $(patsubst third_party/%.c,$(OBJDIR)/%.o,$(filter %.c,$(ENGINE_SRCS))) $(OBJS)
+MONO_OBJS := $(OBJS) $(OBJDIR)/main.o
+DAEMON_OBJS := $(OBJS) $(OBJDIR)/serve.o
 
-all: $(TARGET_BIN)
+all: $(MONO_BIN) $(DAEMON_BIN)
 
-$(TARGET_BIN): $(OBJS)
+$(MONO_BIN): $(MONO_OBJS)
+	@mkdir -p build
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-%.o: %.cpp
+$(DAEMON_BIN): $(DAEMON_OBJS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+$(OBJDIR)/%.o: src/%.cpp
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-%.o: %.c
+$(OBJDIR)/%.o: third_party/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET_BIN) llao.exe llao-linux test-unit test-daemon-core
+	rm -rf build
+	rm -f llao.exe llao-linux llao-daemon.exe llao-daemon-linux
+	rm -f test-unit test-daemon-core
 
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<

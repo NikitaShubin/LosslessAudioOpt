@@ -1,6 +1,6 @@
 #include "daemon_sink.h"
 
-namespace daemon {
+namespace dsvc {
 
 void DaemonSink::init_session(size_t total) {
     ev_->push("session", {{"total", (size_t)total}});
@@ -63,4 +63,4 @@ void DaemonSink::files_added(const std::vector<size_t>& ids,
         ev_->push("added", {{"id", ids[k]}, {"label", labels[k]}});
 }
 
-}  // namespace daemon
+}  // namespace dsvc

@@ -9,11 +9,11 @@
 #include "daemon_sink.h"
 #include "rpc.h"
 
-using daemon::EventBuffer;
-using daemon::StateMirror;
-using daemon::Row;
-using daemon::DaemonSink;
-using daemon::Daemon;
+using dsvc::EventBuffer;
+using dsvc::StateMirror;
+using dsvc::Row;
+using dsvc::DaemonSink;
+using dsvc::Daemon;
 
 static int failures = 0;
 
@@ -135,6 +135,7 @@ struct FakeDaemon : Daemon {
     void set_paused(bool p) override { paused_flag = p; }
     void add(const std::vector<std::string>& paths, bool recursive,
              nlohmann::json& result) override {
+        (void)recursive;
         for (const auto& p : paths) {
             if (p == "/missing")
                 result["rejected"].push_back({{"path", p}, {"reason", "not found"}});
@@ -158,42 +159,42 @@ struct FakeDaemon : Daemon {
 static void test_rpc() {
     FakeDaemon d;
 
-    auto ping = daemon::call(d, "ping", nlohmann::json::object());
+    auto ping = dsvc::call(d, "ping", nlohmann::json::object());
     CHECK(ping["ok"] == true);
     CHECK(ping["result"]["version"] == "1.10.2-dev");
     CHECK(ping["result"]["uptime_s"] == 42.0);
     CHECK(ping["result"]["queue"]["total"] == 10);
 
-    auto add = daemon::call(d, "add", {{"paths", {"a.flac", "/missing"}}});
+    auto add = dsvc::call(d, "add", {{"paths", {"a.flac", "/missing"}}});
     CHECK(add["ok"] == true);
     CHECK(add["result"]["added"].size() == 1);
     CHECK(add["result"]["rejected"].size() == 1);
     CHECK(add["result"]["rejected"][0]["reason"] == "not found");
 
-    auto cancel = daemon::call(d, "cancel-file", {{"id", 3}});
+    auto cancel = dsvc::call(d, "cancel-file", {{"id", 3}});
     CHECK(cancel["ok"] == true);
     CHECK(d.cancelled_id == 3);
 
-    auto ca = daemon::call(d, "cancel-all", nlohmann::json::object());
+    auto ca = dsvc::call(d, "cancel-all", nlohmann::json::object());
     CHECK(ca["result"]["paused"] == true);
     CHECK(d.paused_flag == true);
 
-    auto resume = daemon::call(d, "resume", nlohmann::json::object());
+    auto resume = dsvc::call(d, "resume", nlohmann::json::object());
     CHECK(resume["result"]["paused"] == false);
     CHECK(d.paused_flag == false);
 
-    auto sd = daemon::call(d, "shutdown", {{"force", true}});
+    auto sd = dsvc::call(d, "shutdown", {{"force", true}});
     CHECK(sd["ok"] == true);
     CHECK(d.shut_force == true);
 
-    auto fmt = daemon::call(d, "formats", nlohmann::json::object());
+    auto fmt = dsvc::call(d, "formats", nlohmann::json::object());
     CHECK(fmt["result"]["formats"][0]["id"] == "flac");
 
-    auto unk = daemon::call(d, "nope", nlohmann::json::object());
+    auto unk = dsvc::call(d, "nope", nlohmann::json::object());
     CHECK(unk["ok"] == false);
     CHECK(unk["code"] == "unknown_cmd");
 
-    auto bad = daemon::call(d, "ping", nlohmann::json::array());
+    auto bad = dsvc::call(d, "ping", nlohmann::json::array());
     CHECK(bad["ok"] == false);
     CHECK(bad["code"] == "bad_args");
 }

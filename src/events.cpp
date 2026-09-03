@@ -1,6 +1,6 @@
 #include "events.h"
 
-namespace daemon {
+namespace dsvc {
 
 void EventBuffer::push(const std::string& type, nlohmann::json args) {
     if (args.is_null()) args = nlohmann::json::object();
@@ -77,4 +77,4 @@ size_t StateMirror::size() const {
     return rows_.size();
 }
 
-}  // namespace daemon
+}  // namespace dsvc

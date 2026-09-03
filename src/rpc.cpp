@@ -5,7 +5,7 @@
 
 #include "util.h"
 
-namespace daemon {
+namespace dsvc {
 
 namespace {
 
@@ -87,4 +87,4 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
     return err("unknown_cmd", "unknown command: " + cmd);
 }
 
-}  // namespace daemon
+}  // namespace dsvc
