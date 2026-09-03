@@ -538,6 +538,7 @@ struct FileJob {
     size_t released = 0;
     size_t completed = 0;
     bool prep_done = false;
+    bool prep_running = false;  // prep активно выполняется в worker (под g_qm)
     bool done = false;
     bool cancelled = false;  // файл снят из очереди (remove/cancel-file): не запускать
 
@@ -739,7 +740,7 @@ struct Runner {
         if (idx >= jobs.size()) return;
         FileJob& j = jobs[idx];
         if (j.done) return;
-        if (!j.prep_done && j.released == 0) {
+        if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
             j.cancelled = true;
             j.done = true;
@@ -873,6 +874,7 @@ struct Runner {
                     j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
                     if (rm.request_disk(j.peak_file).status == ResourceRequest::Status::Granted) {
                         j.deferred = false;
+                        j.prep_running = true;
                         rm.on_prep_started();
                         prep_active++;
                         *w = {WorkKind::Prep, i, 0};
@@ -883,6 +885,7 @@ struct Runner {
             size_t i;
             if (find_next_prep_locked(&i)) {
                 if (next_prep < jobs.size()) next_prep = i + 1;
+                jobs[i].prep_running = true;
                 rm.on_prep_started();
                 prep_active++;
                 *w = {WorkKind::Prep, i, 0};
@@ -935,7 +938,7 @@ struct Runner {
                     probe = media::probe_file(ref_wav, ffprobe);
                     if (proc::aborted()) {
                         release_deferred_budget();
-                        j.session->cleanup();
+                        if (j.session) j.session->cleanup();
                         return;
                     }
                     if (probe.ok) {
@@ -946,7 +949,7 @@ struct Runner {
                 }
             }
             if (!probe.ok) {
-                j.session->cleanup();
+                if (j.session) j.session->cleanup();
                 if (proc::aborted()) { release_deferred_budget(); return; }
                 j.summary.path = j.path;
                 j.summary.status = "error";
@@ -1035,12 +1038,12 @@ struct Runner {
         if (!decoded) decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr);
         if (proc::aborted()) {
             release_deferred_budget();
-            j.session->cleanup();
+            if (j.session) j.session->cleanup();
             return;
         }
         if (!decoded) {
             release_deferred_budget();
-            j.session->cleanup();
+            if (j.session) j.session->cleanup();
             j.summary.path = j.path;
             j.summary.status = "error";
             j.summary.detail = i18n::str("decode to reference WAV: ") + derr;
@@ -1584,6 +1587,7 @@ struct Runner {
                     std::lock_guard<std::mutex> lk(qm);
                     FileJob& j = jobs[w.idx];
                     j.prep_done = true;
+                    j.prep_running = false;
                     if (prep_active > 0) prep_active--;
                     if (j.tasks.empty() || j.cancelled) {
                         j.done = true;

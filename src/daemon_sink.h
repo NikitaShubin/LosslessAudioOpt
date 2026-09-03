@@ -8,7 +8,7 @@
 // Реализация obs::Sink для headless-демона: транслирует события движка в
 // кольцевой буфер (EventBuffer) и зеркало состояния очереди (StateMirror).
 // Потокобезопасна (буфер и зеркало сами мутексируются удобно движком).
-namespace daemon {
+namespace dsvc {
 
 class DaemonSink final : public obs::Sink {
 public:
@@ -32,4 +32,4 @@ private:
     StateMirror* st_ = nullptr;
 };
 
-}  // namespace daemon
+}  // namespace dsvc

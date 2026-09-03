@@ -14,7 +14,7 @@
 // диспетчером команд (rpc) и HTTP-обработчиками (http_api).
 //
 // Модуль платформонезависимый (только нити + nlohmann) — юнит-тестируется нативно.
-namespace daemon {
+namespace dsvc {
 
 // Событие буфера: монотонный seq + тип + аргументы (JSON).
 struct Event {
@@ -82,4 +82,4 @@ private:
     std::map<size_t, Row> rows_;
 };
 
-}  // namespace daemon
+}  // namespace dsvc
