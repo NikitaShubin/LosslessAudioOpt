@@ -55,8 +55,11 @@ endif
 OBJDIR := build/$(TARGET)
 OBJS := $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(ENGINE_SRCS)))
 OBJS := $(patsubst third_party/%.c,$(OBJDIR)/%.o,$(filter %.c,$(ENGINE_SRCS))) $(OBJS)
-MONO_OBJS := $(OBJS) $(OBJDIR)/main.o
-DAEMON_OBJS := $(OBJS) $(OBJDIR)/serve.o
+# Веб-ассеты вшиваются только в демона.
+WEB_ASSETS_SRCS := src/web_assets.cpp src/web_assets_data.cpp
+WEB_ASSETS_OBJS := $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(WEB_ASSETS_SRCS))
+MONO_OBJS := $(OBJS) $(OBJDIR)/main.o $(WEB_ASSETS_OBJS)
+DAEMON_OBJS := $(OBJS) $(OBJDIR)/serve.o $(WEB_ASSETS_OBJS)
 
 all: $(MONO_BIN) $(DAEMON_BIN)
 
@@ -86,5 +89,9 @@ test-unit: tests/test_resource_manager.cpp
 
 test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
+
+# Генерация встроенных веб-ассетов (zip → C++ массив).
+src/web_assets_data.cpp: web/index.html web/app.js web/style.css tools/embed_assets.py
+	python3 tools/embed_assets.py
 
 .PHONY: all clean test-unit test-daemon-core
