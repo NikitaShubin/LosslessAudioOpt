@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,67 @@ struct FileResult {
 
 // Полный перебор форматов для каждого входного файла. Возвращает код выхода.
 int run(const Options& opts);
+
+// --- Движок для демона (долгоживущий, пополняемая очередь) ---
+
+// Строка очереди для снимка состояния.
+struct EngineFile {
+    size_t idx = 0;
+    std::string path;
+    std::string rel;
+    std::string state;   // queued | prep | running | ok | skip | error | removed
+    size_t completed = 0;  // выполнено задач (вариантов)
+    size_t total_tasks = 0;  // всего задач файла (0 до prep)
+    double pct = 0.0;     // выигрыш в сжатии (после ok)
+    uint64_t original = 0;
+    uint64_t best = 0;
+    std::string best_format;
+    std::string detail;  // текст ошибки/иесключения при skip/error
+};
+
+// Движок оптимизации: держит Runner + пул воркеров, принимает файлы на лету,
+// отдаёт снимок очереди. Реализация (pimpl) — в optimize.cpp.
+class Engine {
+public:
+    Engine();
+    ~Engine();
+    Engine(const Engine&) = delete;
+    Engine& operator=(const Engine&) = delete;
+
+    // Инициализация: загрузка конфигов, ранжирование форматов, tmp-каталог,
+    // запуск пула воркеров. opts копируются внутрь (движок владеет копией).
+    // initial_inputs могут быть пусты (демон добавляет файлы позже через add).
+    // Возвращает 0 при успехе, иначе код ошибки (сообщение в err).
+    int init(const Options& opts, const std::vector<std::string>& initial_inputs,
+             std::string* err);
+
+    // Добавить файлы/папки в очередь на лету.
+    void add(const std::vector<std::string>& inputs);
+
+    // Снять файл из очереди (pending — сразу, running — дорабатывает).
+    bool remove(size_t idx);
+
+    // Переупорядочить очередь (ids — новый порядок индексов файлов).
+    bool reorder(const std::vector<size_t>& ids);
+
+    // Пауза/продолжение всей очереди.
+    void pause();
+    void resume();
+
+    // Снимок состояния всех файлов очереди.
+    std::vector<EngineFile> snapshot();
+
+    // Число завершённых файлов и оставшихся.
+    size_t done_count();
+    size_t total_count();
+
+    // Запрашивает graceful shutdown воркеров и ждёт их завершения.
+    void shutdown();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 struct RestoreOptions {
     std::vector<std::string> inputs;   // файлы/папки
