@@ -20,6 +20,7 @@
 #include "out.h"
 #include "proc.h"
 #include "stats.h"
+#include "status_sink.h"
 #include "tool.h"
 #include "util.h"
 
@@ -353,6 +354,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #endif
 
     try {
+        install_status_sink();  // движок эмитит события через obs::sink() -> статусбар
         std::vector<std::string> args;
 #ifdef _WIN32
         args = wide_argv();
