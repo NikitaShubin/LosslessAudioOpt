@@ -57,9 +57,12 @@ $(TARGET_BIN): $(OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET_BIN) llao.exe llao-linux test-unit
+	rm -f $(OBJS) $(TARGET_BIN) llao.exe llao-linux test-unit test-daemon-core
 
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
 
-.PHONY: all clean test-unit
+test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp
+	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
+
+.PHONY: all clean test-unit test-daemon-core
