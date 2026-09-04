@@ -773,7 +773,7 @@ struct Runner {
         std::vector<std::unique_ptr<FileJob>> reordered;
         reordered.reserve(jobs.size());
         for (size_t id : ids) reordered.push_back(std::move(jobs[id]));
-        for (size_t i = 0; i < reordered.size(); i++) reordered[i]->idx = i;
+        // idx — стабильный id файла, не переназначаем; порядок — порядок вектора
         jobs = std::move(reordered);
         next_prep = 0;  // курсор переинициализируется (find_next_prep всё равно сканирует)
         cv.notify_all();
@@ -843,7 +843,8 @@ struct Runner {
     enum class WorkKind { None, Prep, Variant };
     struct Work {
         WorkKind kind = WorkKind::None;
-        size_t idx = 0;
+        size_t idx = 0;        // стабильный id файла (FileJob::idx)
+        FileJob* job = nullptr; // указатель на FileJob (стабильный heap-адрес)
         size_t task = 0;
     };
 
@@ -862,7 +863,7 @@ struct Runner {
                 uint64_t vpeak = variant_peak_bytes(j.ref_size, opts->verify);
                 if (rm.request_disk(vpeak).status != ResourceRequest::Status::Granted) continue;
             }
-            *w = {WorkKind::Variant, i, j.released};
+            *w = {WorkKind::Variant, j.idx, jobs[i].get(), j.released};
             jobs[i]->released++;
             return true;
         }
@@ -877,7 +878,7 @@ struct Runner {
                         j.prep_running = true;
                         rm.on_prep_started();
                         prep_active++;
-                        *w = {WorkKind::Prep, i, 0};
+                        *w = {WorkKind::Prep, j.idx, jobs[i].get(), 0};
                         return true;
                     }
                 }
@@ -888,7 +889,7 @@ struct Runner {
                 jobs[i]->prep_running = true;
                 rm.on_prep_started();
                 prep_active++;
-                *w = {WorkKind::Prep, i, 0};
+                *w = {WorkKind::Prep, jobs[i]->idx, jobs[i].get(), 0};
                 return true;
             }
         }
@@ -1568,13 +1569,13 @@ struct Runner {
                 obs::sink()->prep(w.idx);
                 std::string perr;
                 try {
-                    prep_file(*jobs[w.idx]);
+                    prep_file(*w.job);
                 } catch (const std::exception& exc) {
                     perr = exc.what();
                 }
                 if (proc::cancelled() || proc::aborted()) break;  // отмена — счётчики не трогаем, tmp почистит main
                 if (!perr.empty()) {
-                    FileJob& j = *jobs[w.idx];
+                    FileJob& j = *w.job;
                     std::lock_guard<std::mutex> jl(*j.m);
                     j.summary.path = j.path;
                     j.summary.status = "error";
@@ -1582,10 +1583,9 @@ struct Runner {
                             obs::sink()->error("ERROR [" + j.path + "]: " + perr + "\n");
                 }
                 bool finish_now = false;
-                size_t n_tasks = 0;
                 {
                     std::lock_guard<std::mutex> lk(qm);
-                    FileJob& j = *jobs[w.idx];
+                    FileJob& j = *w.job;
                     j.prep_done = true;
                     j.prep_running = false;
                     if (prep_active > 0) prep_active--;
@@ -1593,18 +1593,26 @@ struct Runner {
                         j.done = true;
                         total_done++;
                         finish_now = true;
-                    } else {
-                        n_tasks = j.tasks.size();
                     }
                     cv.notify_all();
                 }
-                if (!finish_now) obs::sink()->set_tasks(w.idx, n_tasks);
-                if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(*jobs[w.idx]);
+                if (!finish_now) {
+                    FileJob& job = *w.job;
+                    std::vector<obs::TaskInfo> infos;
+                    infos.reserve(job.tasks.size());
+                    for (auto& td : job.tasks) {
+                        const auto& f = (*fmts)[td.fmt_idx];
+                        const auto& v = f.variants[td.variant_idx];
+                        infos.push_back({f.id, v.id, v.args, v.note});
+                    }
+                    obs::sink()->set_tasks(w.idx, infos);
+                }
+                if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(*w.job);
             } else {
                 std::string verr;
                 VariantOutcome oc = VariantOutcome::Failed;
                 try {
-                    oc = run_variant(*jobs[w.idx], w.task);
+                    oc = run_variant(*w.job, w.task);
                 } catch (const std::exception& exc) {
                     verr = exc.what();
                 }
@@ -1614,7 +1622,7 @@ struct Runner {
                 // задачи, а файл ниже финализируется как ошибка (см. finalize_file).
                 if (!opts->ignore_errors && opts->mode != SessionMode::Daemon &&
                     (oc == VariantOutcome::Failed || !verr.empty())) {
-                    count_error(*jobs[w.idx]);
+                    count_error(*w.job);
                 }
                 obs::sink()->task(w.idx, w.task,
                              oc == VariantOutcome::Ok ? obs::TaskState::Ok
@@ -1622,7 +1630,7 @@ struct Runner {
                 bool last = false;
                 {
                     std::lock_guard<std::mutex> lk(qm);
-                    FileJob& j = *jobs[w.idx];
+                    FileJob& j = *w.job;
                     if (!verr.empty()) {
                         std::lock_guard<std::mutex> jl(*j.m);
                         j.failures.push_back("variant: " + verr);
@@ -1646,7 +1654,7 @@ struct Runner {
                     }
                     cv.notify_all();
                 }
-                if (last && !proc::cancelled() && !proc::aborted()) finalize_file(*jobs[w.idx]);
+                if (last && !proc::cancelled() && !proc::aborted()) finalize_file(*w.job);
             }
         }
     }

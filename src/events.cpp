@@ -58,6 +58,13 @@ void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
     rows_[id].tasks = std::move(tasks);
 }
 
+void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
+    std::lock_guard<std::mutex> lk(m_);
+    auto& r = rows_[id];
+    r.task_infos = infos;
+    r.tasks.assign(infos.size(), "pend");
+}
+
 void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
     auto& r = rows_[id];

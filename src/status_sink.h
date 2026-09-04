@@ -12,6 +12,9 @@ public:
     }
     void prep(size_t idx) override { status::prep(idx); }
     void set_tasks(size_t idx, size_t total) override { status::set_tasks(idx, total); }
+    void set_tasks(size_t idx, const std::vector<obs::TaskInfo>& infos) override {
+        status::set_tasks(idx, infos.size());
+    }
     void task(size_t idx, size_t task_idx, obs::TaskState st) override {
         status::task(idx, task_idx, static_cast<status::TaskState>(st));
     }
