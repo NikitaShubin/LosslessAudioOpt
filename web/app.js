@@ -434,6 +434,19 @@ chkAll && chkAll.addEventListener("change", ()=>{
   });
   updateSelectionUI();
 });
+const btnExpand = el("btn-expand"), queuePanel = el("queue-panel");
+function setExpanded(on) {
+  if (!queuePanel || !btnExpand) return;
+  queuePanel.classList.toggle("expanded", on);
+  btnExpand.title = on ? "Свернуть" : "Развернуть на весь экран";
+}
+btnExpand && btnExpand.addEventListener("click", ()=>{
+  setExpanded(queuePanel ? !queuePanel.classList.contains("expanded") : false);
+});
+document.addEventListener("keydown", (e)=>{
+  if (e.key === "Escape" && queuePanel && queuePanel.classList.contains("expanded"))
+    setExpanded(false);
+});
 el("btn-shutdown").addEventListener("click", async ()=>{
   if(!confirm("Выключить демон? Обработка активных файлов завершится, затем демон остановится.")) return;
   try{ await rpc("shutdown", {}); setConn(false,"Демон выключается..."); }catch(e){ opmsg(e.message, "err"); }

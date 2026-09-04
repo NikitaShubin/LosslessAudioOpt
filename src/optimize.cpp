@@ -741,15 +741,25 @@ struct Runner {
     }
     bool is_paused() const { return queue_paused.load(); }
 
-    // Снимает файл из очереди (remove/cancel-file). Для файла, ещё не
-    // запущенного (pending: не в prep, задач не выпущено) — немедленно
-    // завершает его (done + skip, tmp чистится). Для уже запущенного —
-    // помечает cancelled: новые задачи не запускаются, текущие дорабатывают.
-    // Вызывается вне qm.
+    // Позиция задания по стабильному idx (FileJob::idx). Внешние команды
+    // (remove/cancel) оперируют idx, а не позициями: после reorder они
+    // различаются. Вызывать под qm. Возвращает SIZE_MAX, если нет.
+    size_t find_pos_locked(size_t idx) const {
+        for (size_t p = 0; p < jobs.size(); p++)
+            if (jobs[p]->idx == idx) return p;
+        return SIZE_MAX;
+    }
+
+    // Снимает файл из очереди (remove/cancel-file). idx — стабильный id.
+    // Для файла, ещё не запущенного (pending: не в prep, задач не выпущено)
+    // — немедленно завершает его (done + skip, tmp чистится). Для уже
+    // запущенного — помечает cancelled: новые задачи не запускаются,
+    // активные процессы убиваются через kill_requested. Вызывается вне qm.
     void remove_file(size_t idx) {
         std::lock_guard<std::mutex> lk(qm);
-        if (idx >= jobs.size()) return;
-        FileJob& j = *jobs[idx];
+        size_t pos = find_pos_locked(idx);
+        if (pos == SIZE_MAX) return;
+        FileJob& j = *jobs[pos];
         if (j.done) return;
         if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
@@ -762,7 +772,7 @@ struct Runner {
             j.session.reset();
             total_done++;
             cv.notify_all();
-            obs::sink()->mark_skip(idx);
+            obs::sink()->mark_skip(j.idx);
         } else {
             // запущен: запрещаем новые задачи, активные процессы убиваем
             // мгновенно через kill_requested (проверяется в proc::run).
@@ -873,6 +883,12 @@ struct Runner {
         size_t idx = 0;        // стабильный id файла (FileJob::idx)
         FileJob* job = nullptr; // указатель на FileJob (стабильный heap-адрес)
         size_t task = 0;
+        // Резерв дискового бюджета, выданный этой задаче (variant_peak).
+        // Освобождается ровно один раз при её завершении — учёт точный
+        // при любом чередовании воркеров (раньше release пропускался для
+        // последней задачи, а reserve зависел от jf в момент взятия —
+        // бюджет утекал и очередь вставала навсегда).
+        uint64_t disk_reserved = 0;
     };
 
     // Вызывается под qm. Свободный воркер берёт очередной незанятый вариант.
@@ -885,12 +901,14 @@ struct Runner {
         for (size_t i = 0; i < jobs.size(); i++) {
             FileJob& j = *jobs[i];
             if (!rm.can_start_new_variant(j, window, false)) continue;
+            uint64_t reserved = 0;
             size_t jf = j.released - j.completed;
             if (jf > 0 && j.ref_size > 0) {
                 uint64_t vpeak = variant_peak_bytes(j.ref_size, opts->verify);
                 if (rm.request_disk(vpeak).status != ResourceRequest::Status::Granted) continue;
+                reserved = vpeak;
             }
-            *w = {WorkKind::Variant, j.idx, jobs[i].get(), j.released};
+            *w = {WorkKind::Variant, j.idx, jobs[i].get(), j.released, reserved};
             jobs[i]->released++;
             return true;
         }
@@ -1703,6 +1721,13 @@ struct Runner {
                                     obs::sink()->error("ERROR [" + j.path + "]: " + verr + "\n");
                     }
                     j.completed++;
+                    // Резерв этой задачи возвращается всегда и ровно один раз
+                    // (см. take_work_locked) — в т.ч. для последней задачи
+                    // файла, иначе бюджет утекает и очередь встаёт навсегда.
+                    if (w.disk_reserved > 0) {
+                        rm.release_disk(w.disk_reserved);
+                        w.disk_reserved = 0;
+                    }
                     // Файл завершён, когда обработаны все задачи — либо, если
                     // он снят из очереди (cancelled), когда обработаны все
                     // уже выпущенные задачи (остальные не будут запущены).
@@ -1711,11 +1736,6 @@ struct Runner {
                         j.done = true;
                         total_done++;
                         last = true;
-                    } else if (j.ref_size > 0) {
-                        // Освобождаем задачевый бюджет для завершённого варианта.
-                        // Первый воркер работал в рамках файлового бюджета,
-                        // все остальные получили variant_peak — освобождаем.
-                        rm.release_disk(variant_peak_bytes(j.ref_size, opts->verify));
                     }
                     cv.notify_all();
                 }
