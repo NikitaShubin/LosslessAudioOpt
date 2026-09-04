@@ -143,7 +143,8 @@ std::string find_recursive(const std::string& root, const std::string& name) {
 
 // Возвращает путь к бинарнику либо пустую строку; message — статус/предупреждение.
 std::string prepare_entry(const config::Format& fmt, const config::DownloadEntry& entry,
-                          std::string* message) {
+                          std::string* message,
+                          const std::atomic<bool>* kill = nullptr) {
     const std::string& fmt_id = fmt.id;
     const std::string& kind = entry.kind;
     if (entry.url.empty()) {
@@ -205,7 +206,8 @@ std::string prepare_entry(const config::Format& fmt, const config::DownloadEntry
         }
         std::string outdir = util::join_path(tmp, "extract");
         util::mkdirs(outdir);
-        proc::Result xr = proc::run({sevenz, "x", "-y", archive_path, "-o" + outdir}, 300);
+        proc::Result xr = proc::run({sevenz, "x", "-y", archive_path, "-o" + outdir}, 300,
+                                        "", {}, kill);
         if (!xr.started || xr.exit_code != 0) {
             throw config::Error("[" + fmt_id + "] " +
                                 i18n::fmt("extracting %s via 7-Zip failed (code %d)",
@@ -276,11 +278,12 @@ std::string prepare_entry(const config::Format& fmt, const config::DownloadEntry
     return dest;
 }
 
-void cli_check(const config::Format& fmt, const std::string& binary, std::string* message) {
+void cli_check(const config::Format& fmt, const std::string& binary, std::string* message,
+                const std::atomic<bool>* kill = nullptr) {
     if (!fmt.cli_check.present) return;
     std::vector<std::string> args = {binary};
     args.insert(args.end(), fmt.cli_check.cmd.begin(), fmt.cli_check.cmd.end());
-    proc::Result r = proc::run(args, 60);
+    proc::Result r = proc::run(args, 60, "", {}, kill);
     std::string out = util::to_lower(r.output);
     std::vector<std::string> missing;
     for (const auto& exp : fmt.cli_check.expect) {
@@ -300,7 +303,8 @@ void cli_check(const config::Format& fmt, const std::string& binary, std::string
 
 }  // namespace
 
-Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix) {
+Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix,
+              const std::atomic<bool>* kill) {
     Status st;
 
     auto try_existing = [&]() -> bool {
@@ -308,14 +312,14 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
         if (!cached.empty()) {
             st.path = cached;
             st.status = "cache";
-            cli_check(fmt, cached, &st.message);
+            cli_check(fmt, cached, &st.message, kill);
             return true;
         }
         std::string inpath = in_path(fmt);
         if (!inpath.empty()) {
             st.path = inpath;
             st.status = "path";
-            cli_check(fmt, inpath, &st.message);
+            cli_check(fmt, inpath, &st.message, kill);
             return true;
         }
         return false;
@@ -335,13 +339,13 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
     for (const auto& entry : entries) {
         try {
             std::string message;
-            std::string path = prepare_entry(fmt, entry, &message);
+            std::string path = prepare_entry(fmt, entry, &message, kill);
             if (!path.empty()) {
                 util::write_text(util::join_path(cache_dir(fmt), ".binary"), path);
                 st.path = path;
                 st.status = "downloaded";
                 st.message = message;
-                cli_check(fmt, path, &st.message);
+                cli_check(fmt, path, &st.message, kill);
                 return st;
             }
             if (!message.empty()) {

@@ -72,7 +72,8 @@ static std::string strip_ffprobe_json(const std::string& s) {
     return out;
 }
 
-Probe probe_file(const std::string& path, const std::string& ffprobe) {
+Probe probe_file(const std::string& path, const std::string& ffprobe,
+                   const std::atomic<bool>* kill) {
     Probe p;
     std::string bin = ffprobe.empty() ? find_ffprobe() : ffprobe;
     if (bin.empty()) {
@@ -85,7 +86,7 @@ Probe probe_file(const std::string& path, const std::string& ffprobe) {
     }
     proc::Result r = proc::run({bin, "-v", "error", "-print_format", "json",
                                 "-show_format", "-show_streams", path},
-                               120);
+                               120, "", {}, kill);
     if (!r.started) {
         p.error = i18n::str("could not launch ffprobe: ") + r.error;
         return p;

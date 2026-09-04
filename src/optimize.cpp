@@ -368,7 +368,8 @@ static DecodeStatus decode_source_native(const config::Format* src_fmt, const st
                                          const std::string& out_wav, int bits,
                                          const std::atomic<bool>* kill = nullptr) {
     if (!src_fmt) return DecodeStatus::Failed;
-    tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
+    tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ", kill);
+    if (kill && kill->load(std::memory_order_relaxed)) return DecodeStatus::Failed;
     if (sst.path.empty()) return DecodeStatus::Failed;
 
     // Создаём алиас: symlink → hardlink → оригинал.
@@ -967,8 +968,11 @@ struct Runner {
         std::string ref_wav = j.session->ref_wav_path();
         bool src_decoded = false;
 
-        media::Probe probe = media::probe_file(j.path, ffprobe);
-        if (proc::aborted()) { release_deferred_budget(); return; }
+        media::Probe probe = media::probe_file(j.path, ffprobe, &j.kill_requested);
+        if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
+            release_deferred_budget();
+            return;
+        }
         if (!probe.ok) {
             const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
             if (src_fmt && src_fmt->id != probe.format_name) {
@@ -981,8 +985,8 @@ struct Runner {
                     }
                 }
                 if (ds == DecodeStatus::Ok) {
-                    probe = media::probe_file(ref_wav, ffprobe);
-                    if (proc::aborted()) {
+                    probe = media::probe_file(ref_wav, ffprobe, &j.kill_requested);
+                    if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
                         release_deferred_budget();
                         if (j.session) j.session->cleanup();
                         return;
@@ -996,7 +1000,10 @@ struct Runner {
             }
             if (!probe.ok) {
                 if (j.session) j.session->cleanup();
-                if (proc::aborted()) { release_deferred_budget(); return; }
+                if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
+                    release_deferred_budget();
+                    return;
+                }
                 j.summary.path = j.path;
                 j.summary.status = "error";
                 j.summary.detail = probe.error;
@@ -1122,6 +1129,11 @@ struct Runner {
 
         // Задачи: формат + вариант. Порядок = детерминированный тай-брейк.
         for (size_t fi = 0; fi < fmts.size(); fi++) {
+            if (j.kill_requested.load(std::memory_order_relaxed)) {
+                release_deferred_budget();
+                if (j.session) j.session->cleanup();
+                return;
+            }
             const config::Format& f = fmts[fi];
             if (!f.enabled) continue;
             if (!opts.formats.empty() &&
@@ -1146,7 +1158,13 @@ struct Runner {
                 continue;
             }
 
-            tool::Status st = tool::ensure(f, !opts.no_download, "[" + f.id + "] ");
+            tool::Status st =
+                tool::ensure(f, !opts.no_download, "[" + f.id + "] ", &j.kill_requested);
+            if (j.kill_requested.load(std::memory_order_relaxed)) {
+                release_deferred_budget();
+                if (j.session) j.session->cleanup();
+                return;
+            }
             if (st.path.empty()) {
                 j.failures.push_back(f.id + ": " + i18n::str("utility unavailable") + " (" +
                                      st.status + ")");

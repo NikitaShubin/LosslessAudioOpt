@@ -33,7 +33,8 @@ struct Probe {
 bool codec_is_lossless(const std::string& codec_name);
 
 // Анализ файла через ffprobe.exe. ffprobe — путь к ffprobe (пусто = поиск в PATH).
-Probe probe_file(const std::string& path, const std::string& ffprobe);
+Probe probe_file(const std::string& path, const std::string& ffprobe,
+                   const std::atomic<bool>* kill = nullptr);
 
 // Декод в эталонный WAV через ffmpeg.exe. Битность берётся из пробы
 // (16/24/32; не более глубины исходника). Путь к ffmpeg — как в конфиге.
