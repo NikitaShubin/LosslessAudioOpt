@@ -209,18 +209,22 @@ def main():
         check(isinstance(st.get("rows"), list), "daemon alive after bad input")
 
         # 7. restart активного/неизвестного/без args
-        # Пауза фиксирует состояния: ничего не может завершиться между
-        # полингом и restart (иначе была бы гонка самого теста).
+        # restart универсален: активный останавливается и запускается
+        # заново заменой (без дублей). Пауза фиксирует состояния, чтобы
+        # исключить гонку самого теста.
         d.rpc("pause", {})
         st = d.get("/api/state")
-        # Только queued: под паузой prep не стартует и варианты не
-        # запускаются, такое задание не может завершиться между полингом
-        # и restart (гонки самого теста исключены).
         active = [x["id"] for x in st["rows"] if x["state"] == "queued"]
         if active:
+            before = sorted(x["id"] for x in st["rows"])
             r = d.rpc("restart", {"ids": active})
-            check(r["ok"] and r["result"]["restarted"] == [],
-                  f"restart active -> empty: {r}")
+            check(r["ok"] and sorted(r["result"]["restarted"]) == sorted(active),
+                  f"restart active replaces: {r}")
+            st = d.get("/api/state")
+            ids = sorted(x["id"] for x in st["rows"])
+            check(len(ids) == len(set(ids)), f"no dupes after active restart: {ids}")
+            for old in active:
+                check(old not in ids, f"old id {old} replaced: {ids}")
         d.rpc("resume", {})
         r = d.rpc("restart", {"ids": [9999]})
         check(r["ok"] and r["result"]["restarted"] == [], "restart unknown")
