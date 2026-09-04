@@ -55,14 +55,24 @@ void StateMirror::set_state(size_t id, const std::string& st) {
 
 void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
     std::lock_guard<std::mutex> lk(m_);
-    rows_[id].tasks = std::move(tasks);
+    auto& r = rows_[id];
+    // Гонка task(Running) до set_tasks: другой воркер мог уже пометить
+    // задачи после prep_done. Сохраняем известные состояния по индексам.
+    for (size_t i = 0; i < tasks.size() && i < r.tasks.size(); i++) {
+        if (r.tasks[i] != "pend") tasks[i] = r.tasks[i];
+    }
+    r.tasks = std::move(tasks);
 }
 
 void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     std::lock_guard<std::mutex> lk(m_);
     auto& r = rows_[id];
     r.task_infos = infos;
-    r.tasks.assign(infos.size(), "pend");
+    std::vector<std::string> tasks(infos.size(), "pend");
+    for (size_t i = 0; i < tasks.size() && i < r.tasks.size(); i++) {
+        if (r.tasks[i] != "pend") tasks[i] = r.tasks[i];
+    }
+    r.tasks = std::move(tasks);
 }
 
 void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
