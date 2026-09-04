@@ -248,11 +248,10 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
             added_paths_.insert(p);
             accepted.push_back(p);
         }
-        if (!accepted.empty() && paused_.load()) {
-            paused_.store(false);
-            ev_->push("resumed");
-        }
+        // запомнить, нужно ли снять паузу — вне мьютекса вызовем set_paused
     }
+    bool need_resume = !accepted.empty() && paused_.load();
+    if (need_resume) set_paused(false);
 
     size_t before = st_->size();
     if (!accepted.empty()) engine_->add(accepted);
