@@ -83,6 +83,7 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
     // Веб-UI — публичные эндпоинты (без авторизации): GET / и /static/* .
 
     svr.Get("/", [have_web](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
         if (have_web) {
             const std::string* data = web_assets::get("index.html");
             if (data) {
@@ -118,6 +119,7 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
             return;
         }
         const std::string* data = web_assets::get(sub);
+        res.set_header("Cache-Control", "no-store");
         if (!data) {
             res.status = 404;
             res.set_content("Not found", "text/plain");

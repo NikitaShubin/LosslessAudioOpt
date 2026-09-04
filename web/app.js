@@ -18,6 +18,7 @@ const versionEl = el("version"), cTotal = el("c-total"), cDone = el("c-done"), c
 const addForm = el("add-form"), addPath = el("add-path"), addRecursive = el("add-recursive"), addMsg = el("add-msg");
 const queueBody = el("queue-body"), connStatus = el("conn-status"), lastSeqEl = el("last-seq");
 const btnPause = el("btn-pause"), btnClearCompleted = el("btn-clear-completed");
+const pausedBadge = el("paused-badge"), doneBadge = el("c-done-badge");
 const chkAll = el("chk-all"), selInfo = el("sel-info"), selCount = el("sel-count");
 const btnBatchStop = el("btn-batch-stop"), btnBatchDelete = el("btn-batch-delete");
 
@@ -308,8 +309,15 @@ async function pollState(){
     versionEl.textContent = j.version ? "v"+j.version : "";
     const c = j.counters||{}; cTotal.textContent=c.total||0; cDone.textContent=c.done||0; cFailed.textContent=c.failed||0;
     isPaused = !!j.paused;
-    btnPause.textContent = isPaused ? "▶" : "⏸";
+    btnPause.textContent = isPaused ? "▶ Продолжить" : "⏸ Пауза";
     btnPause.title = isPaused ? "Запустить очередь" : "Остановить очередь";
+    if (pausedBadge) pausedBadge.textContent = isPaused ? "Очередь остановлена" : "";
+    if (doneBadge) {
+      const rows = j.rows || [];
+      const n = rows.filter(r=>r.state==="ok"||r.state==="skip"||r.state==="error").length;
+      doneBadge.textContent = n > 0 ? "(" + n + ")" : "";
+      btnClearCompleted.disabled = n === 0;
+    }
     lastSeqEl.textContent = "seq "+(j.last_seq||0);
     renderQueue(j.rows);
     setConn(true, isPaused ? "Пауза" : "Подключено");

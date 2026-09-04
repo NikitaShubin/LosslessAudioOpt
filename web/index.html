@@ -42,11 +42,20 @@
     <p id="add-msg" class="msg"></p>
   </section>
 
-  <section class="panel actions">
-    <button id="btn-pause" title="Остановить очередь">⏸</button>
-    <button id="btn-clear-completed" title="Удалить завершённые">🗑</button>
-    <button id="btn-shutdown" class="danger" title="Выключить демон">⏻</button>
-    <span id="sel-info" class="muted hidden">Выбрано: <b id="sel-count">0</b> <button id="btn-batch-stop" title="Остановить выделенные">⏸</button> <button id="btn-batch-delete" title="Удалить выделенные">🗑</button></span>
+  <section class="panel queue-controls">
+    <div class="queue-controls__left">
+      <button id="btn-pause" title="Остановить очередь">⏸ Пауза</button>
+      <span class="muted" id="paused-badge"></span>
+    </div>
+    <div class="queue-controls__right">
+      <button id="btn-clear-completed" title="Удалить все ok/skip/error">🧹 Очистить завершённые <span id="c-done-badge"></span></button>
+    </div>
+  </section>
+
+  <section class="panel selection-bar hidden" id="sel-info">
+    Выбрано: <b id="sel-count">0</b>
+    <button id="btn-batch-stop" title="Остановить выделенные">⏹ Остановить выделенные</button>
+    <button id="btn-batch-delete" class="danger" title="Удалить выделенные">🗑 Удалить выделенные</button>
   </section>
 
   <section class="panel queue">
@@ -55,6 +64,11 @@
       <thead><tr><th><input type="checkbox" id="chk-all" title="Выделить всё"></th><th></th><th>#</th><th>Файл</th><th>Состояние</th><th>Прогресс</th><th>Задачи</th><th>Действия</th></tr></thead>
       <tbody id="queue-body"><tr><td colspan="8" class="empty">Очередь пуста</td></tr></tbody>
     </table>
+  </section>
+
+  <section class="panel danger-zone">
+    <h2>Демон</h2>
+    <button id="btn-shutdown" class="danger" title="Выключить демон">⏻ Выключить демон</button>
   </section>
 
   <footer class="statusbar">
