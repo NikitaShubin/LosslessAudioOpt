@@ -183,16 +183,23 @@ def main():
         done = [x for x in st["rows"] if x["state"] in ("ok", "skip", "error")]
         check(bool(done), f"at least one done file: {st['counters']}")
 
-        # 6. restart завершённого: замена, не append
-        if done:
-            rid = done[0]["id"]
-            r = d.rpc("restart", {"ids": [rid]})
-            check(r["ok"] and r["result"]["restarted"] == [rid],
-                  f"restart {rid}: {r}")
-            st = d.get("/api/state")
-            ids = [x["id"] for x in st["rows"]]
-            check(rid not in ids, f"old id {rid} gone: {ids}")
-            check(len(ids) == len(set(ids)), f"no dupes after restart: {ids}")
+        # 6. restart остановленного через cancel-file файла: замена, не append.
+        # Детерминированно: добавляем свежий файл, сразу cancel-file (пока он
+        # queued/prep — исходник на месте, не заменён), затем restart. Это
+        # ровно пользовательский сценарий «остановил -> запустил выделенные».
+        rst_wav = os.path.join(workdir, "restart_target.wav")
+        gen_wav(rst_wav, 640)
+        r = d.rpc("add", {"paths": [rst_wav]})
+        new_id = r["result"]["added"][0]["id"]
+        d.rpc("cancel-file", {"id": new_id})
+        time.sleep(1)
+        r = d.rpc("restart", {"ids": [new_id]})
+        check(r["ok"] and r["result"]["restarted"] == [new_id],
+              f"restart after cancel {new_id}: {r}")
+        st = d.get("/api/state")
+        ids = [x["id"] for x in st["rows"]]
+        check(new_id not in ids, f"old id {new_id} gone: {ids}")
+        check(len(ids) == len(set(ids)), f"no dupes after restart: {ids}")
 
         # 6.5. remove/cancel неизвестного id -> false, без исключений
         r = d.rpc("remove", {"id": 9999})
