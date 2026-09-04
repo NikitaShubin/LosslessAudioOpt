@@ -239,7 +239,107 @@ def main():
         st = d.get("/api/state")
         check(isinstance(st.get("rows"), list), "daemon alive after bad input")
 
-        print("case 7: shutdown")
+        print("case 7: batch-stop-all → batch-start — рестарт работает")
+        d2 = Daemon(binary, workdir)
+        d2.start()
+        paths2 = []
+        for i, freq in enumerate((500, 600, 700)):
+            p = os.path.join(workdir, f"bs{i}.wav")
+            gen_wav(p, freq)
+            paths2.append(p)
+        r = d2.rpc("add", {"paths": paths2})
+        ids2 = [x["id"] for x in r["result"]["added"]]
+        check(len(ids2) == 3, f"added 3 files: {ids2}")
+        # дать файлам начать обработку
+        time.sleep(4)
+        # batch cancel-file (эмуляция «Остановить выделенные»)
+        for fid in ids2:
+            d2.rpc("cancel-file", {"id": fid})
+        time.sleep(1)
+        # batch restart (эмуляция «Запустить выделенные»)
+        r = d2.rpc("restart", {"ids": ids2})
+        restarted = r["result"]["restarted"]
+        # Главная регрессия пользователя: restart после остановки возвращал 0.
+        check(len(restarted) == len(ids2),
+              f"batch restart all {len(ids2)}: got {len(restarted)}")
+        # После рестарта исходные id должны быть заменены новыми заданиями —
+        # в этой же очереди появляются НОВЫЕ id (не исходные).
+        deadline = time.time() + 15
+        new_ids = []
+        while time.time() < deadline:
+            cur = d2.rows()
+            new_ids = [x["id"] for x in cur if x["id"] not in ids2]
+            if new_ids:
+                break
+            time.sleep(1)
+        check(len(new_ids) >= 1,
+              f"restart produced new jobs (engine alive): {new_ids}")
+        check(d2.stop() == 0, "case 7: exit 0")
+
+        print("case 8: cancel-file → re-add тот же путь — принят и стартует")
+        d3 = Daemon(binary, workdir)
+        d3.start()
+        p8 = os.path.join(workdir, "cancel_readd.wav")
+        gen_wav(p8, 999)
+        r = d3.rpc("add", {"paths": [p8]})
+        ids8 = [x["id"] for x in r["result"]["added"]]
+        check(len(ids8) == 1, "add 1 file")
+        time.sleep(3)
+        # отменяем через cancel-file (без remove — added_paths_ НЕ очищается)
+        d3.rpc("cancel-file", {"id": ids8[0]})
+        time.sleep(2)
+        # повторно добавляем тот же путь
+        r = d3.rpc("add", {"paths": [p8]})
+        added8 = r["result"]["added"]
+        rejected8 = r["result"]["rejected"]
+        check(len(added8) == 1, f"re-add accepted after cancel-file: added={len(added8)} rej={rejected8}")
+        # новые задания стартуют
+        new_id8 = added8[0]["id"]
+        deadline = time.time() + 20
+        started = False
+        while time.time() < deadline:
+            st = d3.rows()
+            for x in st:
+                if x["id"] == new_id8 and x["state"] in ("prep", "running", "ok", "skip"):
+                    started = True
+                    break
+            if started: break
+            time.sleep(2)
+        check(started, "re-added file after cancel-file leaves queued")
+        check(d3.stop() == 0, "case 8: exit 0")
+
+        print("case 9: batch-stop → reorder → batch-start — reorder не ломает рестарт")
+        d4 = Daemon(binary, workdir)
+        d4.start()
+        paths9 = []
+        for i, freq in enumerate((1000, 1100, 1200)):
+            p = os.path.join(workdir, f"r{i}.wav")
+            gen_wav(p, freq)
+            paths9.append(p)
+        r = d4.rpc("add", {"paths": paths9})
+        ids9 = [x["id"] for x in r["result"]["added"]]
+        check(len(ids9) == 3, f"added 3: {ids9}")
+        time.sleep(3)
+        # batch stop
+        for fid in ids9:
+            d4.rpc("cancel-file", {"id": fid})
+        time.sleep(1)
+        # reorder (после stop — все removed)
+        remaining = d4.ids()
+        if remaining:
+            d4.rpc("reorder", {"order": list(reversed(remaining))})
+        # batch restart
+        r = d4.rpc("restart", {"ids": ids9})
+        restarted9 = r["result"]["restarted"]
+        check(len(restarted9) == len(ids9),
+              f"batch restart after reorder: {len(restarted9)}/{len(ids9)}")
+        deadline = time.time() + 15
+        new_ids9 = [x["id"] for x in d4.rows() if x["id"] not in ids9]
+        check(len(new_ids9) >= 1,
+              f"restart after reorder produced new jobs: {new_ids9}")
+        check(d4.stop() == 0, "case 9: exit 0")
+
+        print("case 10: shutdown")
         check(d.stop() == 0, "exit 0")
         check(not os.path.exists(d.disc), "discovery removed")
     finally:

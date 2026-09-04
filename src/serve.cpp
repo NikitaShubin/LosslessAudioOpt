@@ -234,7 +234,7 @@ void DaemonSession::add_locked(const std::vector<std::string>& paths,
             if (engine_) {
                 auto snap = engine_->snapshot();
                 for (const auto& f : snap) if (f.path == p) {
-                    if (f.state == "queued" || f.state == "prep" || f.state == "running" || f.state == "removed") still_active = true;
+                    if (f.state == "queued" || f.state == "prep" || f.state == "running") still_active = true;
                     break;
                 }
             }
@@ -320,7 +320,7 @@ bool DaemonSession::remove(uint64_t id) {
 namespace {
 
 bool is_done_state(const std::string& st) {
-    return st == "ok" || st == "skip" || st == "error";
+    return st == "ok" || st == "skip" || st == "error" || st == "removed";
 }
 
 }  // namespace
@@ -330,38 +330,44 @@ bool DaemonSession::restart(uint64_t id) {
     // Универсальный перезапуск: активный файл сначала останавливается
     // (cancel + мгновенный kill процессов), ожидается завершение, затем
     // строка заменяется новым заданием (remove + tombstone, затем add).
-    // Дубликатов в списке не остаётся. Ожидание — без mt_, чтобы не
-    // держать очередь; финальная фаза перепроверяет состояние.
+    // Дубликатов в списке не остаётся.
     std::string path;
+    bool already_done = false;
     {
         auto snap = engine_->snapshot();
         bool found = false;
-        bool done = false;
         for (const auto& f : snap)
             if (f.idx == (size_t)id) {
                 found = true;
                 path = f.path;
-                done = is_done_state(f.state);
+                already_done = is_done_state(f.state);
                 break;
             }
         if (!found || path.empty()) return false;
-        if (!done) engine_->remove((size_t)id);  // cancel + kill, без зеркала
+        if (!already_done) engine_->remove((size_t)id);  // cancel + kill, без зеркала
     }
-    // Ждём завершения (мгновенный kill обычно укладывается в <2с).
-    bool settled = false;
-    for (int i = 0; i < 200; i++) {
-        auto snap = engine_->snapshot();
-        for (const auto& f : snap)
-            if (f.idx == (size_t)id && is_done_state(f.state)) {
-                settled = true;
-                break;
-            }
-        if (settled) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Если файл уже завершён (в т.ч. "removed" после cancel-file) —
+    // не ждём, сразу заменяем. Если ещё дорабатывает — ждём ≤20с.
+    if (!already_done) {
+        bool settled = false;
+        for (int i = 0; i < 200; i++) {
+            auto snap = engine_->snapshot();
+            for (const auto& f : snap)
+                if (f.idx == (size_t)id && is_done_state(f.state)) {
+                    settled = true;
+                    break;
+                }
+            if (settled) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!settled) return false;
     }
-    if (!settled) return false;
-    // Файл мог исчезнуть с диска после завершения — тогда строку не трогаем.
-    if (!util::dir_exists(path) && !util::file_exists(path)) return false;
+    // Для уже завершённого (ok/skip/error/removed) перезапуск имеет смысл
+    // только если исходный файл ещё существует на диске: после успешной
+    // замены (ok) исходник заменён другим форматом и перезапускать нечего.
+    // Проверку делаем только для already_done — активный файл мы только что
+    // со стоп-процессом не трогали, и он на месте.
+    if (already_done && !util::dir_exists(path) && !util::file_exists(path)) return false;
     std::lock_guard<std::mutex> lk(mt_);
     if (!remove_locked(id)) return false;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
