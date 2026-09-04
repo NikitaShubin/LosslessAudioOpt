@@ -90,8 +90,13 @@ test-unit: tests/test_resource_manager.cpp
 test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
 
+# Живой интеграционный тест очереди (нужны собранный llao-daemon-linux
+# и ffmpeg; поднимает свой демон на случайном порту, 18180 не трогает).
+test-daemon-queue: llao-daemon-linux
+	python3 tests/test_daemon_queue.py
+
 # Генерация встроенных веб-ассетов (zip → C++ массив).
 src/web_assets_data.cpp: web/index.html web/app.js web/style.css tools/embed_assets.py
 	python3 tools/embed_assets.py
 
-.PHONY: all clean test-unit test-daemon-core
+.PHONY: all clean test-unit test-daemon-core test-daemon-queue

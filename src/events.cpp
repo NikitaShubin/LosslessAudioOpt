@@ -48,18 +48,24 @@ void StateMirror::set_label(size_t id, const std::string& label) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     rows_[id].label = label;
+    rows_[id].id = id;
+    touch_locked(id);
 }
 
 void StateMirror::set_state(size_t id, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     rows_[id].state = st;
+    rows_[id].id = id;
+    touch_locked(id);
 }
 
 void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
     // Гонка task(Running) до set_tasks: другой воркер мог уже пометить
     // задачи после prep_done. Сохраняем известные состояния по индексам.
     for (size_t i = 0; i < tasks.size() && i < r.tasks.size(); i++) {
@@ -72,6 +78,8 @@ void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) 
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
     r.task_infos = infos;
     std::vector<std::string> tasks(infos.size(), "pend");
     for (size_t i = 0; i < tasks.size() && i < r.tasks.size(); i++) {
@@ -84,6 +92,8 @@ void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
     if (idx >= r.tasks.size()) r.tasks.resize(idx + 1, "pend");
     r.tasks[idx] = st;
 }
@@ -92,6 +102,8 @@ void StateMirror::set_pct(size_t id, double pct) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     rows_[id].pct = pct;
+    rows_[id].id = id;
+    touch_locked(id);
 }
 
 void StateMirror::remove(size_t id) {
