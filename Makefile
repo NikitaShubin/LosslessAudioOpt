@@ -95,8 +95,12 @@ test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp 
 test-daemon-queue: llao-daemon-linux
 	python3 tests/test_daemon_queue.py
 
+# Комплексный тест комбинаций взаимодействия с очередью.
+test-daemon-interactions: llao-daemon-linux
+	python3 tests/test_daemon_interactions.py
+
 # Генерация встроенных веб-ассетов (zip → C++ массив).
 src/web_assets_data.cpp: web/index.html web/app.js web/style.css tools/embed_assets.py
 	python3 tools/embed_assets.py
 
-.PHONY: all clean test-unit test-daemon-core test-daemon-queue
+.PHONY: all clean test-unit test-daemon-core test-daemon-queue test-daemon-interactions

@@ -42,16 +42,6 @@
     <p id="add-msg" class="msg"></p>
   </section>
 
-  <section class="panel queue-controls">
-    <div class="queue-controls__left">
-      <button id="btn-pause" title="Остановить очередь">⏸ Пауза</button>
-      <span class="muted" id="paused-badge"></span>
-    </div>
-    <div class="queue-controls__right">
-      <button id="btn-clear-completed" title="Удалить все ok/skip/error">🧹 Очистить завершённые <span id="c-done-badge"></span></button>
-    </div>
-  </section>
-
   <section class="panel selection-bar hidden" id="sel-info">
     Выбрано: <b id="sel-count">0</b>
     <button id="btn-batch-stop" title="Остановить выделенные">⏹ Остановить выделенные</button>
@@ -59,8 +49,16 @@
     <button id="btn-batch-delete" class="danger" title="Удалить выделенные">🗑 Удалить выделенные</button>
   </section>
 
-  <section class="panel queue">
-    <h2>Очередь</h2>
+  <section class="panel queue" id="queue-panel">
+    <div class="queue-head">
+      <h2>Очередь</h2>
+      <div class="queue-head__actions">
+        <button id="btn-pause" title="Остановить очередь">⏸ Пауза</button>
+        <button id="btn-clear-completed" title="Удалить все ok/skip/error">🧹 Очистить завершённые <span id="c-done-badge"></span></button>
+        <button id="btn-expand" title="Развернуть на весь экран">⛶</button>
+        <span class="muted" id="paused-badge"></span>
+      </div>
+    </div>
     <p id="op-msg" class="msg"></p>
     <div class="table-wrap">
     <table id="queue-table">
