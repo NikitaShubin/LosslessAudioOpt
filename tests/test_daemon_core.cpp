@@ -114,6 +114,43 @@ static void test_daemon_sink() {
     CHECK(ev_last.args["id"].is_null());
 }
 
+// --- StateMirror: tombstones и subset-reorder ---
+static void test_mirror_remove_reorder() {
+    StateMirror st;
+    EventBuffer ev;
+    DaemonSink s2(&ev, &st);
+
+    s2.begin_file(0, "a.wav");
+    s2.begin_file(1, "b.wav");
+    s2.begin_file(2, "c.wav");
+    CHECK(st.size() == 3);
+
+    // remove + запоздалые события воркера: призрака быть не должно
+    st.remove(1);
+    CHECK(st.size() == 2);
+    s2.prep(1);
+    s2.set_tasks(1, 2);
+    s2.task(1, 0, obs::TaskState::Running);
+    s2.task(1, 1, obs::TaskState::Ok);
+    s2.end_file(1, 10.0);
+    CHECK(st.size() == 2);
+    for (const auto& r : st.snapshot()) CHECK(r.id != 1);
+
+    // subset-reorder видимых строк
+    CHECK(st.reorder({2, 0}) == true);
+    auto rows = st.snapshot();
+    CHECK(rows.size() == 2);
+    CHECK(rows[0].id == 2);
+    CHECK(rows[1].id == 0);
+
+    // дубли и пустой порядок — отказ
+    CHECK(st.reorder({}) == false);
+    CHECK(st.reorder({0, 0}) == false);
+    // неизвестный id — отказ, порядок не меняется
+    CHECK(st.reorder({9}) == false);
+    CHECK(st.snapshot()[0].id == 2);
+}
+
 // --- rpc::call с фейковым Daemon ---
 
 struct FakeDaemon : Daemon {
@@ -199,6 +236,20 @@ static void test_rpc() {
     CHECK(sd["ok"] == true);
     CHECK(d.shut_force == true);
 
+    d.cancel_exists = true;
+    auto rs = dsvc::call(d, "restart", {{"ids", {7, 8}}});
+    CHECK(rs["ok"] == true);
+    CHECK(rs["result"]["restarted"].size() == 2);
+    CHECK(d.cancelled_id == (uint64_t)8);
+
+    auto rs1 = dsvc::call(d, "restart", {{"id", 5}});
+    CHECK(rs1["ok"] == true);
+    CHECK(rs1["result"]["restarted"].size() == 1);
+
+    auto rs_bad = dsvc::call(d, "restart", nlohmann::json::object());
+    CHECK(rs_bad["ok"] == false);
+    CHECK(rs_bad["code"] == "bad_args");
+
     auto fmt = dsvc::call(d, "formats", nlohmann::json::object());
     CHECK(fmt["result"]["formats"][0]["id"] == "flac");
 
@@ -214,6 +265,7 @@ static void test_rpc() {
 int main() {
     test_event_buffer();
     test_daemon_sink();
+    test_mirror_remove_reorder();
     test_rpc();
     if (failures == 0) {
         std::cout << "OK\n";

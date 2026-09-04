@@ -79,7 +79,11 @@ public:
     void set_task(size_t id, size_t idx, const std::string& st);
     void set_pct(size_t id, double pct);
     void remove(size_t id);
-    void reorder(const std::vector<size_t>& order);
+    // Переупорядочить видимые строки. Допускается подмножество id:
+    // перечисленные встают первыми, остальные сохраняют порядок в хвосте.
+    // Tombstones и неизвестные id игнорируются. Возвращает false, если
+    // порядок пуст или содержит дубли.
+    bool reorder(const std::vector<size_t>& order);
 
     std::vector<Row> snapshot() const;
     size_t size() const;

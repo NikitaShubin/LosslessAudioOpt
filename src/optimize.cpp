@@ -706,7 +706,11 @@ struct Runner {
     // Добавляет файлы в очередь на лету (демон). Вызывается вне qm, берёт
     // лок сам. Инвариант: только целые файлы (не задачи). Эмитит begin_file
     // для новых строк и будит воркеры.
-    void append_files(const std::vector<FileItem>& items) {
+    // Добавляет файлы в хвост очереди. Возвращает стабильные idx новых
+    // заданий (FileJob::idx монотонны, позиции в векторе могут меняться
+    // при reorder — клиент должен использовать возвращённые idx, а не
+    // вычислять их из размера очереди).
+    std::vector<size_t> append_files(const std::vector<FileItem>& items) {
         std::vector<size_t> idx;
         std::vector<std::string> labels;
         {
@@ -722,6 +726,7 @@ struct Runner {
         }
         for (size_t k = 0; k < idx.size(); k++) obs::sink()->begin_file(idx[k], labels[k]);
         if (idx.size() > 1) obs::sink()->files_added(idx, labels);
+        return idx;
     }
 
     // Пауза/продолжение всей очереди (демон). Приостанавливает запуск новых
@@ -767,25 +772,38 @@ struct Runner {
         }
     }
 
-    // Переупорядочивает очередь (reorder): ids — новый порядок индексов
-    // файлов (как их видит клиент). Применяется ко всем файлам; для уже
-    // запущенных порядок не влияет на текущую задачу, но меняет приоритет
-    // последующих. Вызывается вне qm.
-    void reorder(const std::vector<size_t>& ids) {
+    // Переупорядочивает очередь (reorder): ids — стабильные idx файлов
+    // (FileJob::idx) в новом порядке. Допускается подмножество (напр. только
+    // видимые клиенту строки): перечисленные встают первыми в заданном
+    // порядке, остальные сохраняют относительный порядок в хвосте.
+    // Для уже запущенных порядок не влияет на текущую задачу, но меняет
+    // приоритет последующих. Вызывается вне qm.
+    bool reorder(const std::vector<size_t>& ids) {
         std::lock_guard<std::mutex> lk(qm);
-        if (ids.size() != jobs.size()) return;
+        if (ids.empty() || ids.size() > jobs.size()) return false;
+        // Позиция каждого idx в текущем векторе (idx монотонны, вектор
+        // только растёт — idx всегда < jobs.size()).
+        std::vector<size_t> pos_of(jobs.size(), SIZE_MAX);
+        for (size_t p = 0; p < jobs.size(); p++)
+            if (jobs[p]->idx < jobs.size()) pos_of[jobs[p]->idx] = p;
         std::vector<bool> seen(jobs.size(), false);
         for (size_t id : ids) {
-            if (id >= jobs.size() || seen[id]) return;
+            if (id >= jobs.size() || seen[id] || pos_of[id] == SIZE_MAX) return false;
             seen[id] = true;
         }
+        std::vector<bool> listed(jobs.size(), false);
+        for (size_t id : ids) listed[id] = true;
         std::vector<std::unique_ptr<FileJob>> reordered;
         reordered.reserve(jobs.size());
-        for (size_t id : ids) reordered.push_back(std::move(jobs[id]));
+        for (size_t id : ids) reordered.push_back(std::move(jobs[pos_of[id]]));
+        for (size_t p = 0; p < jobs.size(); p++)
+            if (jobs[p] && !listed[jobs[p]->idx])
+                reordered.push_back(std::move(jobs[p]));
         // idx — стабильный id файла, не переназначаем; порядок — порядок вектора
         jobs = std::move(reordered);
         next_prep = 0;  // курсор переинициализируется (find_next_prep всё равно сканирует)
         cv.notify_all();
+        return true;
     }
 
     bool all_done_locked() const { return total_done == jobs.size(); }
@@ -1843,13 +1861,13 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
     return 0;
 }
 
-void Engine::add(const std::vector<std::string>& inputs) {
+std::vector<size_t> Engine::add(const std::vector<std::string>& inputs) {
     Impl& i = *impl_;
-    if (!i.started) return;
+    if (!i.started) return {};
     std::vector<FileItem> items;
     i.collect(inputs, items, nullptr);
-    if (items.empty()) return;
-    i.r.append_files(items);
+    if (items.empty()) return {};
+    return i.r.append_files(items);
 }
 
 bool Engine::remove(size_t idx) {
@@ -1862,8 +1880,7 @@ bool Engine::remove(size_t idx) {
 bool Engine::reorder(const std::vector<size_t>& ids) {
     Impl& i = *impl_;
     if (!i.started) return false;
-    i.r.reorder(ids);
-    return true;
+    return i.r.reorder(ids);
 }
 
 void Engine::pause() {

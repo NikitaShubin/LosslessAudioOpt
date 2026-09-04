@@ -214,9 +214,13 @@ void DaemonSession::set_paused(bool paused) {
 
 void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*/,
                         nlohmann::json& result) {
-    std::vector<std::string> accepted;
+    // Движок — единственный источник истины очереди: вся приёмка и само
+    // добавление идут под mt_, дубли исключены даже при параллельных add.
+    // Ответ строится по idx, возвращённым движком, а не по размеру зеркала.
+    std::vector<size_t> new_ids;
     {
         std::lock_guard<std::mutex> lk(mt_);
+        std::vector<std::string> accepted;
         for (const auto& p : paths) {
             if (p.empty()) {
                 result["rejected"].push_back({{"path", p}, {"reason", "empty path"}});
@@ -230,7 +234,7 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
                 continue;
             }
             if (added_paths_.count(p)) {
-                // Если файл был удалён/завершён — разрешить повторное добавление
+                // Если путь был удалён/завершён — разрешить повторное добавление
                 bool still_active = false;
                 if (engine_) {
                     auto snap = engine_->snapshot();
@@ -249,19 +253,21 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
             added_paths_.insert(p);
             accepted.push_back(p);
         }
-        // запомнить, нужно ли снять паузу — вне мьютекса вызовем set_paused
+        if (!accepted.empty() && engine_) new_ids = engine_->add(accepted);
     }
-    bool need_resume = !accepted.empty() && paused_.load();
+    bool need_resume = !new_ids.empty() && paused_.load();
     if (need_resume) set_paused(false);
 
-    size_t before = st_->size();
-    if (!accepted.empty()) engine_->add(accepted);
-    size_t after = st_->size();
-
-    // Добавленные строки — «хвост» зеркала (id отсортированы по возрастанию).
+    // begin_file синхронен (append_files эмитит события до возврата),
+    // поэтому строки уже в зеркале — ищем по id, без эвристики хвоста.
     auto rows = st_->snapshot();
-    for (size_t i = before; i < after && i < rows.size(); i++)
-        result["added"].push_back({{"id", rows[i].id}, {"label", rows[i].label}});
+    for (size_t id : new_ids) {
+        for (const auto& r : rows)
+            if (r.id == id) {
+                result["added"].push_back({{"id", r.id}, {"label", r.label}});
+                break;
+            }
+    }
 }
 
 bool DaemonSession::cancel_file(uint64_t id) {
@@ -293,8 +299,9 @@ bool DaemonSession::remove(uint64_t id) {
 
 bool DaemonSession::restart(uint64_t id) {
     if (!engine_) return false;
-    // Перезапуск только завершённых: путь берём из снимка движка,
-    // ставим в очередь заново через add (новым заданием с новым id).
+    // Перезапуск только завершённых — как замена: старая строка убирается
+    // (remove + tombstone), путь ставится в очередь заново новым заданием.
+    // Дубликатов в списке не остаётся.
     std::string path;
     auto snap = engine_->snapshot();
     for (const auto& f : snap)
@@ -305,6 +312,9 @@ bool DaemonSession::restart(uint64_t id) {
             break;
         }
     if (path.empty()) return false;
+    // Файл мог исчезнуть с диска после завершения — тогда строку не трогаем.
+    if (!util::dir_exists(path) && !util::file_exists(path)) return false;
+    if (!remove(id)) return false;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
                           {"rejected", nlohmann::json::array()}};
     add({path}, false, tmp);

@@ -101,12 +101,32 @@ void StateMirror::remove(size_t id) {
     removed_.insert(id);
 }
 
-void StateMirror::reorder(const std::vector<size_t>& order) {
+bool StateMirror::reorder(const std::vector<size_t>& order) {
     std::lock_guard<std::mutex> lk(m_);
-    if (order.size() != rows_.size()) return;
-    // Проверка что все ids присутствуют
-    for (size_t id : order) if (rows_.find(id) == rows_.end()) return;
-    order_ = order;
+    if (order.empty()) return false;
+    std::set<size_t> seen;
+    for (size_t id : order) {
+        if (!seen.insert(id).second) return false;  // дубли
+        if (rows_.find(id) == rows_.end()) return false;  // неизвестный id
+    }
+    // Перечисленные — первыми, остальные видимые — в прежнем порядке в хвост.
+    std::vector<size_t> next;
+    next.reserve(rows_.size());
+    for (size_t id : order) next.push_back(id);
+    if (!order_.empty() && order_.size() == rows_.size()) {
+        for (size_t id : order_) {
+            if (rows_.find(id) == rows_.end()) continue;
+            if (seen.count(id)) continue;
+            next.push_back(id);
+        }
+    } else {
+        for (const auto& kv : rows_) {
+            if (seen.count(kv.first)) continue;
+            next.push_back(kv.first);
+        }
+    }
+    order_ = std::move(next);
+    return true;
 }
 
 std::vector<Row> StateMirror::snapshot() const {
