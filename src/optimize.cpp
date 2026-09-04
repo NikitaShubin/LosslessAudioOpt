@@ -1000,7 +1000,19 @@ struct Runner {
             return;
         }
 
-        j.ts = tags::extract_tags(j.path, probe, true);
+        // Теги: встроенные + сайдкар .tags.zip (для повторной оптимизации
+        // уже оптимизированного файла, напр. la+tags.zip). Ищем сайдкар для
+        // любого входного файла, не только для папок.
+        {
+            tags::TagSet base = tags::extract_tags(j.path, probe, true);
+            tags::TagSet sc;
+            std::string sc_err;
+            if (tags::read_sidecar(j.path, sc, &sc_err)) {
+                j.ts = tags::merge_tags(std::move(base), sc);
+            } else {
+                j.ts = std::move(base);
+            }
+        }
         int bits = probe.bits_per_sample;
         if (bits <= 0) bits = 16;
         j.bits = bits;
