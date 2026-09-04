@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "obs.h"
+
 // daemon — инфраструктура headless-демона: кольцевой буфер событий и зеркало
 // состояния очереди. Используется obs::Sink-реализацией демона (daemon_sink),
 // диспетчером команд (rpc) и HTTP-обработчиками (http_api).
@@ -60,6 +62,7 @@ struct Row {
     std::string state;             // queued | prep | running | ok | skip | error
     double pct = 0;                // выигрыш в сжатии (после ok)
     std::vector<std::string> tasks; // состояния вариантов: pend|running|ok|failed
+    std::vector<obs::TaskInfo> task_infos; // метаданные задач (fmt/variant)
 };
 
 // Потокобезопасное зеркало строк очереди. Обновляется obs::Sink-реализацией
@@ -71,6 +74,7 @@ public:
     void set_label(size_t id, const std::string& label);
     void set_state(size_t id, const std::string& st);
     void set_tasks(size_t id, std::vector<std::string> tasks);
+    void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos);
     void set_task(size_t id, size_t idx, const std::string& st);
     void set_pct(size_t id, double pct);
     void remove(size_t id);

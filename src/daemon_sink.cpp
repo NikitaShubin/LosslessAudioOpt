@@ -25,6 +25,13 @@ void DaemonSink::set_tasks(size_t id, size_t total) {
     st_->set_tasks(id, std::vector<std::string>(total, "pend"));
 }
 
+void DaemonSink::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
+    nlohmann::json jinfos = nlohmann::json::array();
+    for (auto& ti : infos) jinfos.push_back({{"fmt", ti.fmt_id}, {"variant", ti.variant_id}, {"params", ti.params}, {"note", ti.note}});
+    ev_->push("set_tasks", {{"id", id}, {"total", infos.size()}, {"task_infos", jinfos}});
+    st_->set_tasks(id, infos);
+}
+
 void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
     const char* s = st == obs::TaskState::Running ? "running"
                     : st == obs::TaskState::Ok     ? "ok"

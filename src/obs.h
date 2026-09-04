@@ -13,6 +13,14 @@ namespace obs {
 // Состояние отдельного варианта (сегмента полосы файла / задачи очереди).
 enum class TaskState { Running, Ok, Failed };
 
+// Метаданные задачи для тултипов (формат/вариант/параметры).
+struct TaskInfo {
+    std::string fmt_id;
+    std::string variant_id;
+    std::vector<std::string> params;
+    std::string note;
+};
+
 // Интерфейс приёмника событий. Все методы вызываются движком; реализации
 // должны быть потокобезопасны (движок вызывает их из воркеров).
 struct Sink {
@@ -29,6 +37,8 @@ struct Sink {
 
     // После prep: число вариантов файла = число сегментов полосы.
     virtual void set_tasks(size_t, size_t) {}
+    // Расширенный вариант с метаданными задач (для демона/веба).
+    virtual void set_tasks(size_t, const std::vector<TaskInfo>&) {}
 
     // Смена состояния варианта task_idx.
     virtual void task(size_t, size_t, TaskState) {}

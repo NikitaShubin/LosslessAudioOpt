@@ -46,11 +46,19 @@ nlohmann::json rows_json(const StateMirror& st) {
     for (const auto& r : st.snapshot()) {
         nlohmann::json tasks = nlohmann::json::array();
         for (const auto& t : r.tasks) tasks.push_back(t);
+        nlohmann::json infos = nlohmann::json::array();
+        for (const auto& ti : r.task_infos) {
+            infos.push_back({{"fmt", ti.fmt_id},
+                             {"variant", ti.variant_id},
+                             {"params", ti.params},
+                             {"note", ti.note}});
+        }
         arr.push_back({{"id", r.id},
                        {"label", r.label},
                        {"state", r.state},
                        {"pct", r.pct},
-                       {"tasks", std::move(tasks)}});
+                       {"tasks", std::move(tasks)},
+                       {"task_infos", std::move(infos)}});
     }
     return arr;
 }
