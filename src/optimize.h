@@ -97,8 +97,9 @@ public:
     int init(const Options& opts, const std::vector<std::string>& initial_inputs,
              std::string* err);
 
-    // Добавить файлы/папки в очередь на лету.
-    void add(const std::vector<std::string>& inputs);
+    // Добавить файлы/папки в очередь на лету. Возвращает стабильные idx
+    // новых заданий (для ответа add без эвристик по размеру очереди).
+    std::vector<size_t> add(const std::vector<std::string>& inputs);
 
     // Снять файл из очереди (pending — сразу, running — дорабатывает).
     bool remove(size_t idx);
