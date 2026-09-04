@@ -826,7 +826,7 @@ struct Runner {
         for (size_t k = 0; k < jobs.size(); k++) {
             size_t i = (next_prep + k) % jobs.size();
             FileJob& j = *jobs[i];
-            if (j.done || j.prep_done) continue;
+            if (j.done || j.prep_done || j.prep_running) continue;
             *out = i;
             return true;
         }
@@ -870,7 +870,7 @@ struct Runner {
         if (prep_allowed_locked()) {
             for (size_t i = 0; i < jobs.size(); i++) {
                 FileJob& j = *jobs[i];
-                if (j.done || j.prep_done || !j.deferred) continue;
+                if (j.done || j.prep_done || j.prep_running || !j.deferred) continue;
                 if (j.probe.ok && j.wav_est > 0) {
                     j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
                     if (rm.request_disk(j.peak_file).status == ResourceRequest::Status::Granted) {
