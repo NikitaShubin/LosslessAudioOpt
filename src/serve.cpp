@@ -136,6 +136,7 @@ void print_help() {
         "  --bind ADDR           адрес прослушивания (default 127.0.0.1)\n"
         "  --port N              порт; 0 = свободный (default 0)\n"
         "  --token HEX           явный токен (по умолчанию генерируется)\n"
+        "  --no-auth             выключить авторизацию (только отладка!)\n"
         "  --discovery PATH      путь к discovery-файлу (default: %%LOCALAPPDATA%%/llao/daemon.json)\n"
         "\n"
         "  --help                эта справка\n");
@@ -367,6 +368,7 @@ int main(int argc, char** argv) {
     std::string bind = "127.0.0.1";
     int port = 0;
     std::string token;
+    bool no_auth = false;  // отладка: выключить Bearer-авторизацию
     std::string discovery_override;
     optimize::Options opts;
     opts.mode = optimize::SessionMode::Daemon;
@@ -381,6 +383,7 @@ int main(int argc, char** argv) {
         } else if (a == "--bind") bind = next();
         else if (a == "--port") port = std::atoi(next().c_str());
         else if (a == "--token") token = next();
+        else if (a == "--no-auth") no_auth = true;
         else if (a == "--discovery") discovery_override = next();
         else if (a == "--jobs") {
             std::string v = next();
@@ -415,7 +418,14 @@ int main(int argc, char** argv) {
         return rc;
     }
 
-    if (token.empty()) token = dsvc::gen_token();
+    if (no_auth) {
+        // Отладочный режим: авторизация выключена, токен не генерируется.
+        // http_api разрешает все запросы при пустом токене.
+        token.clear();
+        std::fprintf(stderr, "WARNING: авторизация выключена (--no-auth), только для отладки!\n");
+    } else if (token.empty()) {
+        token = dsvc::gen_token();
+    }
     session.set_token(token);
 
     httplib::Server svr;
@@ -449,7 +459,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "WARNING: could not write discovery file %s\n", disc.c_str());
     std::fprintf(stdout, "LLAO daemon %s listening on %s:%d (pid %s)\n",
                   LLAO_VERSION, bind.c_str(), port, pid.c_str());
-    std::fprintf(stdout, "Token: %s\n", token.c_str());
+    if (no_auth)
+        std::fprintf(stdout, "Auth: disabled (--no-auth)\n");
+    else
+        std::fprintf(stdout, "Token: %s\n", token.c_str());
     if (disc_ok) std::fprintf(stdout, "Discovery: %s\n", disc.c_str());
     if (bind == "0.0.0.0") {
         std::fprintf(stderr,

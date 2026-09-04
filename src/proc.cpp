@@ -84,7 +84,7 @@ uint64_t thread_cpu_ms() {
 
 #ifdef _WIN32
 Result run(const std::vector<std::string>& args, int timeout_sec, const std::string& cwd,
-           const OutputMonitor& monitor) {
+           const OutputMonitor& monitor, const std::atomic<bool>* kill_flag) {
     Result res;
     if (args.empty()) return res;
 
@@ -203,6 +203,7 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
         }
         if (cancelled()) { res.cancelled = true; break; }
         if (aborted())   { res.aborted = true;   break; }
+        if (kill_flag && kill_flag->load(std::memory_order_relaxed)) { res.cancelled = true; break; }
 
         monitor_waited += kPollMs;
         if (monitor_waited >= kMonitorPollMs && !wmonitor_path.empty()) {
@@ -269,7 +270,7 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
 #else  // POSIX
 
 Result run(const std::vector<std::string>& args, int timeout_sec, const std::string& cwd,
-           const OutputMonitor& monitor) {
+           const OutputMonitor& monitor, const std::atomic<bool>* kill_flag) {
     Result res;
     if (args.empty()) return res;
 
@@ -389,6 +390,7 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
         }
         if (cancelled()) { res.cancelled = true; break; }
         if (aborted()) { res.aborted = true; break; }
+        if (kill_flag && kill_flag->load(std::memory_order_relaxed)) { res.cancelled = true; break; }
 
         monitor_waited_ms += kPollMs;
         if (monitor_waited_ms >= 5000 && !monitor.path.empty()) {

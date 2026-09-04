@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -46,8 +47,12 @@ bool aborted();
 // Запуск процесса без шелла. args[0] — исполняемый файл (путь или имя из PATH).
 // timeout_sec == 0 — без ограничения времени. cwd — рабочий каталог (пусто = текущий).
 // monitor — опциональный мониторинг прогресса (stall detection по файлу/CPU).
+// kill_flag — опциональный per-file флаг мгновенной остановки (remove файла
+// из очереди демона): процесс завершается принудительно, res.cancelled = true.
+// Проверяется в том же цикле опроса, что и глобальные cancel/abort (200 мс).
 Result run(const std::vector<std::string>& args, int timeout_sec = 0,
-           const std::string& cwd = "", const OutputMonitor& monitor = {});
+           const std::string& cwd = "", const OutputMonitor& monitor = {},
+           const std::atomic<bool>* kill_flag = nullptr);
 
 // Суммарное процессорное время всех дочерних процессов, запущенных текущим
 // потоком через run() (накапливается в thread_local). Для атрибуции затрат на

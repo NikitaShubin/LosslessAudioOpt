@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -38,7 +39,8 @@ Probe probe_file(const std::string& path, const std::string& ffprobe);
 // (16/24/32; не более глубины исходника). Путь к ffmpeg — как в конфиге.
 // Возвращает true при успехе; err — текст ошибки.
 bool decode_to_wav(const std::string& input, const std::string& output_wav,
-                   const std::string& ffmpeg, int bits, std::string* err);
+                   const std::string& ffmpeg, int bits, std::string* err,
+                   const std::atomic<bool>* kill = nullptr);
 
 // Путь к ffprobe: bin/ffmpeg/ffprobe.exe (рядом с exe) или из PATH.
 std::string find_ffprobe();
