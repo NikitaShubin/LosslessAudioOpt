@@ -55,16 +55,19 @@
   <section class="panel selection-bar hidden" id="sel-info">
     Выбрано: <b id="sel-count">0</b>
     <button id="btn-batch-stop" title="Остановить выделенные">⏹ Остановить выделенные</button>
-    <button id="btn-batch-start" title="Запустить выделенные заново">▶ Запустить выделенные</button>
+    <button id="btn-batch-start" title="Запустить выделенные заново">↻ Запустить выделенные</button>
     <button id="btn-batch-delete" class="danger" title="Удалить выделенные">🗑 Удалить выделенные</button>
   </section>
 
   <section class="panel queue">
     <h2>Очередь</h2>
+    <p id="op-msg" class="msg"></p>
+    <div class="table-wrap">
     <table id="queue-table">
       <thead><tr><th><input type="checkbox" id="chk-all" title="Выделить всё"></th><th></th><th>#</th><th>Файл</th><th>Состояние</th><th>Прогресс</th><th>Задачи</th><th>Действия</th></tr></thead>
       <tbody id="queue-body"><tr><td colspan="8" class="empty">Очередь пуста</td></tr></tbody>
     </table>
+    </div>
   </section>
 
   <section class="panel danger-zone">

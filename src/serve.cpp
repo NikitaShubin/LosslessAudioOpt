@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <httplib.h>
@@ -316,25 +317,52 @@ bool DaemonSession::remove(uint64_t id) {
     return remove_locked(id);
 }
 
+namespace {
+
+bool is_done_state(const std::string& st) {
+    return st == "ok" || st == "skip" || st == "error";
+}
+
+}  // namespace
+
 bool DaemonSession::restart(uint64_t id) {
     if (!engine_) return false;
-    // Перезапуск только завершённых — как замена: старая строка убирается
-    // (remove + tombstone), путь ставится в очередь заново новым заданием.
-    // Дубликатов в списке не остаётся. Всё под mt_: параллельный restart
-    // того же id не создаст двойника.
-    std::lock_guard<std::mutex> lk(mt_);
+    // Универсальный перезапуск: активный файл сначала останавливается
+    // (cancel + мгновенный kill процессов), ожидается завершение, затем
+    // строка заменяется новым заданием (remove + tombstone, затем add).
+    // Дубликатов в списке не остаётся. Ожидание — без mt_, чтобы не
+    // держать очередь; финальная фаза перепроверяет состояние.
     std::string path;
-    auto snap = engine_->snapshot();
-    for (const auto& f : snap)
-        if (f.idx == (size_t)id) {
-            if (f.state == "ok" || f.state == "skip" || f.state == "error" ||
-                f.state == "removed")
+    {
+        auto snap = engine_->snapshot();
+        bool found = false;
+        bool done = false;
+        for (const auto& f : snap)
+            if (f.idx == (size_t)id) {
+                found = true;
                 path = f.path;
-            break;
-        }
-    if (path.empty()) return false;
+                done = is_done_state(f.state);
+                break;
+            }
+        if (!found || path.empty()) return false;
+        if (!done) engine_->remove((size_t)id);  // cancel + kill, без зеркала
+    }
+    // Ждём завершения (мгновенный kill обычно укладывается в <2с).
+    bool settled = false;
+    for (int i = 0; i < 200; i++) {
+        auto snap = engine_->snapshot();
+        for (const auto& f : snap)
+            if (f.idx == (size_t)id && is_done_state(f.state)) {
+                settled = true;
+                break;
+            }
+        if (settled) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!settled) return false;
     // Файл мог исчезнуть с диска после завершения — тогда строку не трогаем.
     if (!util::dir_exists(path) && !util::file_exists(path)) return false;
+    std::lock_guard<std::mutex> lk(mt_);
     if (!remove_locked(id)) return false;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
                           {"rejected", nlohmann::json::array()}};

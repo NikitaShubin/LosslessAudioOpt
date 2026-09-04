@@ -17,6 +17,12 @@ const tokenInput = el("token-input"), loginForm = el("login-form"), loginError =
 const versionEl = el("version"), cTotal = el("c-total"), cDone = el("c-done"), cFailed = el("c-failed");
 const addForm = el("add-form"), addPath = el("add-path"), addRecursive = el("add-recursive"), addMsg = el("add-msg");
 const queueBody = el("queue-body"), connStatus = el("conn-status"), lastSeqEl = el("last-seq");
+const opMsgEl = el("op-msg");
+function opmsg(text, cls) {
+  if (!opMsgEl) return;
+  opMsgEl.textContent = text;
+  opMsgEl.className = "msg" + (cls ? " " + cls : "");
+}
 const btnPause = el("btn-pause"), btnClearCompleted = el("btn-clear-completed");
 const pausedBadge = el("paused-badge"), doneBadge = el("c-done-badge");
 const chkAll = el("chk-all"), selInfo = el("sel-info"), selCount = el("sel-count");
@@ -140,7 +146,7 @@ function renderQueue(rows){
     const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx])).join("");
     let actions = "";
     if (r.state==="queued"||r.state==="prep"||r.state==="running") {
-      actions += `<button data-stop="${r.id}" title="Остановить">⏸</button> `;
+      actions += `<button data-stop="${r.id}" title="Остановить">⏹</button> `;
     } else {
       actions += `<button data-restart="${r.id}" title="Запустить снова">↻</button> `;
       actions += `<button data-remove="${r.id}" class="danger" title="Удалить">🗑</button> `;
@@ -160,14 +166,14 @@ function renderQueue(rows){
   queueBody.querySelectorAll("[data-stop]").forEach(b=>{
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-stop"),10);
-      try { await rpc("cancel-file", {id}); } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+      try { await rpc("cancel-file", {id}); opmsg("Файл #"+id+" остановлен", "ok"); } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-remove]").forEach(b=>{
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-remove"),10);
       if (!confirm(`Удалить файл #${id} из очереди?`)) return;
-      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+      try { await rpc("remove", {id}); selectedIds.delete(id); opmsg("Файл #"+id+" удалён", "ok"); } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-restart]").forEach(b=>{
@@ -175,9 +181,8 @@ function renderQueue(rows){
       const id = parseInt(b.getAttribute("data-restart"),10);
       try {
         const res = await rpc("restart", {ids:[id]});
-        addMsg.textContent = (res.restarted||[]).length ? "Файл #"+id+" запущен снова" : "Файл #"+id+" не перезапущен";
-        addMsg.className = "msg ok";
-      } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+        opmsg((res.restarted||[]).length ? "Файл #"+id+" запущен снова" : "Файл #"+id+" не перезапущен", "ok");
+      } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-move]").forEach(b=>{
@@ -211,7 +216,7 @@ function renderQueue(rows){
         newOrder2.splice(insertAt,0,...block);
         newOrder = newOrder2;
       }
-      try { await rpc("reorder", {order:newOrder}); } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+      try { await rpc("reorder", {order:newOrder}); } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-chk]").forEach(cb=>{
@@ -296,7 +301,7 @@ function renderQueue(rows){
       const localDragIds = dragIds;
       dragIds=null;
       queueBody.querySelectorAll("tr").forEach(x=>x.classList.remove("dragging","drop-before","drop-after"));
-      try { await rpc("reorder", {order:newOrder}); } catch(err){ addMsg.textContent=err.message; addMsg.className="msg err"; }
+      try { await rpc("reorder", {order:newOrder}); } catch(err){ opmsg(err.message, "err"); }
     });
   });
   // глобальный отменщик правым кликом
@@ -376,35 +381,38 @@ addForm.addEventListener("submit", async (e)=>{
 btnPause.addEventListener("click", async ()=>{
   const willPause = !isPaused;
   if (willPause) { if (!confirm("Остановить очередь? Текущие файлы доработают, новые не запустятся.")) return; }
-  try { await rpc(willPause ? "pause" : "resume", {}); } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+  try {
+    await rpc(willPause ? "pause" : "resume", {});
+    opmsg(willPause ? "Очередь остановлена" : "Очередь запущена", "ok");
+  } catch(e){ opmsg(e.message, "err"); }
 });
 btnClearCompleted.addEventListener("click", async ()=>{
   const done = currentRows.filter(r=>r.state==="ok"||r.state==="skip"||r.state==="error");
-  if (done.length===0) { addMsg.textContent="Нет завершённых файлов"; addMsg.className="msg"; return; }
+  if (done.length===0) { opmsg("Нет завершённых файлов", ""); return; }
   if (!confirm(`Удалить ${done.length} завершённых файлов из списка?`)) return;
   for (const r of done) { try{ await rpc("remove", {id:r.id}); }catch(e){} }
+  opmsg("Удалено завершённых: "+done.length, "ok");
 });
 btnBatchStop && btnBatchStop.addEventListener("click", async ()=>{
   const ids = [...selectedIds].filter(id=>{
     const r = currentRows.find(x=>x.id===id);
     return r && (r.state==="queued"||r.state==="prep"||r.state==="running");
   });
-  if (!ids.length) { addMsg.textContent="Нет активных файлов среди выделенных"; addMsg.className="msg"; return; }
+  if (!ids.length) { opmsg("Нет активных файлов среди выделенных", ""); return; }
   for (let id of ids) try{ await rpc("cancel-file", {id}); }catch(e){}
-  addMsg.textContent="Остановлено: "+ids.length; addMsg.className="msg ok";
+  opmsg("Остановлено: "+ids.length, "ok");
 });
 const btnBatchStart = el("btn-batch-start");
 btnBatchStart && btnBatchStart.addEventListener("click", async ()=>{
-  const ids = [...selectedIds].filter(id=>{
-    const r = currentRows.find(x=>x.id===id);
-    return r && (r.state==="ok"||r.state==="skip"||r.state==="error");
-  });
-  if (!ids.length) { addMsg.textContent="Нет завершённых файлов среди выделенных"; addMsg.className="msg"; return; }
+  // Серверный restart универсален: завершённые запускает сразу, активные
+  // сначала останавливает и ждёт — фильтровать не нужно, шлём всех.
+  const ids = [...selectedIds];
+  if (!ids.length) { opmsg("Ничего не выбрано — отметьте файлы галками", ""); return; }
+  opmsg("Запуск выделенных...", "");
   try {
     const res = await rpc("restart", {ids});
-    addMsg.textContent="Запущено снова: "+((res.restarted||[]).length)+" из "+ids.length;
-    addMsg.className="msg ok";
-  } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+    opmsg("Запущено снова: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
+  } catch(e){ opmsg(e.message, "err"); }
 });
 btnBatchDelete && btnBatchDelete.addEventListener("click", async ()=>{
   const ids = [...selectedIds];
@@ -428,7 +436,7 @@ chkAll && chkAll.addEventListener("change", ()=>{
 });
 el("btn-shutdown").addEventListener("click", async ()=>{
   if(!confirm("Выключить демон? Обработка активных файлов завершится, затем демон остановится.")) return;
-  try{ await rpc("shutdown", {}); setConn(false,"Демон выключается..."); }catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+  try{ await rpc("shutdown", {}); setConn(false,"Демон выключается..."); }catch(e){ opmsg(e.message, "err"); }
 });
 
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) pollState(); });
