@@ -438,5 +438,8 @@ document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) pollSta
   if (/[^\x20-\x7E]/.test(token)) token = "";
   try { localStorage.setItem(LS_TOKEN, token); } catch (e) {}
   if (token) { tokenInput.value = token; showApp(); }
-  else showLogin();
+  else {
+    // Сервер может работать без авторизации (--no-auth): проверяем.
+    fetch("/api/state").then(r=>{ if (r.ok) showApp(); else showLogin(); }).catch(()=>showLogin());
+  }
 })();

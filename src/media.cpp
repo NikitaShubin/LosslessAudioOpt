@@ -158,7 +158,8 @@ Probe probe_file(const std::string& path, const std::string& ffprobe) {
 }
 
 bool decode_to_wav(const std::string& input, const std::string& output_wav,
-                   const std::string& ffmpeg, int bits, std::string* err) {
+                   const std::string& ffmpeg, int bits, std::string* err,
+                   const std::atomic<bool>* kill) {
     std::string bin = ffmpeg.empty() ? find_ffmpeg() : ffmpeg;
     if (bin.empty()) {
 #ifdef _WIN32
@@ -174,7 +175,7 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
     else codec = "pcm_s32le";
     proc::Result r = proc::run({bin, "-y", "-loglevel", "error", "-i", input,
                                 "-c:a", codec, output_wav},
-                               600);
+                               600, "", {}, kill);
     if (!r.started) {
         *err = i18n::str("could not launch ffmpeg: ") + r.error;
         return false;

@@ -365,7 +365,8 @@ enum class DecodeStatus { Ok, NeedsCopy, Failed };
 //   Failed    — декод упал (алиас создавался; проблема не в имени)
 //   NeedsCopy — декод упал + алиас не создался (нужна полная копия файла)
 static DecodeStatus decode_source_native(const config::Format* src_fmt, const std::string& path,
-                                         const std::string& out_wav, int bits) {
+                                         const std::string& out_wav, int bits,
+                                         const std::atomic<bool>* kill = nullptr) {
     if (!src_fmt) return DecodeStatus::Failed;
     tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ");
     if (sst.path.empty()) return DecodeStatus::Failed;
@@ -396,7 +397,7 @@ static DecodeStatus decode_source_native(const config::Format* src_fmt, const st
         sargs = build_cmd(src_fmt->decode_cmd, senv.decoder, input_path, out_wav, {},
                           src_fmt->engine_codec, src_fmt->engine_container);
     }
-    proc::Result dr = proc::run(sargs, senv.decode_timeout);
+    proc::Result dr = proc::run(sargs, senv.decode_timeout, "", {}, kill);
     bool ok = dr.started && !dr.timed_out && dr.exit_code == 0 && util::file_exists(out_wav);
     if (!ok) util::remove_file(out_wav);
 
@@ -412,7 +413,8 @@ static DecodeStatus decode_source_native(const config::Format* src_fmt, const st
 // monitor — опциональный stall detection (файл не растёт + CPU ≈ 0 → kill).
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
                              const std::vector<std::string>& params, const Env& env,
-                             const proc::OutputMonitor& monitor = {}) {
+                             const proc::OutputMonitor& monitor = {},
+                             const std::atomic<bool>* kill = nullptr) {
     const config::Format& f = *env.fmt;
     std::vector<std::string> encode_args =
         build_cmd(f.encode_cmd, env.encoder, wav, candidate, params, f.engine_codec,
@@ -420,7 +422,7 @@ std::string encode_candidate(const std::string& wav, const std::string& candidat
     // Если monitor задан с hard_timeout_sec — он заменяет encode_timeout
     // (пропорциональный лимит вместо фиксированного).
     int effective_timeout = monitor.hard_timeout_sec > 0 ? 0 : env.encode_timeout;
-    proc::Result r = proc::run(encode_args, effective_timeout, "", monitor);
+    proc::Result r = proc::run(encode_args, effective_timeout, "", monitor, kill);
     if (!r.started) return i18n::str("could not launch the encoder: ") + r.error;
     if (r.stalled) return i18n::str("encoder stalled (no progress)");
     if (r.timed_out) return i18n::str("encoder exceeded the timeout");
@@ -437,12 +439,13 @@ std::string encode_candidate(const std::string& wav, const std::string& candidat
 // и побитовое сравнение PCM с эталонным WAV (потоковое, без загрузки в память).
 // Возвращает пустую строку при успехе, иначе текст ошибки.
 std::string validate_candidate(const std::string& wav, const std::string& candidate,
-                               const Env& env) {
+                               const Env& env,
+                               const std::atomic<bool>* kill = nullptr) {
     const config::Format& f = *env.fmt;
     if (f.verify_kind == "builtin" && !f.verify_cmd.empty()) {
         std::vector<std::string> vargs = build_cmd(f.verify_cmd, env.decoder, candidate, "",
                                                    {}, f.engine_codec, f.engine_container);
-        proc::Result vr = proc::run(vargs, env.verify_timeout);
+        proc::Result vr = proc::run(vargs, env.verify_timeout, "", {}, kill);
         if (!vr.started || vr.timed_out || vr.exit_code != 0) {
             return i18n::str("built-in verification failed") +
                    (util::trim(vr.output).empty() ? "" : ": " + util::trim(vr.output));
@@ -461,7 +464,7 @@ std::string validate_candidate(const std::string& wav, const std::string& candid
         dec_args = build_cmd(f.decode_cmd, env.decoder, candidate, dec_wav, {}, f.engine_codec,
                              f.engine_container);
     }
-    proc::Result dr = proc::run(dec_args, env.decode_timeout);
+    proc::Result dr = proc::run(dec_args, env.decode_timeout, "", {}, kill);
     if (!dr.started || dr.timed_out || dr.exit_code != 0) {
         if (util::file_exists(dec_wav)) util::remove_file(dec_wav);
         std::string out = util::trim(dr.output);
@@ -541,6 +544,9 @@ struct FileJob {
     bool prep_running = false;  // prep активно выполняется в worker (под g_qm)
     bool done = false;
     bool cancelled = false;  // файл снят из очереди (remove/cancel-file): не запускать
+    // Мгновенная остановка связанных процессов (remove/shutdown): проверяется
+    // в цикле опроса proc::run (200 мс). Адрес стабилен (jobs — unique_ptr).
+    std::atomic<bool> kill_requested{false};
 
     // --- подготовка (один поток prep, до выпуска задач) ---
     bool prep_ok = false;
@@ -743,6 +749,7 @@ struct Runner {
         if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
             j.cancelled = true;
+            j.kill_requested.store(true, std::memory_order_relaxed);
             j.done = true;
             j.summary.path = j.path;
             j.summary.status = "skip";
@@ -752,7 +759,9 @@ struct Runner {
             cv.notify_all();
             obs::sink()->mark_skip(idx);
         } else {
-            // запущен: запрещаем новые задачи, текущие доработают.
+            // запущен: запрещаем новые задачи, активные процессы убиваем
+            // мгновенно через kill_requested (проверяется в proc::run).
+            j.kill_requested.store(true, std::memory_order_relaxed);
             std::lock_guard<std::mutex> jl(*j.m);
             j.cancelled = true;
         }
@@ -1036,20 +1045,24 @@ struct Runner {
         if (!decoded) {
             const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
             if (src_fmt) {
-                DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, bits);
+                DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, bits,
+                                                       &j.kill_requested);
                 if (ds == DecodeStatus::NeedsCopy) {
                     std::string copy = util::join_path(j.session->dir(),
                                                        "src_copy." + lower_ext(j.path));
                     if (util::copy_file(j.path, copy)) {
-                        ds = decode_source_native(src_fmt, copy, ref_wav, bits);
+                        ds = decode_source_native(src_fmt, copy, ref_wav, bits,
+                                                  &j.kill_requested);
                         util::remove_file(copy);
                     }
                 }
                 decoded = (ds == DecodeStatus::Ok);
             }
         }
-        if (!decoded) decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr);
-        if (proc::aborted()) {
+        if (!decoded)
+            decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr,
+                                           &j.kill_requested);
+        if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
             release_deferred_budget();
             if (j.session) j.session->cleanup();
             return;
@@ -1129,7 +1142,9 @@ struct Runner {
         const config::Variant& v = f.variants[td.variant_idx];
         const Env& env = j.envs[f.id];
 
-        if (proc::cancelled() || proc::aborted()) return VariantOutcome::Cancelled;
+        if (proc::cancelled() || proc::aborted() ||
+            j.kill_requested.load(std::memory_order_relaxed))
+            return VariantOutcome::Cancelled;
 
         // CPU-снимок в начале задачи: разность на момент записи rec — затраты на
         // этот вариант (внешние процессы через proc::run + собственный поток),
@@ -1188,10 +1203,13 @@ struct Runner {
         // В режиме All каждый кандидат полностью проверяется здесь.
         // Winner/None — только кодирование; победитель валидируется в finalize_file
         // (режим Winner) или не проверяется вовсе (None).
-        std::string verr = encode_candidate(j.session->ref_wav_path(), candidate, v.args, env, mon);
+        std::string verr = encode_candidate(j.session->ref_wav_path(), candidate, v.args, env,
+                                            mon, &j.kill_requested);
         if (verr.empty() && opts.verify == Verify::All)
-            verr = validate_candidate(j.session->ref_wav_path(), candidate, env);
-        if (proc::cancelled() || proc::aborted()) {
+            verr = validate_candidate(j.session->ref_wav_path(), candidate, env,
+                                      &j.kill_requested);
+        if (proc::cancelled() || proc::aborted() ||
+            j.kill_requested.load(std::memory_order_relaxed)) {
             util::remove_file(candidate);
             return VariantOutcome::Cancelled;
         }
@@ -1909,6 +1927,9 @@ size_t Engine::total_count() {
 void Engine::shutdown() {
     Impl& i = *impl_;
     if (!i.started) return;
+    // Мгновенная остановка: убить активные дочерние процессы сразу
+    // (проверяется в цикле опроса proc::run), затем ждать воркеры.
+    proc::abort_all();
     i.r.shutdown_requested.store(true);
     i.r.cv.notify_all();
     for (auto& t : i.threads) {
