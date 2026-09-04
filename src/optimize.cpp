@@ -1330,6 +1330,23 @@ struct Runner {
 
         std::lock_guard<std::mutex> lk(*j.m);
         std::vector<json::json> records = std::move(j.stat_records);
+        if (j.cancelled) {
+            // Файл снят из очереди во время обработки (remove/cancel-file):
+            // доработавшие задачи игнорируются, замена запрещена, tmp чистится.
+            j.summary.path = j.path;
+            j.summary.status = "skip";
+            j.summary.detail = i18n::str("removed from queue");
+            rm.release_disk(j.peak_file);
+            j.session.reset();
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "skip"},
+                               {"reason", j.summary.detail}});
+            }
+            obs::sink()->mark_skip(j.idx);
+            return;
+        }
         j.summary.path = j.path;
         j.summary.exclusions = j.exclusions;
 

@@ -3,6 +3,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -87,6 +88,10 @@ private:
     mutable std::mutex m_;
     std::map<size_t, Row> rows_;
     std::vector<size_t> order_;  // порядок очереди (ids); пусто = по id
+    // Tombstones удалённых строк: запоздалые события движка (воркер
+    // дорабатывает снятый файл) не должны воскрешать строку-призрака.
+    // Id файлов монотонны и не переиспользуются, tombstone вечен.
+    std::set<size_t> removed_;
 };
 
 }  // namespace dsvc

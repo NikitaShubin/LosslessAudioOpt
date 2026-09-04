@@ -142,6 +142,7 @@ function renderQueue(rows){
     if (r.state==="queued"||r.state==="prep"||r.state==="running") {
       actions += `<button data-stop="${r.id}" title="Остановить">⏸</button> `;
     } else {
+      actions += `<button data-restart="${r.id}" title="Запустить снова">↻</button> `;
       actions += `<button data-remove="${r.id}" class="danger" title="Удалить">🗑</button> `;
     }
     const canUp = i>0, canDown = i<rows.length-1;
@@ -167,6 +168,16 @@ function renderQueue(rows){
       const id = parseInt(b.getAttribute("data-remove"),10);
       if (!confirm(`Удалить файл #${id} из очереди?`)) return;
       try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
+    });
+  });
+  queueBody.querySelectorAll("[data-restart]").forEach(b=>{
+    b.addEventListener("click", async ()=>{
+      const id = parseInt(b.getAttribute("data-restart"),10);
+      try {
+        const res = await rpc("restart", {ids:[id]});
+        addMsg.textContent = (res.restarted||[]).length ? "Файл #"+id+" запущен снова" : "Файл #"+id+" не перезапущен";
+        addMsg.className = "msg ok";
+      } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
     });
   });
   queueBody.querySelectorAll("[data-move]").forEach(b=>{
@@ -374,9 +385,26 @@ btnClearCompleted.addEventListener("click", async ()=>{
   for (const r of done) { try{ await rpc("remove", {id:r.id}); }catch(e){} }
 });
 btnBatchStop && btnBatchStop.addEventListener("click", async ()=>{
-  const ids = [...selectedIds];
-  if (!ids.length) return;
+  const ids = [...selectedIds].filter(id=>{
+    const r = currentRows.find(x=>x.id===id);
+    return r && (r.state==="queued"||r.state==="prep"||r.state==="running");
+  });
+  if (!ids.length) { addMsg.textContent="Нет активных файлов среди выделенных"; addMsg.className="msg"; return; }
   for (let id of ids) try{ await rpc("cancel-file", {id}); }catch(e){}
+  addMsg.textContent="Остановлено: "+ids.length; addMsg.className="msg ok";
+});
+const btnBatchStart = el("btn-batch-start");
+btnBatchStart && btnBatchStart.addEventListener("click", async ()=>{
+  const ids = [...selectedIds].filter(id=>{
+    const r = currentRows.find(x=>x.id===id);
+    return r && (r.state==="ok"||r.state==="skip"||r.state==="error");
+  });
+  if (!ids.length) { addMsg.textContent="Нет завершённых файлов среди выделенных"; addMsg.className="msg"; return; }
+  try {
+    const res = await rpc("restart", {ids});
+    addMsg.textContent="Запущено снова: "+((res.restarted||[]).length)+" из "+ids.length;
+    addMsg.className="msg ok";
+  } catch(e){ addMsg.textContent=e.message; addMsg.className="msg err"; }
 });
 btnBatchDelete && btnBatchDelete.addEventListener("click", async ()=>{
   const ids = [...selectedIds];
