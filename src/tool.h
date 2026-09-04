@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <string>
 
 #include "config.h"
@@ -13,6 +14,8 @@ struct Status {
 
 // Обеспечивает доступность утилиты формата:
 //   кэш bin/<id>/.binary -> PATH -> скачивание по downloads[].
-Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix = "");
+// kill — опциональный флаг мгновенной остановки (см. proc::run).
+Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix = "",
+              const std::atomic<bool>* kill = nullptr);
 
 }  // namespace tool
