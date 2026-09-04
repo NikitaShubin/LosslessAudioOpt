@@ -35,15 +35,31 @@ function showApp() {
   startPoll();
 }
 
+function sanitizeToken(t) {
+  return String(t == null ? "" : t).replace(/\s+/g, "");
+}
 async function api(path, opts) {
   opts = opts || {};
   opts.headers = opts.headers || {};
-  if (token) opts.headers["Authorization"] = "Bearer " + token;
+  if (token) {
+    const clean = sanitizeToken(token);
+    if (clean !== token) token = clean;
+    if (/[^\x20-\x7E]/.test(clean) || clean.length === 0) {
+      showLogin("В токене недопустимые символы. Скопируйте 64 hex-символа из консоли демона без пробелов.");
+      throw new Error("bad token");
+    }
+    opts.headers["Authorization"] = "Bearer " + clean;
+  }
   if (opts.body && typeof opts.body !== "string") {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(opts.body);
   }
-  const r = await fetch(path, opts);
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (e) {
+    throw new Error("Сеть: " + (e && e.message ? e.message : e));
+  }
   if (r.status === 401) { showLogin("Неверный токен (401). Введите корректный токен."); throw new Error("401"); }
   return r;
 }
@@ -314,9 +330,12 @@ function stopPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } 
 
 loginForm.addEventListener("submit", (e)=>{
   e.preventDefault();
-  const t = tokenInput.value.trim();
+  const t = sanitizeToken(tokenInput.value);
   if (!t) { loginError.textContent="Введите токен"; loginError.classList.remove("hidden"); return; }
+  if (/[^\x20-\x7E]/.test(t)) { loginError.textContent="В токене недопустимые символы. Скопируйте 64 hex-символа без пробелов."; loginError.classList.remove("hidden"); return; }
+  if (!/^[0-9a-fA-F]{32,256}$/.test(t)) { loginError.textContent="Токен должен быть hex-строкой (как в консоли демона). Лишние символы удалены, проверьте длину."; loginError.classList.remove("hidden"); }
   token = t; localStorage.setItem(LS_TOKEN, token);
+  tokenInput.value = t;
   showApp();
   pollState().catch(()=>{});
 });
@@ -379,6 +398,9 @@ el("btn-shutdown").addEventListener("click", async ()=>{
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) pollState(); });
 
 (function init(){
-  if (token) { showApp(); }
+  token = sanitizeToken(token);
+  if (/[^\x20-\x7E]/.test(token)) token = "";
+  try { localStorage.setItem(LS_TOKEN, token); } catch (e) {}
+  if (token) { tokenInput.value = token; showApp(); }
   else showLogin();
 })();
