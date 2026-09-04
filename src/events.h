@@ -96,6 +96,13 @@ private:
     // дорабатывает снятый файл) не должны воскрешать строку-призрака.
     // Id файлов монотонны и не переиспользуются, tombstone вечен.
     std::set<size_t> removed_;
+
+    // Инвариант: order_ содержит ровно id из rows_ (для snapshot).
+    // Вызывать под m_ после создания строки через rows_[id].
+    void touch_locked(size_t id) {
+        if (std::find(order_.begin(), order_.end(), id) == order_.end())
+            order_.push_back(id);
+    }
 };
 
 }  // namespace dsvc
