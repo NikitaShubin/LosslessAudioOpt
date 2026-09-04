@@ -440,10 +440,23 @@ static void test_rpc_matrix() {
     auto resume = dsvc::call(d, "resume", nlohmann::json::object());
     CHECK(resume["ok"] == true && d.paused_flag == false);
 
-    // cancel-file: без id -> id 0 по умолчанию, всё равно ok
+    // cancel-file: без id -> bad_args (раньше молча брал 0)
     auto cf = dsvc::call(d, "cancel-file", nlohmann::json::object());
-    CHECK(cf["ok"] == true);
-    CHECK(d.cancelled_id == (uint64_t)0);
+    CHECK(cf["ok"] == false && cf["code"] == "bad_args");
+    auto cf1 = dsvc::call(d, "cancel-file", {{"id", 3}});
+    CHECK(cf1["ok"] == true);
+    CHECK(d.cancelled_id == (uint64_t)3);
+    // кривые типы id не бросают исключений — bad_args
+    for (auto bad_id : {nlohmann::json(-1), nlohmann::json("x"),
+                        nlohmann::json(1.5), nlohmann::json(nullptr),
+                        nlohmann::json(true)}) {
+        auto r = dsvc::call(d, "cancel-file", {{"id", bad_id}});
+        CHECK(r["ok"] == false && r["code"] == "bad_args");
+        auto r2 = dsvc::call(d, "remove", {{"id", bad_id}});
+        CHECK(r2["ok"] == false && r2["code"] == "bad_args");
+    }
+    auto rm_missing = dsvc::call(d, "remove", nlohmann::json::object());
+    CHECK(rm_missing["ok"] == false);
     // remove true/false: ответ ok в обоих случаях
     auto rm1 = dsvc::call(d, "remove", {{"id", 1}});
     CHECK(rm1["ok"] == true && rm1["result"]["removed"] == true);
@@ -462,6 +475,16 @@ static void test_rpc_matrix() {
     CHECK(ro_bad["ok"] == false && ro_bad["code"] == "bad_args");
     auto ro_empty = dsvc::call(d, "reorder", nlohmann::json::object());
     CHECK(ro_empty["ok"] == false);
+    // кривые элементы массива не бросают исключений — bad_args
+    for (auto bad_arr : {nlohmann::json({0, -1}), nlohmann::json({"a"}),
+                         nlohmann::json({1.5}), nlohmann::json({nullptr})}) {
+        auto r = dsvc::call(d, "reorder", {{"order", bad_arr}});
+        CHECK(r["ok"] == false && r["code"] == "bad_args");
+        auto r2 = dsvc::call(d, "restart", {{"ids", bad_arr}});
+        CHECK(r2["ok"] == false && r2["code"] == "bad_args");
+    }
+    auto rs_badid = dsvc::call(d, "restart", {{"id", -1}});
+    CHECK(rs_badid["ok"] == false);
 
     // stat: типы путей через фейк утилит не проверить, но формат ответа — да
     auto st = dsvc::call(d, "stat", {{"paths", {"/tmp", "/nope"}}});
@@ -477,9 +500,30 @@ static void test_rpc_matrix() {
     CHECK(ad["ok"] == true);
     CHECK(ad["result"]["added"].empty() && ad["result"]["rejected"].empty());
 
-    // shutdown без force -> force=false
+    // add: paths не массив -> bad_args; не-строки -> rejected
+    auto ad_np = dsvc::call(d, "add", {{"paths", "nope"}});
+    CHECK(ad_np["ok"] == false && ad_np["code"] == "bad_args");
+    auto ad_ns = dsvc::call(d, "add", {{"paths", {42, "ok.wav"}}});
+    CHECK(ad_ns["ok"] == true);
+    CHECK(ad_ns["result"]["rejected"].size() == 1);
+    CHECK(ad_ns["result"]["rejected"][0]["reason"] == "not a string path");
+    // add: кривой recursive игнорируется (default true), не исключение
+    auto ad_rc = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
+                                       {"recursive", "yes"}});
+    CHECK(ad_rc["ok"] == true);
+
+    // stat: paths не массив -> bad_args; не-строки -> invalid
+    auto st_np = dsvc::call(d, "stat", {{"paths", "nope"}});
+    CHECK(st_np["ok"] == false && st_np["code"] == "bad_args");
+    auto st_ns = dsvc::call(d, "stat", {{"paths", {42}}});
+    CHECK(st_ns["ok"] == true);
+    CHECK(st_ns["result"]["paths"][0]["type"] == "invalid");
+
+    // shutdown без force -> force=false; кривой force игнорируется
     auto sd = dsvc::call(d, "shutdown", nlohmann::json::object());
     CHECK(sd["ok"] == true && d.shut_force == false);
+    auto sd_f = dsvc::call(d, "shutdown", {{"force", "yes"}});
+    CHECK(sd_f["ok"] == true && d.shut_force == false);
 
     // restart: cancel_exists=false -> пустой restarted, но ok
     d.cancel_exists = false;

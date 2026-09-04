@@ -35,3 +35,6 @@ scratch_err/
 test-unit
 test-daemon-core
 tests/wine_*
+
+# FUSE transient files (killed daemons holding open binaries)
+.fuse_hidden*

@@ -17,6 +17,53 @@ nlohmann::json err(const std::string& code, const std::string& msg) {
     return {{"ok", false}, {"code", code}, {"error", msg}};
 }
 
+// Строгое чтение аргументов: никаких исключений наружу — некорректный тип
+// это bad_args, а не 500/обрыв соединения. nlohmann get<>() на неверном
+// типе бросает type_error, поэтому сначала проверяем is_*().
+// Принимаем целое неотрицательное (JSON-парсер даёт number_integer
+// даже для "3", поэтому is_number_unsigned() здесь не подходит).
+bool get_uint(const nlohmann::json& args, const char* key, uint64_t& out) {
+    if (!args.is_object() || !args.contains(key)) return false;
+    const auto& v = args[key];
+    if (v.is_number_unsigned()) {
+        out = v.get<uint64_t>();
+        return true;
+    }
+    if (v.is_number_integer() && v.get<int64_t>() >= 0) {
+        out = (uint64_t)v.get<int64_t>();
+        return true;
+    }
+    return false;
+}
+
+bool get_bool(const nlohmann::json& args, const char* key, bool dflt) {
+    if (!args.is_object() || !args.contains(key)) return dflt;
+    const auto& v = args[key];
+    if (!v.is_boolean()) return dflt;
+    return v.get<bool>();
+}
+
+bool get_id_list(const nlohmann::json& args, const char* key,
+                 std::vector<uint64_t>& out) {
+    if (!args.is_object() || !args.contains(key)) return false;
+    const auto& arr = args[key];
+    if (!arr.is_array()) return false;
+    for (const auto& v : arr) {
+        uint64_t one = 0;
+        bool ok = false;
+        if (v.is_number_unsigned()) {
+            one = v.get<uint64_t>();
+            ok = true;
+        } else if (v.is_number_integer() && v.get<int64_t>() >= 0) {
+            one = (uint64_t)v.get<int64_t>();
+            ok = true;
+        }
+        if (!ok) return false;
+        out.push_back(one);
+    }
+    return true;
+}
+
 }  // namespace
 
 nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& args) {
@@ -35,9 +82,18 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
 
     if (cmd == "stat") {
         std::vector<std::string> paths;
-        if (args.is_object() && args.contains("paths") && args["paths"].is_array())
-            for (const auto& p : args["paths"]) paths.push_back(p.get<std::string>());
         nlohmann::json list = nlohmann::json::array();
+        if (args.is_object() && args.contains("paths")) {
+            if (!args["paths"].is_array())
+                return err("bad_args", "paths must be an array");
+            for (const auto& p : args["paths"]) {
+                if (!p.is_string()) {
+                    list.push_back({{"path", "<non-string>"}, {"type", "invalid"}});
+                    continue;
+                }
+                paths.push_back(p.get<std::string>());
+            }
+        }
         for (const auto& p : paths) {
             std::string type = util::dir_exists(p) ? "dir"
                                  : util::file_exists(p) ? "file"
@@ -49,33 +105,46 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
 
     if (cmd == "add") {
         std::vector<std::string> paths;
-        if (args.is_object() && args.contains("paths") && args["paths"].is_array())
-            for (const auto& p : args["paths"]) paths.push_back(p.get<std::string>());
-        bool recursive = args.is_object() && args.value("recursive", true);
         nlohmann::json result = {{"added", nlohmann::json::array()},
                                  {"rejected", nlohmann::json::array()}};
+        if (args.is_object() && args.contains("paths")) {
+            if (!args["paths"].is_array())
+                return err("bad_args", "paths must be an array");
+            for (const auto& p : args["paths"]) {
+                if (!p.is_string()) {
+                    result["rejected"].push_back(
+                        {{"path", "<non-string>"}, {"reason", "not a string path"}});
+                    continue;
+                }
+                paths.push_back(p.get<std::string>());
+            }
+        }
+        bool recursive = get_bool(args, "recursive", true);
         d.add(paths, recursive, result);
         return ok(result);
     }
 
     if (cmd == "cancel-file") {
-        uint64_t id = args.is_object() && args.contains("id") ? args["id"].get<uint64_t>() : 0;
+        uint64_t id = 0;
+        if (!get_uint(args, "id", id)) return err("bad_args", "missing numeric id");
         bool existed = d.cancel_file(id);
         return ok({{"deleted", existed}});
     }
 
     if (cmd == "remove") {
-        uint64_t id = args.is_object() && args.contains("id") ? args["id"].get<uint64_t>() : 0;
+        uint64_t id = 0;
+        if (!get_uint(args, "id", id)) return err("bad_args", "missing numeric id");
         bool ok_ = d.remove(id);
         return ok({{"removed", ok_}});
     }
 
     if (cmd == "restart") {
         std::vector<uint64_t> ids;
-        if (args.is_object() && args.contains("ids") && args["ids"].is_array()) {
-            for (const auto& v : args["ids"]) ids.push_back(v.get<uint64_t>());
-        } else if (args.is_object() && args.contains("id")) {
-            ids.push_back(args["id"].get<uint64_t>());
+        uint64_t single = 0;
+        if (get_id_list(args, "ids", ids)) {
+            // ok
+        } else if (get_uint(args, "id", single)) {
+            ids.push_back(single);
         } else {
             return err("bad_args", "missing ids array");
         }
@@ -96,21 +165,17 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
     }
 
     if (cmd == "reorder") {
-        std::vector<size_t> order;
-        if (args.is_object() && args.contains("order") && args["order"].is_array()) {
-            for (const auto& v : args["order"]) order.push_back(v.get<size_t>());
-        } else if (args.is_object() && args.contains("ids") && args["ids"].is_array()) {
-            for (const auto& v : args["ids"]) order.push_back(v.get<size_t>());
-        } else {
+        std::vector<uint64_t> raw;
+        if (!(get_id_list(args, "order", raw) || get_id_list(args, "ids", raw)))
             return err("bad_args", "missing order array");
-        }
+        std::vector<size_t> order(raw.begin(), raw.end());
         bool ok_ = d.reorder(order);
         if (!ok_) return err("bad_args", "invalid order");
         return ok({{"reordered", true}});
     }
 
     if (cmd == "shutdown") {
-        bool force = args.is_object() && args.value("force", false);
+        bool force = get_bool(args, "force", false);
         d.request_shutdown(force);
         return ok({{"shutdown", true}});
     }
