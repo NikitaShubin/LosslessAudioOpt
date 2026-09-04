@@ -58,6 +58,14 @@ public:
     void shutdown();
 
 private:
+    // Ядро операций под mt_: движок — единственный источник истины очереди,
+    // mt_ сериализует check-then-act между параллельными RPC (два таба,
+    // cli+web). Порядок блокировок везде mt_ -> qm движка -> мьютексы
+    // зеркала/событий; обратного вложения нет.
+    void add_locked(const std::vector<std::string>& paths,
+                    nlohmann::json& result, std::vector<size_t>& new_ids);
+    bool remove_locked(uint64_t id);
+
     optimize::Options opts_;
     EventBuffer* ev_ = nullptr;
     StateMirror* st_ = nullptr;

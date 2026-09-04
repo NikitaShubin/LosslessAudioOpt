@@ -212,48 +212,52 @@ void DaemonSession::set_paused(bool paused) {
     }
 }
 
+void DaemonSession::add_locked(const std::vector<std::string>& paths,
+                               nlohmann::json& result, std::vector<size_t>& new_ids) {
+    std::vector<std::string> accepted;
+    for (const auto& p : paths) {
+        if (p.empty()) {
+            result["rejected"].push_back({{"path", p}, {"reason", "empty path"}});
+            continue;
+        }
+        bool is_dir = util::dir_exists(p);
+        if (!is_dir && !util::file_exists(p)) {
+            result["rejected"].push_back(
+                {{"path", p},
+                 {"reason", "path not found on daemon host (use --upload in client)"}});
+            continue;
+        }
+        if (added_paths_.count(p)) {
+            // Если путь был удалён/завершён — разрешить повторное добавление
+            bool still_active = false;
+            if (engine_) {
+                auto snap = engine_->snapshot();
+                for (const auto& f : snap) if (f.path == p) {
+                    if (f.state == "queued" || f.state == "prep" || f.state == "running" || f.state == "removed") still_active = true;
+                    break;
+                }
+            }
+            if (still_active) {
+                result["rejected"].push_back({{"path", p}, {"reason", "already in queue"}});
+                continue;
+            } else {
+                added_paths_.erase(p);
+            }
+        }
+        added_paths_.insert(p);
+        accepted.push_back(p);
+    }
+    if (!accepted.empty() && engine_) new_ids = engine_->add(accepted);
+}
+
 void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*/,
                         nlohmann::json& result) {
-    // Движок — единственный источник истины очереди: вся приёмка и само
-    // добавление идут под mt_, дубли исключены даже при параллельных add.
+    // Вся приёмка и само добавление — под mt_ (см. комментарий в serve.h).
     // Ответ строится по idx, возвращённым движком, а не по размеру зеркала.
     std::vector<size_t> new_ids;
     {
         std::lock_guard<std::mutex> lk(mt_);
-        std::vector<std::string> accepted;
-        for (const auto& p : paths) {
-            if (p.empty()) {
-                result["rejected"].push_back({{"path", p}, {"reason", "empty path"}});
-                continue;
-            }
-            bool is_dir = util::dir_exists(p);
-            if (!is_dir && !util::file_exists(p)) {
-                result["rejected"].push_back(
-                    {{"path", p},
-                     {"reason", "path not found on daemon host (use --upload in client)"}});
-                continue;
-            }
-            if (added_paths_.count(p)) {
-                // Если путь был удалён/завершён — разрешить повторное добавление
-                bool still_active = false;
-                if (engine_) {
-                    auto snap = engine_->snapshot();
-                    for (const auto& f : snap) if (f.path == p) {
-                        if (f.state == "queued" || f.state == "prep" || f.state == "running" || f.state == "removed") still_active = true;
-                        break;
-                    }
-                }
-                if (still_active) {
-                    result["rejected"].push_back({{"path", p}, {"reason", "already in queue"}});
-                    continue;
-                } else {
-                    added_paths_.erase(p);
-                }
-            }
-            added_paths_.insert(p);
-            accepted.push_back(p);
-        }
-        if (!accepted.empty() && engine_) new_ids = engine_->add(accepted);
+        add_locked(paths, result, new_ids);
     }
     bool need_resume = !new_ids.empty() && paused_.load();
     if (need_resume) set_paused(false);
@@ -271,37 +275,54 @@ void DaemonSession::add(const std::vector<std::string>& paths, bool /*recursive*
 }
 
 bool DaemonSession::cancel_file(uint64_t id) {
-    return engine_ && engine_->remove(id);
+    if (!engine_) return false;
+    std::lock_guard<std::mutex> lk(mt_);
+    auto snap = engine_->snapshot();
+    for (const auto& f : snap)
+        if (f.idx == (size_t)id) {
+            engine_->remove((size_t)id);
+            return true;
+        }
+    return false;
+}
+
+bool DaemonSession::remove_locked(uint64_t id) {
+    if (!engine_) return false;
+    std::string path_to_remove;
+    bool found = false;
+    bool is_done = false;
+    auto snap_before = engine_->snapshot();
+    for (const auto& f : snap_before)
+        if (f.idx == (size_t)id) {
+            found = true;
+            path_to_remove = f.path;
+            is_done = (f.state == "ok" || f.state == "skip" || f.state == "error" ||
+                       f.state == "removed");
+            break;
+        }
+    if (!found) return false;
+    engine_->remove((size_t)id);
+    // is_done здесь не важен: cancel действующего и стирание завершённого
+    // обрабатываются одинаково — строка уходит из зеркала с tombstone.
+    (void)is_done;
+    st_->remove((size_t)id);
+    if (!path_to_remove.empty()) added_paths_.erase(path_to_remove);
+    ev_->push("removed", {{"id", id}});
+    return true;
 }
 
 bool DaemonSession::remove(uint64_t id) {
-    if (!engine_) return false;
-    std::string path_to_remove;
-    auto snap_before = engine_->snapshot();
-    for (const auto& f : snap_before) if (f.idx == (size_t)id) { path_to_remove = f.path; break; }
-    bool ok = engine_->remove((size_t)id);
-    bool is_done = false;
-    for (const auto& f : snap_before) if (f.idx == (size_t)id) {
-        is_done = (f.state == "ok" || f.state == "skip" || f.state == "error" || f.state == "removed");
-        break;
-    }
-    if (!ok && is_done) ok = true;
-    if (ok) {
-        st_->remove((size_t)id);
-        if (!path_to_remove.empty()) {
-            std::lock_guard<std::mutex> lk(mt_);
-            added_paths_.erase(path_to_remove);
-        }
-        ev_->push("removed", {{"id", id}});
-    }
-    return ok;
+    std::lock_guard<std::mutex> lk(mt_);
+    return remove_locked(id);
 }
 
 bool DaemonSession::restart(uint64_t id) {
     if (!engine_) return false;
     // Перезапуск только завершённых — как замена: старая строка убирается
     // (remove + tombstone), путь ставится в очередь заново новым заданием.
-    // Дубликатов в списке не остаётся.
+    // Дубликатов в списке не остаётся. Всё под mt_: параллельный restart
+    // того же id не создаст двойника.
+    std::lock_guard<std::mutex> lk(mt_);
     std::string path;
     auto snap = engine_->snapshot();
     for (const auto& f : snap)
@@ -314,11 +335,12 @@ bool DaemonSession::restart(uint64_t id) {
     if (path.empty()) return false;
     // Файл мог исчезнуть с диска после завершения — тогда строку не трогаем.
     if (!util::dir_exists(path) && !util::file_exists(path)) return false;
-    if (!remove(id)) return false;
+    if (!remove_locked(id)) return false;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
                           {"rejected", nlohmann::json::array()}};
-    add({path}, false, tmp);
-    return !tmp["added"].empty();
+    std::vector<size_t> new_ids;
+    add_locked({path}, tmp, new_ids);
+    return !new_ids.empty();
 }
 
 bool DaemonSession::reorder(const std::vector<size_t>& order) {

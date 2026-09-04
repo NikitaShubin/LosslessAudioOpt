@@ -194,6 +194,20 @@ def main():
             check(rid not in ids, f"old id {rid} gone: {ids}")
             check(len(ids) == len(set(ids)), f"no dupes after restart: {ids}")
 
+        # 6.5. remove/cancel неизвестного id -> false, без исключений
+        r = d.rpc("remove", {"id": 9999})
+        check(r["ok"] and r["result"]["removed"] is False, f"remove unknown: {r}")
+        r = d.rpc("cancel-file", {"id": 9999})
+        check(r["ok"] and r["result"]["deleted"] is False, f"cancel unknown: {r}")
+        # кривые типы не рвут соединение: bad_args, демон жив
+        for bad in ({"id": -1}, {"id": "x"}, {"id": 1.5}, {"id": None}):
+            r = d.rpc("cancel-file", bad)
+            check(not r["ok"] and r["code"] == "bad_args", f"bad id {bad}: {r}")
+        r = d.rpc("reorder", {"order": [0, -1]})
+        check(not r["ok"] and r["code"] == "bad_args", f"bad order: {r}")
+        st = d.get("/api/state")
+        check(isinstance(st.get("rows"), list), "daemon alive after bad input")
+
         # 7. restart активного/неизвестного/без args
         # Пауза фиксирует состояния: ничего не может завершиться между
         # полингом и restart (иначе была бы гонка самого теста).
@@ -212,6 +226,22 @@ def main():
         check(r["ok"] and r["result"]["restarted"] == [], "restart unknown")
         r = d.rpc("restart", {})
         check(not r["ok"] and r["code"] == "bad_args", "restart bad_args")
+
+        # 7.5. параллельные add одного пути: ровно одно добавление, без дублей
+        import concurrent.futures as _fut
+        race_wav = os.path.join(workdir, "race.wav")
+        gen_wav(race_wav, 660)
+
+        def _add_once():
+            return d.rpc("add", {"paths": [race_wav]})
+
+        with _fut.ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(lambda _: _add_once(), range(8)))
+        total_added = sum(len(r["result"]["added"]) for r in results if r.get("ok"))
+        check(total_added == 1, f"concurrent add -> exactly 1 added: {results}")
+        st = d.get("/api/state")
+        matches = [x for x in st["rows"] if x["label"] == "race.wav"]
+        check(len(matches) == 1, f"single race.wav row: {matches}")
 
         # 8. shutdown: процесс вышел, discovery удалён
         rc = d.stop()
