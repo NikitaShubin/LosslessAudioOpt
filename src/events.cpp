@@ -35,6 +35,7 @@ uint64_t EventBuffer::last_seq() const {
 
 void StateMirror::upsert(const Row& r) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(r.id)) return;  // удалён — не воскрешать
     bool is_new = rows_.find(r.id) == rows_.end();
     rows_[r.id] = r;
     if (is_new) {
@@ -45,16 +46,19 @@ void StateMirror::upsert(const Row& r) {
 
 void StateMirror::set_label(size_t id, const std::string& label) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     rows_[id].label = label;
 }
 
 void StateMirror::set_state(size_t id, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     rows_[id].state = st;
 }
 
 void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     auto& r = rows_[id];
     // Гонка task(Running) до set_tasks: другой воркер мог уже пометить
     // задачи после prep_done. Сохраняем известные состояния по индексам.
@@ -66,6 +70,7 @@ void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
 
 void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.task_infos = infos;
     std::vector<std::string> tasks(infos.size(), "pend");
@@ -77,6 +82,7 @@ void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) 
 
 void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     auto& r = rows_[id];
     if (idx >= r.tasks.size()) r.tasks.resize(idx + 1, "pend");
     r.tasks[idx] = st;
@@ -84,6 +90,7 @@ void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
 
 void StateMirror::set_pct(size_t id, double pct) {
     std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
     rows_[id].pct = pct;
 }
 
@@ -91,6 +98,7 @@ void StateMirror::remove(size_t id) {
     std::lock_guard<std::mutex> lk(m_);
     rows_.erase(id);
     order_.erase(std::remove(order_.begin(), order_.end(), id), order_.end());
+    removed_.insert(id);
 }
 
 void StateMirror::reorder(const std::vector<size_t>& order) {

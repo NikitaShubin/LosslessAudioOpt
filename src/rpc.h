@@ -43,6 +43,10 @@ struct Daemon {
     // для завершённых (ok/skip/error) — убрать строку из списка.
     virtual bool remove(uint64_t id) = 0;
 
+    // Перезапустить файл (restart): завершённый (ok/skip/error) ставится
+    // в очередь заново новым заданием. true если перезапущен.
+    virtual bool restart(uint64_t id) = 0;
+
     // Переупорядочить очередь (ids — новый порядок индексов файлов).
     virtual bool reorder(const std::vector<size_t>& order) = 0;
 

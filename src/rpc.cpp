@@ -70,6 +70,21 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
         return ok({{"removed", ok_}});
     }
 
+    if (cmd == "restart") {
+        std::vector<uint64_t> ids;
+        if (args.is_object() && args.contains("ids") && args["ids"].is_array()) {
+            for (const auto& v : args["ids"]) ids.push_back(v.get<uint64_t>());
+        } else if (args.is_object() && args.contains("id")) {
+            ids.push_back(args["id"].get<uint64_t>());
+        } else {
+            return err("bad_args", "missing ids array");
+        }
+        nlohmann::json done = nlohmann::json::array();
+        for (uint64_t id : ids)
+            if (d.restart(id)) done.push_back(id);
+        return ok({{"restarted", std::move(done)}});
+    }
+
     if (cmd == "cancel-all" || cmd == "pause") {
         d.set_paused(true);
         return ok({{"paused", true}});

@@ -153,6 +153,10 @@ struct FakeDaemon : Daemon {
         cancelled_id = id;
         return cancel_exists;
     }
+    bool restart(uint64_t id) override {
+        cancelled_id = id;
+        return cancel_exists;
+    }
     bool reorder(const std::vector<size_t>& order) override {
         (void)order;
         return true;

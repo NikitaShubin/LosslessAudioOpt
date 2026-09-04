@@ -290,6 +290,26 @@ bool DaemonSession::remove(uint64_t id) {
     return ok;
 }
 
+bool DaemonSession::restart(uint64_t id) {
+    if (!engine_) return false;
+    // Перезапуск только завершённых: путь берём из снимка движка,
+    // ставим в очередь заново через add (новым заданием с новым id).
+    std::string path;
+    auto snap = engine_->snapshot();
+    for (const auto& f : snap)
+        if (f.idx == (size_t)id) {
+            if (f.state == "ok" || f.state == "skip" || f.state == "error" ||
+                f.state == "removed")
+                path = f.path;
+            break;
+        }
+    if (path.empty()) return false;
+    nlohmann::json tmp = {{"added", nlohmann::json::array()},
+                          {"rejected", nlohmann::json::array()}};
+    add({path}, false, tmp);
+    return !tmp["added"].empty();
+}
+
 bool DaemonSession::reorder(const std::vector<size_t>& order) {
     if (!engine_) return false;
     bool ok = engine_->reorder(order);
