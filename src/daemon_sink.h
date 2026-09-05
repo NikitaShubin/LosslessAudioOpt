@@ -19,9 +19,10 @@ public:
     void prep(size_t id) override;
     void set_tasks(size_t id, size_t total) override;
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) override;
+    void set_excluded(size_t id, const std::vector<std::string>& fmts) override;
     void task(size_t id, size_t idx, obs::TaskState st) override;
     void end_file(size_t id, double pct) override;
-    void mark_skip(size_t id) override;
+    void mark_stopped(size_t id) override;
     void mark_error(size_t id) override;
     void log(const std::string& line) override;
     void error(const std::string& line) override;

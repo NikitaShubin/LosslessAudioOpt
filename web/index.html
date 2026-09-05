@@ -27,8 +27,12 @@
       <span>Готово: <b id="c-done">0</b></span>
       <span>Ошибок: <b id="c-failed">0</b></span>
     </div>
+    <div class="top-spacer"></div>
+    <span id="conn-status" class="conn">Подключение...</span>
+    <span id="last-seq" class="seq"></span>
     <div class="top-actions">
       <button id="btn-logout" title="Сменить токен">Выйти</button>
+      <button id="btn-shutdown" class="icon-btn danger" title="Выключить демон">⏻</button>
     </div>
   </header>
 
@@ -42,42 +46,38 @@
     <p id="add-msg" class="msg"></p>
   </section>
 
-  <section class="panel selection-bar hidden" id="sel-info">
-    Выбрано: <b id="sel-count">0</b>
-    <button id="btn-batch-stop" title="Остановить выделенные">⏹</button>
-    <button id="btn-batch-start" title="Запустить выделенные заново">↻</button>
-    <button id="btn-batch-delete" class="danger" title="Удалить выделенные">🗑</button>
-  </section>
-
   <section class="panel queue" id="queue-panel">
     <div class="queue-head">
-      <h2>Очередь</h2>
+      <button id="btn-sort" class="queue-title" title="Сортировать список по полному пути (регистрозависимо)">Очередь</button>
+      <button id="btn-autoscroll" class="icon-btn" title="Следить за строками оптимизации">◎</button>
       <div class="queue-head__actions">
-        <button id="btn-pause" title="Остановить очередь">⏸ Пауза</button>
-        <button id="btn-clear-completed" title="Удалить все ok/skip/error">🧹 Очистить завершённые <span id="c-done-badge"></span></button>
-        <button id="btn-expand" title="Развернуть на весь экран">⛶</button>
+        <button id="btn-stop" class="icon-btn" title="Остановить активные файлы">⏹</button>
+        <button id="btn-resume" class="icon-btn" title="Запустить остановленные файлы">▶</button>
+        <button id="btn-clear-completed" class="icon-btn" title="Удалить только успешно завершённые (ok)">🧹<span id="c-done-badge"></span></button>
+        <button id="btn-expand" class="icon-btn" title="Развернуть на весь экран">⛶</button>
         <span class="muted" id="paused-badge"></span>
       </div>
     </div>
-    <p id="op-msg" class="msg"></p>
-    <div class="table-wrap">
+    <div class="table-wrap" id="table-wrap">
     <table id="queue-table">
-      <thead><tr><th><input type="checkbox" id="chk-all" title="Выделить всё"></th><th></th><th>#</th><th>Файл</th><th>Состояние</th><th>Прогресс</th><th>Задачи</th><th>Действия</th></tr></thead>
+      <thead><tr><th><input type="checkbox" id="chk-all" title="Выделить всё"></th><th></th><th>#</th><th>Файл</th><th>Состояние</th><th>Прогресс</th><th>Задачи</th><th class="action-head">
+        <span class="action-btns">
+          <button id="btn-batch-stop" class="icon-btn" title="Остановить выделенные">⏹</button>
+          <button id="btn-batch-start" class="icon-btn" title="Запустить выделенные">▶</button>
+          <button id="btn-batch-delete" class="icon-btn danger" title="Удалить выделенные">🗑</button>
+          <button id="btn-batch-top" class="icon-btn" title="Переместить выделенные в начало">⇤</button>
+          <button id="btn-batch-up" class="icon-btn" title="Переместить выделенные выше">↑</button>
+          <button id="btn-batch-down" class="icon-btn" title="Переместить выделенные ниже">↓</button>
+          <button id="btn-batch-bottom" class="icon-btn" title="Переместить выделенные в конец">⇥</button>
+        </span>
+      </th></tr></thead>
       <tbody id="queue-body"><tr><td colspan="8" class="empty">Очередь пуста</td></tr></tbody>
     </table>
     </div>
   </section>
-
-  <section class="panel danger-zone">
-    <h2>Демон</h2>
-    <button id="btn-shutdown" class="danger" title="Выключить демон">⏻ Выключить демон</button>
-  </section>
-
-  <footer class="statusbar">
-    <span id="conn-status" class="conn">Подключение...</span>
-    <span id="last-seq" class="seq"></span>
-  </footer>
 </div>
+
+<div id="op-msg" class="msg"></div>
 
 <script src="/static/app.js"></script>
 </body>

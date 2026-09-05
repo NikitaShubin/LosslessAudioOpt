@@ -53,12 +53,15 @@ nlohmann::json rows_json(const StateMirror& st) {
                              {"params", ti.params},
                              {"note", ti.note}});
         }
+        nlohmann::json excl = nlohmann::json::array();
+        for (const auto& f : r.excluded_fmts) excl.push_back(f);
         arr.push_back({{"id", r.id},
                        {"label", r.label},
                        {"state", r.state},
                        {"pct", r.pct},
                        {"tasks", std::move(tasks)},
-                       {"task_infos", std::move(infos)}});
+                       {"task_infos", std::move(infos)},
+                       {"excluded", std::move(excl)}});
     }
     return arr;
 }

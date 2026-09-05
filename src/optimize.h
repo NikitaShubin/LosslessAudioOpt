@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 namespace optimize {
 
 // Режим верификации кандидатов.
@@ -34,7 +36,7 @@ struct Options {
     bool no_status = false;            // без интерактивного статусбара
     std::string report_path;           // путь к итоговому отчёту (пусто = не писать)
     Verify verify = Verify::All;       // режим верификации кандидатов
-    bool ignore_errors = false;        // ошибки файлов помечать skip, прогон не прерывать
+    bool ignore_errors = false;        // ошибки файлов помечать error, прогон не прерывать
     std::string tmp_dir;               // --tmp: путь к временной папке (пусто = exe_dir/tmp)
     SessionMode mode = SessionMode::OneShot;  // режим выполнения сессии
 };
@@ -52,7 +54,7 @@ struct Candidate {
 
 struct FileResult {
     std::string path;
-    std::string status;        // ok | replace | skip | error
+    std::string status;        // ok | replace | stopped | error
     std::string message;
     uint64_t original_size = 0;
     uint64_t best_cost = 0;
@@ -71,14 +73,14 @@ struct EngineFile {
     size_t idx = 0;
     std::string path;
     std::string rel;
-    std::string state;   // queued | prep | running | ok | skip | error | removed
+    std::string state;   // queued | prep | running | ok | stopped | error | removed
     size_t completed = 0;  // выполнено задач (вариантов)
     size_t total_tasks = 0;  // всего задач файла (0 до prep)
     double pct = 0.0;     // выигрыш в сжатии (после ok)
     uint64_t original = 0;
     uint64_t best = 0;
     std::string best_format;
-    std::string detail;  // текст ошибки/иесключения при skip/error
+    std::string detail;  // текст ошибки/исключения при stopped/error
 };
 
 // Движок оптимизации: держит Runner + пул воркеров, принимает файлы на лету,
@@ -113,6 +115,10 @@ public:
 
     // Снимок состояния всех файлов очереди.
     std::vector<EngineFile> snapshot();
+
+    // Диагностика внутренней очереди (для отладки: prep_active, abort,
+    // флаги FileJob). JSON-объект; для /rpc debug.
+    nlohmann::json debug_state();
 
     // Число завершённых файлов и оставшихся.
     size_t done_count();

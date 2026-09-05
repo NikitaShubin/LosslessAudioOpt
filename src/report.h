@@ -37,8 +37,8 @@ private:
 // Сводка по одному файлу для итогового отчёта.
 struct FileSummary {
     std::string path;
-    std::string status;   // ok | skip | error
-    std::string detail;   // причина skip/error или строка о победителе
+    std::string status;   // ok | stopped | error
+    std::string detail;   // причина stopped/error или строка о победителе
     bool replaced = false;
     std::string replacement_error;  // текст ошибки замены на месте (если не удалась)
     uint64_t original = 0;

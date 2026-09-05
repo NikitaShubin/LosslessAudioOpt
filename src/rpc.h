@@ -40,13 +40,29 @@ struct Daemon {
     virtual bool cancel_file(uint64_t id) = 0;
 
     // Удалить файл из очереди (remove). Для pending/running — как cancel,
-    // для завершённых (ok/skip/error) — убрать строку из списка.
+    // для завершённых (ok/stopped/error) — убрать строку из списка.
     virtual bool remove(uint64_t id) = 0;
 
     // Перезапустить файл (restart): активный сначала останавливается
     // (cancel + kill + ожидание завершения), затем строка заменяется новым
     // заданием. true если перезапущен.
     virtual bool restart(uint64_t id) = 0;
+
+    // Массовое удаление файлов из очереди за один вызов (bulk-remove).
+    // Возвращает число реально удалённых.
+    virtual uint64_t bulk_remove(const std::vector<size_t>& ids) = 0;
+
+    // Массовая остановка активных файлов за один вызов (bulk-cancel).
+    // Возвращает число реально обработанных (активных) файлов.
+    virtual uint64_t bulk_cancel(const std::vector<size_t>& ids) = 0;
+
+    // Отсортировать очередь по полному пути файла (регистрозависимо).
+    // Возвращает число файлов в очереди (или 0 при сбое).
+    virtual size_t sort_by_path() = 0;
+
+    // Удалить из очереди все успешно завершённые (state=="ok") файлы.
+    // Возвращает число удалённых. skip/stopped/error не трогаются.
+    virtual uint64_t clear_done() = 0;
 
     // Переупорядочить очередь (ids — новый порядок индексов файлов).
     virtual bool reorder(const std::vector<size_t>& order) = 0;
@@ -56,6 +72,10 @@ struct Daemon {
 
     // Список форматов из formats/*.json: [{id, extensions:[...]}].
     virtual nlohmann::json formats() const = 0;
+
+    // Внутреннее состояние движка (отладка: prep_active, abort, флаги jobs).
+    // По умолчанию пусто; реализуется DaemonSession.
+    virtual nlohmann::json debug_state() { return nullptr; }
 };
 
 // Исполняет команду. cmd ("ping", "add", …), args — объект аргументов.

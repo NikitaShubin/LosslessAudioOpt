@@ -138,6 +138,31 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
         return ok({{"removed", ok_}});
     }
 
+    if (cmd == "clear-done") {
+        uint64_t removed = d.clear_done();
+        return ok({{"removed", removed}});
+    }
+
+    if (cmd == "bulk-remove") {
+        std::vector<uint64_t> ids;
+        if (!get_id_list(args, "ids", ids))
+            return err("bad_args", "missing ids array");
+        std::vector<size_t> sid(ids.begin(), ids.end());
+        return ok({{"removed", d.bulk_remove(sid)}});
+    }
+
+    if (cmd == "bulk-cancel") {
+        std::vector<uint64_t> ids;
+        if (!get_id_list(args, "ids", ids))
+            return err("bad_args", "missing ids array");
+        std::vector<size_t> sid(ids.begin(), ids.end());
+        return ok({{"cancelled", d.bulk_cancel(sid)}});
+    }
+
+    if (cmd == "sort") {
+        return ok({{"sorted", d.sort_by_path()}});
+    }
+
     if (cmd == "restart") {
         std::vector<uint64_t> ids;
         uint64_t single = 0;
@@ -182,6 +207,10 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
 
     if (cmd == "formats") {
         return ok(d.formats());
+    }
+
+    if (cmd == "debug") {
+        return ok(d.debug_state());
     }
 
     return err("unknown_cmd", "unknown command: " + cmd);

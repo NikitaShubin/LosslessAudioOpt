@@ -164,7 +164,7 @@ def main():
         progressed = False
         while time.time() < deadline:
             st = d.rows()
-            if any(x["state"] in ("prep", "running", "ok", "skip", "error")
+            if any(x["state"] in ("prep", "running", "ok", "stopped", "error")
                    for x in st if x["id"] in new_ids):
                 progressed = True
                 break
@@ -300,7 +300,7 @@ def main():
         while time.time() < deadline:
             st = d3.rows()
             for x in st:
-                if x["id"] == new_id8 and x["state"] in ("prep", "running", "ok", "skip"):
+                if x["id"] == new_id8 and x["state"] in ("prep", "running", "ok", "stopped"):
                     started = True
                     break
             if started: break

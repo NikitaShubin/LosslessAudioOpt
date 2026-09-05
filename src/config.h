@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -95,7 +96,11 @@ std::string bin_dir();
 std::string load_settings_lang();
 
 // Загружает и валидирует все formats/*.json (сортировка по имени файла).
+// Пропускает formats/inputs.json (описание входных форматов, не кодируемых).
 std::vector<Format> load_all();
+// Расширения входных форматов из formats/inputs.json (например lossy-исходники,
+// принимаемые на вход, но не являющиеся целевыми кодеками).
+std::set<std::string> input_extensions();
 // Один формат по id; бросает Error если не найден.
 const Format& load_one(const std::vector<Format>& all, const std::string& id);
 // Валидирует один конфиг (после разбора JSON).

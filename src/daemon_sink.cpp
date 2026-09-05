@@ -32,6 +32,13 @@ void DaemonSink::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     st_->set_tasks(id, infos);
 }
 
+void DaemonSink::set_excluded(size_t id, const std::vector<std::string>& fmts) {
+    nlohmann::json jf = nlohmann::json::array();
+    for (auto& f : fmts) jf.push_back(f);
+    ev_->push("set_excluded", {{"id", id}, {"excluded", jf}});
+    st_->set_excluded(id, fmts);
+}
+
 void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
     const char* s = st == obs::TaskState::Running ? "running"
                     : st == obs::TaskState::Ok     ? "ok"
@@ -46,9 +53,9 @@ void DaemonSink::end_file(size_t id, double pct) {
     st_->set_pct(id, pct);
 }
 
-void DaemonSink::mark_skip(size_t id) {
-    ev_->push("skip", {{"id", id}});
-    st_->set_state(id, "skip");
+void DaemonSink::mark_stopped(size_t id) {
+    ev_->push("stopped", {{"id", id}});
+    st_->set_state(id, "stopped");
 }
 
 void DaemonSink::mark_error(size_t id) {

@@ -195,6 +195,13 @@ struct FakeDaemon : Daemon {
         cancelled_id = id;
         return cancel_exists;
     }
+    uint64_t bulk_remove(const std::vector<size_t>& ids) override {
+        return ids.size();
+    }
+    uint64_t bulk_cancel(const std::vector<size_t>& ids) override {
+        return ids.size();
+    }
+    size_t sort_by_path() override { return 0; }
     bool reorder(const std::vector<size_t>& order) override {
         (void)order;
         return true;
@@ -250,6 +257,22 @@ static void test_rpc() {
     auto rs_bad = dsvc::call(d, "restart", nlohmann::json::object());
     CHECK(rs_bad["ok"] == false);
     CHECK(rs_bad["code"] == "bad_args");
+
+    auto brm = dsvc::call(d, "bulk-remove", {{"ids", {1, 2, 3}}});
+    CHECK(brm["ok"] == true);
+    CHECK(brm["result"]["removed"] == 3);
+
+    auto brm_bad = dsvc::call(d, "bulk-remove", nlohmann::json::object());
+    CHECK(brm_bad["ok"] == false);
+    CHECK(brm_bad["code"] == "bad_args");
+
+    auto bcl = dsvc::call(d, "bulk-cancel", {{"ids", {4, 5}}});
+    CHECK(bcl["ok"] == true);
+    CHECK(bcl["result"]["cancelled"] == 2);
+
+    auto so = dsvc::call(d, "sort", nlohmann::json::object());
+    CHECK(so["ok"] == true);
+    CHECK(so["result"]["sorted"] == 0);
 
     auto fmt = dsvc::call(d, "formats", nlohmann::json::object());
     CHECK(fmt["result"]["formats"][0]["id"] == "flac");

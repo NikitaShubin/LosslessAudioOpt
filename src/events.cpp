@@ -101,9 +101,19 @@ void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
 void StateMirror::set_pct(size_t id, double pct) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
-    rows_[id].pct = pct;
-    rows_[id].id = id;
+    auto& r = rows_[id];
+    r.id = id;
     touch_locked(id);
+    r.pct = pct;
+}
+
+void StateMirror::set_excluded(size_t id, const std::vector<std::string>& fmts) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.excluded_fmts = fmts;
 }
 
 void StateMirror::remove(size_t id) {

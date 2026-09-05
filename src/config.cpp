@@ -263,7 +263,8 @@ std::vector<Format> load_all() {
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(fs::u8path(formats_dir()), ec)) {
         if (ec) break;
-        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+        if (entry.is_regular_file() && entry.path().extension() == ".json" &&
+            entry.path().filename() != "inputs.json") {
             files.push_back(entry.path().u8string());
         }
     }
@@ -281,6 +282,34 @@ std::vector<Format> load_all() {
         out.push_back(std::move(f));
     }
     return out;
+}
+
+std::set<std::string> input_extensions() {
+    // Кеш: расширения входных форматов читаются при первом обращении (демон не
+    // меняет formats/inputs.json на лету).
+    static std::set<std::string> cached = [] {
+        std::set<std::string> exts;
+        std::string path = util::join_path(formats_dir(), "inputs.json");
+        if (!util::file_exists(path)) return exts;
+        std::ifstream fh(path, std::ios::binary);
+        if (!fh) return exts;
+        json::json data;
+        try {
+            fh >> data;
+        } catch (const nlohmann::detail::parse_error&) {
+            return exts;
+        }
+        if (!data.is_object() || !data.contains("inputs") || !data["inputs"].is_array())
+            return exts;
+        for (const auto& e : data["inputs"]) {
+            if (e.is_object() && e.contains("ext") && e["ext"].is_string()) {
+                std::string x = util::to_lower(e["ext"].get<std::string>());
+                if (!x.empty()) exts.insert(x);
+            }
+        }
+        return exts;
+    }();
+    return cached;
 }
 
 const Format& load_one(const std::vector<Format>& all, const std::string& id) {

@@ -60,10 +60,11 @@ private:
 struct Row {
     size_t id = 0;
     std::string label;
-    std::string state;             // queued | prep | running | ok | skip | error
+    std::string state;             // queued | prep | running | ok | stopped | error
     double pct = 0;                // выигрыш в сжатии (после ok)
     std::vector<std::string> tasks; // состояния вариантов: pend|running|ok|failed
     std::vector<obs::TaskInfo> task_infos; // метаданные задач (fmt/variant)
+    std::vector<std::string> excluded_fmts; // форматы, исключённые по caps (жёлтые точки)
 };
 
 // Потокобезопасное зеркало строк очереди. Обновляется obs::Sink-реализацией
@@ -78,6 +79,7 @@ public:
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos);
     void set_task(size_t id, size_t idx, const std::string& st);
     void set_pct(size_t id, double pct);
+    void set_excluded(size_t id, const std::vector<std::string>& fmts);
     void remove(size_t id);
     // Переупорядочить видимые строки. Допускается подмножество id:
     // перечисленные встают первыми, остальные сохраняют порядок в хвосте.

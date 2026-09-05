@@ -892,7 +892,7 @@ void end_file(size_t idx, double pct) {
     wake();
 }
 
-void mark_skip(size_t idx) {
+void mark_stopped(size_t idx) {
     if (!g_interactive) return;
     std::lock_guard<std::mutex> lk(g_m);
     if (idx >= g_total) return;

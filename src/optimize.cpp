@@ -12,6 +12,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <unordered_set>
 
 #include "config.h"
 #include "i18n.h"
@@ -50,16 +51,28 @@ int resolve_jobs(double jobs, bool jobs_float) {
     return j;
 }
 
-bool is_audio_file(const std::string& path) {
-    static const std::set<std::string> exts = {
-        "flac", "wv",   "ofr",   "tak", "tta",  "m4a", "alac", "aac", "mp4",
-        "ape",  "wma",  "la",    "oga", "ogg",  "opus", "mp3",  "wav", "aif",
-        "aiff", "mp2",  "ac3",   "dts", "wavpack", "mka", "mkv", "webm",
-    };
-    std::string ext = util::to_lower(util::base_name(path));
-    size_t dot = ext.find_last_of('.');
+// Известная расширения входных файлов. Строится из formats/*.json (без
+// хардкода списка) плюс базовые lossless-исходники (wav/aiff/ogg), которые
+// разрешены как вход всегда, даже если для них нет отдельного config.
+std::set<std::string> supported_extensions(const std::vector<config::Format>& fmts) {
+    std::set<std::string> s;
+    for (const auto& f : fmts)
+        if (!f.extension.empty()) s.insert(util::to_lower(f.extension));
+    // Входные форматы (lossy и прочие, не являющиеся целевыми кодеками) — из
+    // formats/inputs.json, без хардкода. Добавление нового входа не требует
+    // перекомпиляции.
+    for (const auto& e : config::input_extensions()) s.insert(e);
+    s.insert("wav");
+    s.insert("aiff");
+    s.insert("ogg");
+    return s;
+}
+
+bool is_supported_file(const std::string& path, const std::set<std::string>& exts) {
+    std::string base = util::to_lower(util::base_name(path));
+    size_t dot = base.find_last_of('.');
     if (dot == std::string::npos) return false;
-    return exts.count(ext.substr(dot + 1)) != 0;
+    return exts.count(base.substr(dot + 1)) != 0;
 }
 
 // Собранный файл: полный путь + путь относительно заданного в параметрах корня
@@ -69,9 +82,11 @@ struct FileItem {
     std::string rel;
 };
 
-void collect_files(const std::string& p, std::vector<FileItem>& out, std::string* err) {
+void collect_files(const std::string& p, std::vector<FileItem>& out, std::string* err,
+                   const std::vector<config::Format>& fmts) {
+    std::set<std::string> exts = supported_extensions(fmts);
     if (util::file_exists(p)) {
-        if (is_audio_file(p)) out.push_back({p, util::base_name(p)});
+        if (is_supported_file(p, exts)) out.push_back({p, util::base_name(p)});
         return;
     }
     if (!util::dir_exists(p)) {
@@ -83,7 +98,7 @@ void collect_files(const std::string& p, std::vector<FileItem>& out, std::string
         if (ec) break;
         if (e.is_regular_file()) {
             std::string f = e.path().u8string();
-            if (is_audio_file(f)) {
+            if (is_supported_file(f, exts)) {
                 std::string rel = fs::relative(fs::u8path(f), fs::u8path(p), ec).u8string();
                 if (ec || rel.empty()) rel = util::base_name(f);
                 out.push_back({f, rel});
@@ -372,18 +387,34 @@ static DecodeStatus decode_source_native(const config::Format* src_fmt, const st
     if (kill && kill->load(std::memory_order_relaxed)) return DecodeStatus::Failed;
     if (sst.path.empty()) return DecodeStatus::Failed;
 
-    // Создаём алиас: symlink → hardlink → оригинал.
-    std::string alias_path = util::join_path(util::dir_name(out_wav),
-                                             "src_link." + lower_ext(path));
-    std::string input_path = path;
+    // Нормализуем разделители в пути исходника: на Windows-сборке под wine входной
+    // путь может быть смешанным («/tmp/x\file.ofr» — слеши + бэкслеш). Строгие
+    // нативные кодеки (OptimFROG и др.) такой путь не находят (FILENOTFOUND),
+    // хотя ffmpeg/ffprobe его переносят. Приводим к единому «/» — безопасно и на
+    // Windows (API принимает слеши), и на Linux.
+    std::string src = path;
+    for (auto& c : src) if (c == '\\') c = '/';
+
+    std::string input_path = src;
     bool alias_created = false;
-    if (util::create_readonly_symlink(path, alias_path)) {
+    std::string alias_path;
+#ifndef _WIN32
+    // Алиас (симлинк/хардлинк) полезен на Linux: короткое имя с правильным
+    // расширением обходит проблемы декодеров со спецсимволами в путях.
+    // На Windows НЕ используем: CreateSymbolicLinkW с Unix-целью («/tmp/...»)
+    // не резолвится под wine — декодер получает битый reparse-point и падает
+    // с FILENOTFOUND. Отдаём нормализованный исходный путь напрямую (он корректен
+    // в любой форме — confirmed ручными тестами).
+    alias_path = util::join_path(util::dir_name(out_wav),
+                                 "src_link." + lower_ext(src));
+    if (util::create_readonly_symlink(src, alias_path)) {
         input_path = alias_path;
         alias_created = true;
-    } else if (util::create_hardlink(path, alias_path)) {
+    } else if (util::create_hardlink(src, alias_path)) {
         input_path = alias_path;
         alias_created = true;
     }
+#endif
 
     Env senv;
     senv.fmt = src_fmt;
@@ -570,6 +601,7 @@ struct FileJob {
     std::vector<json::json> stat_records;
     std::vector<std::string> failures;
     std::vector<std::string> exclusions;
+    std::vector<std::string> excluded_fmts;  // форматы, исключённые по caps (жёлтые точки)
     int variant_errors = 0;   // операционные сбои вариантов (кодирование/валидация/теги)
     int tool_errors = 0;      // утилиты форматов недоступны
     bool error_counted = false;  // под m: ошибка файла уже учтена в failed (без двойного счёта)
@@ -640,12 +672,12 @@ bool ResourceManager::can_start_new_file(size_t /*next_prep*/, int prep_active_r
     if (prep_active_r >= max_workers_) return false;
     bool has_idle = false;
     for (const auto& jp : jobs) { const FileJob& j = *jp;
-        if (j.done || !j.prep_done) continue;
+        if (j.done || !j.prep_done || j.cancelled) continue;
         if (j.released == 0) { has_idle = true; break; }
     }
     if (has_idle) {
         for (const auto& jp : jobs) { const FileJob& j = *jp;
-            if (j.done || !j.prep_done) continue;
+            if (j.done || !j.prep_done || j.cancelled) continue;
             if (j.released < j.tasks.size()) return false;
         }
     }
@@ -691,6 +723,7 @@ struct Runner {
     std::atomic<bool> abort{false};  // при ошибке файла без --ignore-errors: прекращаем прогон
     std::atomic<bool> shutdown_requested{false};  // демон: остановить воркеры (graceful shutdown)
     std::atomic<bool> queue_paused{false};        // демон: не запускать новые задачи (pause/resume)
+    std::atomic<int> workers_alive{0};            // число живых воркеров (диагностика)
 
     // Создаёт FileJob из FileItem. idx — позиция в векторе jobs (уже назначена).
     void make_job(FileJob& j, size_t idx, const FileItem& it) {
@@ -716,7 +749,21 @@ struct Runner {
         std::vector<std::string> labels;
         {
             std::lock_guard<std::mutex> lk(qm);
+            // Дедуп по полному пути: пропускаем кандидатов, чей путь уже
+            // есть среди активных заданий (подпапка/надпапка/повторное
+            // добавление). Остановленные и удалённые активными не считаются —
+            // их можно добавлять заново.
+            std::unordered_set<std::string> active;
+            active.reserve(jobs.size() * 2);
+            for (const auto& jp : jobs)
+                if (!jp->done && !jp->cancelled) active.insert(jp->path);
             for (const auto& it : items) {
+                if (active.count(it.path)) {
+                    obs::sink()->log("SKIP " + it.path +
+                                     " — duplicate (already in queue)");
+                    continue;
+                }
+                active.insert(it.path);
                 size_t i = jobs.size();
                 jobs.emplace_back(std::make_unique<FileJob>());
                 make_job(*jobs[i], i, it);
@@ -768,12 +815,12 @@ struct Runner {
             j.kill_requested.store(true, std::memory_order_relaxed);
             j.done = true;
             j.summary.path = j.path;
-            j.summary.status = "skip";
+            j.summary.status = "stopped";
             j.summary.detail = i18n::str("removed from queue");
             j.session.reset();
             total_done++;
             cv.notify_all();
-            obs::sink()->mark_skip(j.idx);
+            obs::sink()->mark_stopped(j.idx);
         } else {
             // запущен: запрещаем новые задачи, активные процессы убиваем
             // мгновенно через kill_requested (проверяется в proc::run).
@@ -1024,12 +1071,12 @@ struct Runner {
         }
         if (probe.has_video) {
             j.summary.path = j.path;
-            j.summary.status = "skip";
+            j.summary.status = "stopped";
             j.summary.detail = i18n::str("video stream present (not audio)");
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
-                               {"status", "skip"},
+                               {"status", "stopped"},
                                {"reason", "video stream present"}});
             }
             obs::sink()->log("SKIP " + j.path + " — " + i18n::str("video stream present (not audio)") + "\n");
@@ -1038,13 +1085,13 @@ struct Runner {
         }
         if (!probe.is_lossless() && !opts.allow_lossy) {
             j.summary.path = j.path;
-            j.summary.status = "skip";
+            j.summary.status = "stopped";
             j.summary.detail =
                 i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str());
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
-                               {"status", "skip"},
+                               {"status", "stopped"},
                                {"reason", "lossy input"}});
             }
             obs::sink()->log("SKIP " + j.path + " — " + j.summary.detail + "\n");
@@ -1155,6 +1202,7 @@ struct Runner {
             if (!why.empty()) {
                 j.failures.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
                 j.exclusions.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
+                j.excluded_fmts.push_back(f.id);
                 continue;
             }
 
@@ -1406,17 +1454,17 @@ struct Runner {
             // Файл снят из очереди во время обработки (remove/cancel-file):
             // доработавшие задачи игнорируются, замена запрещена, tmp чистится.
             j.summary.path = j.path;
-            j.summary.status = "skip";
+            j.summary.status = "stopped";
             j.summary.detail = i18n::str("removed from queue");
             rm.release_disk(j.peak_file);
             j.session.reset();
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
-                               {"status", "skip"},
+                               {"status", "stopped"},
                                {"reason", j.summary.detail}});
             }
-            obs::sink()->mark_skip(j.idx);
+            obs::sink()->mark_stopped(j.idx);
             return;
         }
         j.summary.path = j.path;
@@ -1448,14 +1496,23 @@ struct Runner {
                                    {"reason", reason}});
                 }
             } else {
-                j.summary.status = "skip";
+                // Все этапы оптимизации прошли без ошибок, но ни один кандидат
+                // не оказался меньше исходного (или все прошедшие валидацию были
+                // не меньше). Это удовлетворительный результат прогона: файл
+                // остаётся на месте, но рассматривается как успешно завершённый.
+                double savings = 0.0;
+                uint64_t best_cost = j.probe.size;
+                j.summary.status = "ok";
                 j.summary.detail = reason;
-                msg = "SKIP " + j.base + " — " + reason + "\n";
+                j.summary.original = j.probe.size;
+                j.summary.best = best_cost;
+                j.summary.savings_pct = savings;
+                msg = "OK   " + j.base + " — " + reason + "\n";
                 if (!opts.no_stats) stats::append_all(records);
                 if (logger) {
                     logger->event({{"type", "file_done"},
                                    {"file", j.path},
-                                   {"status", "skip"},
+                                   {"status", "ok"},
                                    {"reason", reason}});
                 }
             }
@@ -1629,12 +1686,12 @@ struct Runner {
 
         if (!msg.empty()) obs::sink()->log(msg);
         if (j.summary.status == "error") obs::sink()->mark_error(j.idx);
-        else if (j.summary.status == "skip") obs::sink()->mark_skip(j.idx);
+        else if (j.summary.status == "stopped") obs::sink()->mark_stopped(j.idx);
         else obs::sink()->end_file(j.idx, j.summary.savings_pct);
         if (j.summary.status == "error") {
             if (opts.ignore_errors || opts.mode == SessionMode::Daemon) {
-                // Игнорируем ошибку: файл помечается skip, прогон продолжается.
-                j.summary.status = "skip";
+                // Реальная ошибка файла в демон-режиме не прерывает очередь:
+                // файл остаётся со статусом error, прогон продолжается.
                 if (j.summary.detail.empty()) j.summary.detail = i18n::str("error ignored");
             } else {
                 count_error_locked(j);
@@ -1648,6 +1705,7 @@ struct Runner {
         // Вспомогательные потоки не должны мешать интерфейсу (ввод/отрисовка):
         // под нагрузкой на CPU статусбар иначе заметно тормозит.
         util::set_thread_below_normal();
+        workers_alive++;
         for (;;) {
             Work w;
             {
@@ -1707,6 +1765,8 @@ struct Runner {
                         infos.push_back({f.id, v.id, v.args, v.note});
                     }
                     obs::sink()->set_tasks(w.idx, infos);
+                    if (!job.excluded_fmts.empty())
+                        obs::sink()->set_excluded(w.idx, job.excluded_fmts);
                 }
                 if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(*w.job);
             } else {
@@ -1760,6 +1820,7 @@ struct Runner {
                 if (last && !proc::cancelled() && !proc::aborted()) finalize_file(*w.job);
             }
         }
+        workers_alive--;
     }
 };
 
@@ -1816,7 +1877,7 @@ struct Engine::Impl {
                  std::string* err) {
         for (const auto& p : inputs) {
             std::string e;
-            collect_files(p, items, &e);
+            collect_files(p, items, &e, this->fmts);
             if (!e.empty() && err && err->empty()) *err = e;
         }
         if (items.empty() && err && err->empty()) *err = "no audio files found";
@@ -1967,6 +2028,44 @@ std::vector<EngineFile> Engine::snapshot() {
     return out;
 }
 
+nlohmann::json Engine::debug_state() {
+    Impl& i = *impl_;
+    nlohmann::json jobs = nlohmann::json::array();
+    if (!i.started) {
+        return {{"started", false}, {"jobs", jobs}};
+    }
+    std::lock_guard<std::mutex> lk(i.r.qm);
+    for (const auto& jp : i.r.jobs) {
+        const FileJob& j = *jp;
+        jobs.push_back({
+            {"idx", j.idx},
+            {"done", j.done},
+            {"prep_done", j.prep_done},
+            {"prep_running", j.prep_running},
+            {"cancelled", j.cancelled},
+            {"deferred", j.deferred},
+            {"released", j.released},
+            {"completed", j.completed},
+            {"tasks", j.tasks.size()},
+        });
+    }
+    return {
+        {"started", true},
+        {"paused", i.r.queue_paused.load()},
+        {"abort", i.r.abort.load()},
+        {"shutdown_requested", i.r.shutdown_requested.load()},
+        {"workers_alive", i.r.workers_alive.load()},
+        {"proc_cancelled", proc::cancelled()},
+        {"proc_aborted", proc::aborted()},
+        {"prep_active", i.r.prep_active},
+        {"max_workers", i.r.rm.max_workers()},
+        {"window", i.r.window},
+        {"next_prep", i.r.next_prep},
+        {"total_done", i.r.total_done},
+        {"jobs", jobs},
+    };
+}
+
 size_t Engine::done_count() {
     Impl& i = *impl_;
     std::lock_guard<std::mutex> lk(i.r.qm);
@@ -2031,7 +2130,7 @@ int run(const Options& opts) {
     std::vector<FileItem> items;
     for (const auto& p : opts.inputs) {
         std::string err;
-        collect_files(p, items, &err);
+        collect_files(p, items, &err, fmts);
         if (!err.empty()) out::error("WARNING: %s\n", err.c_str());
     }
     if (items.empty()) {
@@ -2217,18 +2316,18 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     }
     if (lower_ext(path) == util::to_lower(target.extension)) {
         obs::sink()->log("SKIP " + path + " — " + i18n::str("already the format ") + target.id + "\n");
-        obs::sink()->mark_skip(idx);
+        obs::sink()->mark_stopped(idx);
         return 0;
     }
     if (probe.has_video) {
         obs::sink()->log("SKIP " + path + " — " + i18n::str("video stream present (not audio)") + "\n");
-        obs::sink()->mark_skip(idx);
+        obs::sink()->mark_stopped(idx);
         return 0;
     }
     if (!probe.is_lossless() && !allow_lossy) {
         obs::sink()->log("SKIP " + path + " — " +
                      i18n::fmt("lossy input (codec %s), use --allow-lossy", probe.codec_name.c_str()) + "\n");
-        obs::sink()->mark_skip(idx);
+        obs::sink()->mark_stopped(idx);
         return 0;
     }
 
@@ -2416,7 +2515,7 @@ int restore_run(const RestoreOptions& opts) {
     std::vector<FileItem> items;
     for (const auto& p : opts.inputs) {
         std::string err;
-        collect_files(p, items, &err);
+        collect_files(p, items, &err, fmts);
         if (!err.empty()) out::error("WARNING: %s\n", err.c_str());
     }
     if (items.empty()) {
