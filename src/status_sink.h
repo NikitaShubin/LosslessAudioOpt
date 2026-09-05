@@ -19,7 +19,7 @@ public:
         status::task(idx, task_idx, static_cast<status::TaskState>(st));
     }
     void end_file(size_t idx, double pct) override { status::end_file(idx, pct); }
-    void mark_skip(size_t idx) override { status::mark_skip(idx); }
+    void mark_stopped(size_t idx) override { status::mark_stopped(idx); }
     void mark_error(size_t idx) override { status::mark_error(idx); }
     void log(const std::string& line) override { status::log(line); }
     void error(const std::string& line) override { status::error(line); }

@@ -22,11 +22,21 @@ function opmsg(text, cls) {
   if (!opMsgEl) return;
   opMsgEl.textContent = text;
   opMsgEl.className = "msg" + (cls ? " " + cls : "");
+  opMsgEl.style.visibility = text ? "visible" : "hidden";
 }
-const btnPause = el("btn-pause"), btnClearCompleted = el("btn-clear-completed");
+const btnStop = el("btn-stop"), btnResume = el("btn-resume"), btnClearCompleted = el("btn-clear-completed");
 const pausedBadge = el("paused-badge"), doneBadge = el("c-done-badge");
-const chkAll = el("chk-all"), selInfo = el("sel-info"), selCount = el("sel-count");
-const btnBatchStop = el("btn-batch-stop"), btnBatchDelete = el("btn-batch-delete");
+const chkAll = el("chk-all");
+const btnBatchStop = el("btn-batch-stop"), btnBatchStart = el("btn-batch-start"), btnBatchDelete = el("btn-batch-delete");
+const btnBatchTop = el("btn-batch-top"), btnBatchUp = el("btn-batch-up"), btnBatchDown = el("btn-batch-down"), btnBatchBottom = el("btn-batch-bottom");
+const btnAutoscroll = el("btn-autoscroll"), tableWrap = el("table-wrap");
+const btnSort = el("btn-sort");
+let autoScrollOn = false;
+let autoAnimId = 0;
+let autoScrollBoost = false;
+// Оценка скорости смещения центра масс активных строк (px/с), сглаженная EMA.
+let centerHistoryT = 0, centerSmooth = 0, speedSmooth = 0;
+const SPEED_ALPHA = 0.4, HORIZON_MS = 1000; // горизонт предикции — один полл вперёд
 
 function showLogin(msg) {
   loginDiv.classList.remove("hidden");
@@ -82,7 +92,7 @@ function setConn(ok, text) {
   connStatus.className = "conn " + (ok ? "ok" : "err");
 }
 function chipState(s) {
-  const m = {queued:"queued", prep:"prep", running:"running", ok:"ok", skip:"skip", error:"error"};
+  const m = {queued:"queued", prep:"prep", running:"running", ok:"ok", stopped:"stopped", error:"error"};
   const cls = m[s] || "queued";
   return `<span class="chip chip-${cls}">${s}</span>`;
 }
@@ -97,7 +107,123 @@ function taskDot(st, idx, info) {
   }
   return `<span class="task-dot task-${c}" title="${esc(title)}"></span>`;
 }
+function excludedDots(excluded) {
+  if (!excluded || !excluded.length) return "";
+  return excluded.map(f=>`<span class="task-dot task-excluded" title="${esc(f)} — вне характеристик формата (caps)"></span>`).join("");
+}
 function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+function taskRunningCount(r){
+  return (r.tasks||[]).filter(s=>s==="running").length;
+}
+function maybeAutoScroll(){
+  if (!tableWrap || !btnAutoscroll || !autoScrollOn) return;
+  // Активность файла — число задач, обрабатываемых прямо сейчас (running).
+  // Строки, у которых нет идущих процессов (только pend/ожидают), в центр
+  // масс не включаются, чтобы автоскролл не ставил в центр «середину
+  // подготовленных» файлов.
+  let act = currentRows.filter(r=>r.state==="prep"||r.state==="running");
+  let byTask = act.filter(r=>taskRunningCount(r) > 0);
+  if (byTask.length) act = byTask;
+  if (!act.length) return;
+  // Вес строки — число одновременно идущих процессов: файл с 31 задачей
+  // смещает центр масс сильнее, чем файл с одной.
+  const weight = new Map();
+  for (const r of act) weight.set(r.id, Math.max(1, taskRunningCount(r)));
+  let firstTop = null, wy = 0, wsum = 0;
+  tableWrap.querySelectorAll("tbody tr[data-id]").forEach(tr=>{
+    const id = parseInt(tr.getAttribute("data-id"),10);
+    if (!weight.has(id)) return;
+    const w = weight.get(id);
+    const top = tr.offsetTop;
+    if (firstTop===null || top<firstTop) firstTop = top;
+    wy += w * (top + tr.offsetHeight/2);
+    wsum += w;
+  });
+  if (firstTop===null || wsum===0) return;
+  const centerMass = wy/wsum;
+  // Фильтр скорости изменения центра масс: мгновенная скорость по разности
+  // между поллами, сглаженная экспоненциально (EMA), чтобы погасить дрожание
+  // от завершения отдельных задач и шум таймингов полла.
+  const nowMs = performance.now();
+  let vInst = 0;
+  if (centerHistoryT > 0) {
+    const dtMs = nowMs - centerHistoryT;
+    if (dtMs > 50 && dtMs < 8000) vInst = (centerMass - centerSmooth) / (dtMs/1000);
+  } else {
+    speedSmooth = 0;
+  }
+  if (centerHistoryT > 0) speedSmooth = SPEED_ALPHA*vInst + (1-SPEED_ALPHA)*speedSmooth;
+  centerSmooth = centerMass;
+  centerHistoryT = nowMs;
+  // Предикция на один полл вперёд: едем не в текущий центр, а туда, где он
+  // окажется при текущей (отфильтрованной) скорости — не отстаём от прогресса.
+  const pred = centerMass + speedSmooth*HORIZON_MS/1000;
+  const target = pred - tableWrap.clientHeight/2;
+  const max = tableWrap.scrollHeight - tableWrap.clientHeight;
+  const fast = autoScrollBoost; // первичная доводка — быстрая, дальше ползём по скорости
+  autoScrollBoost = false;
+  smoothScrollTo(Math.max(0, Math.min(target, max)), fast);
+}
+function smoothScrollTo(target, fast){
+  if (!tableWrap) return;
+  cancelAnimationFrame(autoAnimId);
+  const start = tableWrap.scrollTop;
+  if (Math.abs(target-start) < 0.5) {
+    tableWrap.scrollTop = target;
+    return;
+  }
+  // Длительность анимации адаптивна: чем быстрее движется центр масс, тем
+  // быстрее догоняем; на медленном прогрессе плавно ползём.
+  let dur;
+  if (fast) dur = 700;
+  else {
+    const sp = Math.max(80, Math.abs(speedSmooth)); // минимальная скорость доводки, px/с
+    dur = Math.min(3000, Math.max(250, Math.abs(target-start)/sp));
+  }
+  const t0 = performance.now();
+  const step = (now)=>{
+    const t = Math.min(1, (now-t0)/dur);
+    const e = 1 - Math.pow(1-t, 4); // easeOutQuart: быстрый старт, долгая мягкая доводка
+    tableWrap.scrollTop = start + (target-start)*e;
+    if (t < 1) autoAnimId = requestAnimationFrame(step);
+  };
+  autoAnimId = requestAnimationFrame(step);
+}
+function setAutoScroll(on){
+  autoScrollOn = on;
+  if (!on) {
+    cancelAnimationFrame(autoAnimId);
+    centerHistoryT = 0; speedSmooth = 0; // сброс оценки скорости между включениями
+  }
+  if (btnAutoscroll) btnAutoscroll.classList.toggle("on", on);
+  try { localStorage.setItem("llao_autoscroll", on ? "1" : "0"); } catch(e){}
+  if (on) { autoScrollBoost = true; maybeAutoScroll(); }
+}
+
+async function moveBlock(block, dir){
+  if (!block.length) return;
+  const ids = currentRows.map(r=>r.id);
+  const blockSet = new Set(block);
+  let remaining = ids.filter(x=>!blockSet.has(x));
+  let newOrder;
+  if (dir==="up"||dir==="top") {
+    const firstPos = Math.min(...block.map(x=>ids.indexOf(x)));
+    let beforeId = null;
+    for (let i=firstPos-1;i>=0;i--) if (!blockSet.has(ids[i])) { beforeId = ids[i]; break; }
+    const insertAt = dir==="top" ? 0 : (beforeId===null ? 0 : remaining.indexOf(beforeId)+1);
+    newOrder = remaining.slice();
+    newOrder.splice(insertAt,0,...block);
+  } else {
+    const lastPos = Math.max(...block.map(x=>ids.indexOf(x)));
+    let afterId=null;
+    for (let i=lastPos+1;i<ids.length;i++) if (!blockSet.has(ids[i])) { afterId=ids[i]; break; }
+    const insertAt = dir==="bottom" ? remaining.length : (afterId===null ? remaining.length : remaining.indexOf(afterId)+1);
+    newOrder = remaining.slice();
+    newOrder.splice(insertAt,0,...block);
+  }
+  try { await rpc("reorder", {order:newOrder}); } catch(e){ opmsg(e.message, "err"); }
+}
 
 function progressBar(r){
   const tasks = r.tasks || [];
@@ -108,24 +234,53 @@ function progressBar(r){
   const done = tasks.filter(t=>t==="ok"||t==="failed").length;
   const total = tasks.length;
   const pct = total ? (done/total*100) : 0;
-  if (r.state==="ok" && r.pct) {
-    return `<span class="bar"><span class="bar-fill" style="width:100%"></span></span> 100% <span class="saving">(${r.pct.toFixed(1)}%)</span>`;
+  if (r.state==="ok") {
+    const save = (r.pct!==undefined && r.pct!==null) ? r.pct.toFixed(1) : "0.0";
+    return `<span class="bar"><span class="bar-fill" style="width:100%"></span></span> 100% <span class="saving">(${save}%)</span>`;
   }
-  if (r.state==="skip"||r.state==="error") {
+  if (r.state==="stopped"||r.state==="error") {
     return `<span class="bar"><span class="bar-fill" style="width:100%"></span></span> ${pct.toFixed(0)}%`;
   }
   return `<span class="bar"><span class="bar-fill" style="width:${pct}%"></span></span> ${pct.toFixed(0)}%`;
 }
 
 function updateSelectionUI(){
-  const n = selectedIds.size;
-  if (n>0) { selInfo.classList.remove("hidden"); selCount.textContent=n; }
-  else selInfo.classList.add("hidden");
-  if (!currentRows.length) { chkAll.checked=false; chkAll.indeterminate=false; return; }
-  const all = currentRows.every(r=>selectedIds.has(r.id));
-  const some = currentRows.some(r=>selectedIds.has(r.id));
-  chkAll.checked = all;
-  chkAll.indeterminate = !all && some;
+  if (!chkAll) return;
+  if (!currentRows.length) { chkAll.checked=false; chkAll.indeterminate=false; }
+  else {
+    const all = currentRows.every(r=>selectedIds.has(r.id));
+    const some = currentRows.some(r=>selectedIds.has(r.id));
+    chkAll.checked = all;
+    chkAll.indeterminate = !all && some;
+  }
+  updateBatchButtons();
+}
+
+function updateBatchButtons(){
+  if (!btnBatchStop || !btnBatchStart || !btnBatchDelete) return;
+  const selRows = currentRows.filter(r=>selectedIds.has(r.id));
+  const hasActiveSel = selRows.some(r=>r.state==="queued"||r.state==="prep"||r.state==="running");
+  const hasRestartSel = selRows.some(r=>r.state==="stopped"||r.state==="error");
+  const hasAnySel = selRows.length>0;
+  btnBatchStop.disabled = !hasActiveSel;
+  btnBatchStart.disabled = !hasRestartSel;
+  btnBatchDelete.disabled = !hasAnySel;
+  btnBatchStop.title = hasActiveSel ? "Остановить выделенные файлы" : "Нет активных файлов среди выделенных";
+  btnBatchStart.title = hasRestartSel ? "Запустить выделенные" : "Нет файлов для запуска среди выделенных";
+  btnBatchDelete.title = hasAnySel ? "Удалить выделенные файлы" : "Нет выделенных файлов";
+  const n = currentRows.length;
+  let firstSel = -1, lastSel = -1;
+  for (let i=0;i<n;i++) {
+    if (selectedIds.has(currentRows[i].id)) { if (firstSel<0) firstSel=i; lastSel=i; }
+  }
+  const canUp = firstSel>=0 && currentRows.slice(0,firstSel).some(r=>!selectedIds.has(r.id));
+  const canDown = lastSel>=0 && currentRows.slice(lastSel+1).some(r=>!selectedIds.has(r.id));
+  if (btnBatchTop && btnBatchUp && btnBatchDown && btnBatchBottom) {
+    btnBatchTop.disabled = btnBatchUp.disabled = !canUp;
+    btnBatchDown.disabled = btnBatchBottom.disabled = !canDown;
+    btnBatchTop.title = btnBatchUp.title = canUp ? "Переместить выделенные выше" : "Переместить выделенные нельзя — нет места";
+    btnBatchDown.title = btnBatchBottom.title = canDown ? "Переместить выделенные ниже" : "Переместить выделенные нельзя — нет места";
+  }
 }
 
 function renderQueue(rows){
@@ -143,18 +298,22 @@ function renderQueue(rows){
     const pos = i+1;
     const bar = progressBar(r);
     const infos = r.task_infos || [];
-    const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx])).join("");
-    let actions = "";
-    if (r.state==="queued"||r.state==="prep"||r.state==="running") {
-      actions += `<button data-stop="${r.id}" title="Остановить">⏹</button> `;
+    const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx])).join("") + excludedDots(r.excluded);
+    let actions = `<span class="action-btns">`;
+    if (r.state==="ok") {
+      actions += `<button data-clear="${r.id}" class="icon-btn" title="Удалить завершённый файл из списка">🧹</button> `;
+    } else if (r.state==="queued"||r.state==="prep"||r.state==="running") {
+      actions += `<button data-stop="${r.id}" class="icon-btn" title="Остановить">⏹</button> `;
     } else {
-      actions += `<button data-restart="${r.id}" title="Запустить снова">↻</button> `;
-      actions += `<button data-remove="${r.id}" class="danger" title="Удалить">🗑</button> `;
+      actions += `<button data-restart="${r.id}" class="icon-btn" title="Запустить">▶</button> `;
     }
+    actions += `<button data-remove="${r.id}" class="icon-btn danger" title="Удалить">🗑</button></span>`;
     const canUp = i>0, canDown = i<rows.length-1;
     actions += `<span class="move-btns">`;
-    if (canUp) actions += `<button data-move="top" data-id="${r.id}" title="В начало">⇤</button><button data-move="up" data-id="${r.id}" title="Вверх">↑</button>`;
-    if (canDown) actions += `<button data-move="down" data-id="${r.id}" title="Вниз">↓</button><button data-move="bottom" data-id="${r.id}" title="В конец">⇥</button>`;
+    actions += `<button data-move="top" data-id="${r.id}" class="icon-btn" title="В начало" ${canUp?"":"disabled"}>⇤</button>`;
+    actions += `<button data-move="up" data-id="${r.id}" class="icon-btn" title="Вверх" ${canUp?"":"disabled"}>↑</button>`;
+    actions += `<button data-move="down" data-id="${r.id}" class="icon-btn" title="Вниз" ${canDown?"":"disabled"}>↓</button>`;
+    actions += `<button data-move="bottom" data-id="${r.id}" class="icon-btn" title="В конец" ${canDown?"":"disabled"}>⇥</button>`;
     actions += `</span>`;
     const handle = `<span class="drag-handle" draggable="true" data-drag="${r.id}" title="Перетащите">≡</span>`;
     const chk = `<input type="checkbox" data-chk="${r.id}" ${selectedIds.has(r.id)?"checked":""}>`;
@@ -166,22 +325,29 @@ function renderQueue(rows){
   queueBody.querySelectorAll("[data-stop]").forEach(b=>{
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-stop"),10);
-      try { await rpc("cancel-file", {id}); opmsg("Файл #"+id+" остановлен", "ok"); } catch(e){ opmsg(e.message, "err"); }
+      try { await rpc("cancel-file", {id}); } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-remove]").forEach(b=>{
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-remove"),10);
-      if (!confirm(`Удалить файл #${id} из очереди?`)) return;
-      try { await rpc("remove", {id}); selectedIds.delete(id); opmsg("Файл #"+id+" удалён", "ok"); } catch(e){ opmsg(e.message, "err"); }
+      if (!confirm(`Удалить файл #${id} из очереди? Если он обрабатывается, обработка будет прервана.`)) return;
+      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); }
+    });
+  });
+  queueBody.querySelectorAll("[data-clear]").forEach(b=>{
+    b.addEventListener("click", async ()=>{
+      const id = parseInt(b.getAttribute("data-clear"),10);
+      const r = currentRows.find(x=>x.id===id);
+      if (!r || r.state!=="ok") return;
+      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); }
     });
   });
   queueBody.querySelectorAll("[data-restart]").forEach(b=>{
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-restart"),10);
       try {
-        const res = await rpc("restart", {ids:[id]});
-        opmsg((res.restarted||[]).length ? "Файл #"+id+" запущен снова" : "Файл #"+id+" не перезапущен", "ok");
+        await rpc("restart", {ids:[id]});
       } catch(e){ opmsg(e.message, "err"); }
     });
   });
@@ -189,34 +355,8 @@ function renderQueue(rows){
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-id"),10);
       const dir = b.getAttribute("data-move");
-      const ids = currentRows.map(r=>r.id);
-      let block = selectedIds.has(id) ? currentRows.filter(r=>selectedIds.has(r.id)).map(r=>r.id) : [id];
-      let remaining = ids.filter(x=>!block.includes(x));
-      let newOrder;
-      if (dir==="up"||dir==="top") {
-        let firstPos = Math.min(...block.map(x=>ids.indexOf(x)));
-        let insertAt = 0;
-        if (dir==="up") {
-          let beforeId = null;
-          for (let i=firstPos-1;i>=0;i--) if (!block.includes(ids[i])) { beforeId = ids[i]; break; }
-          insertAt = beforeId===null ? 0 : remaining.indexOf(beforeId)+1;
-        } else if (dir==="top") insertAt=0;
-        newOrder = remaining.slice();
-        newOrder.splice(insertAt,0,...block);
-      } else {
-        let lastPos = Math.max(...block.map(x=>ids.indexOf(x)));
-        let insertAt;
-        if (dir==="down") {
-          let afterId=null;
-          for (let i=lastPos+1;i<ids.length;i++) if (!block.includes(ids[i])) { afterId=ids[i]; break; }
-          if (afterId===null) insertAt=remaining.length;
-          else insertAt = remaining.indexOf(afterId)+1;
-        } else if (dir==="bottom") insertAt=remaining.length;
-        let newOrder2 = remaining.slice();
-        newOrder2.splice(insertAt,0,...block);
-        newOrder = newOrder2;
-      }
-      try { await rpc("reorder", {order:newOrder}); } catch(e){ opmsg(e.message, "err"); }
+      const block = selectedIds.has(id) ? currentRows.filter(r=>selectedIds.has(r.id)).map(r=>r.id) : [id];
+      await moveBlock(block, dir);
     });
   });
   queueBody.querySelectorAll("[data-chk]").forEach(cb=>{
@@ -315,6 +455,7 @@ function renderQueue(rows){
     }
   });
   document.addEventListener("contextmenu", e=>{ if (isDragging) e.preventDefault(); });
+  maybeAutoScroll();
 }
 
 async function pollState(){
@@ -325,17 +466,23 @@ async function pollState(){
     versionEl.textContent = j.version ? "v"+j.version : "";
     const c = j.counters||{}; cTotal.textContent=c.total||0; cDone.textContent=c.done||0; cFailed.textContent=c.failed||0;
     isPaused = !!j.paused;
-    btnPause.textContent = isPaused ? "▶ Продолжить" : "⏸ Пауза";
-    btnPause.title = isPaused ? "Запустить очередь" : "Остановить очередь";
+    const rows = j.rows || [];
+    const hasActive = rows.some(r=>r.state==="queued"||r.state==="prep"||r.state==="running");
+    const hasStopped = rows.some(r=>r.state==="stopped");
+    btnStop.disabled = !hasActive;
+    btnResume.disabled = !hasStopped;
+    btnStop.title = hasActive ? "Остановить активные файлы" : "Нет активных файлов";
+    btnResume.title = hasStopped ? "Запустить остановленные файлы" : "Нет остановленных файлов";
     if (pausedBadge) pausedBadge.textContent = isPaused ? "Очередь остановлена" : "";
     if (doneBadge) {
       const rows = j.rows || [];
-      const n = rows.filter(r=>r.state==="ok"||r.state==="skip"||r.state==="error").length;
+      const n = rows.filter(r=>r.state==="ok").length;
       doneBadge.textContent = n > 0 ? "(" + n + ")" : "";
       btnClearCompleted.disabled = n === 0;
     }
     lastSeqEl.textContent = "seq "+(j.last_seq||0);
     renderQueue(j.rows);
+    maybeAutoScroll();
     setConn(true, isPaused ? "Пауза" : "Подключено");
   } catch(e){
     if (String(e.message)==="401") return;
@@ -351,6 +498,44 @@ function startPoll(){
   }, 1000);
 }
 function stopPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+
+btnAutoscroll && btnAutoscroll.addEventListener("click", ()=> setAutoScroll(!autoScrollOn));
+btnSort && btnSort.addEventListener("click", async ()=>{
+  if (!currentRows.length) return;
+  if (!confirm(`Сортировать очередь по полному пути (регистрозависимо)?`)) return;
+  try {
+    const res = await rpc("sort", {});
+    opmsg("Отсортировано файлов: "+(res.sorted||0), "ok");
+  } catch(e){ opmsg(e.message, "err"); }
+});
+if (tableWrap) {
+  // Различие: автоскролл пишет scrollTop по rAF и НЕ порождает событий ввода,
+  // а человек прокручивает списком колесом/тачем/клавиатурой/скроллбаром.
+  // Поэтому вмешательством считаем события ввода, а `scroll` не слушаем вовсе —
+  // иначе собственная прокрутка распознаётся как ручная и гасит себя.
+  tableWrap.addEventListener("wheel", ()=>{ if (autoScrollOn){ cancelAnimationFrame(autoAnimId); setAutoScroll(false); } }, {passive:true});
+  tableWrap.addEventListener("touchstart", ()=>{ if (autoScrollOn){ cancelAnimationFrame(autoAnimId); setAutoScroll(false); } }, {passive:true});
+  tableWrap.addEventListener("keydown", (e)=>{
+    if (!autoScrollOn) return;
+    if (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Home|End|Space)$/.test(e.key)) return;
+    cancelAnimationFrame(autoAnimId);
+    setAutoScroll(false);
+  });
+  tableWrap.addEventListener("pointerdown", (e)=>{
+    if (!autoScrollOn) return;
+    // Клики по строкам (чекбокс, кнопки) автоскролл не трогаем; «вмешательство»
+    // — это drag по скроллбару, когда событие приходит на сам контейнер.
+    if (e.target !== tableWrap) return;
+    cancelAnimationFrame(autoAnimId);
+    setAutoScroll(false);
+  });
+}
+(function initAutoScroll(){
+  if (!btnAutoscroll) return;
+  let v = "0";
+  try { v = localStorage.getItem("llao_autoscroll") || "0"; } catch(e){}
+  setAutoScroll(v === "1");
+})();
 
 loginForm.addEventListener("submit", (e)=>{
   e.preventDefault();
@@ -378,49 +563,79 @@ addForm.addEventListener("submit", async (e)=>{
     addMsg.textContent=msg; addMsg.className="msg ok"; addPath.value="";
   } catch(err){ addMsg.textContent=err.message; addMsg.className="msg err"; }
 });
-btnPause.addEventListener("click", async ()=>{
-  const willPause = !isPaused;
-  if (willPause) { if (!confirm("Остановить очередь? Текущие файлы доработают, новые не запустятся.")) return; }
-  try {
-    await rpc(willPause ? "pause" : "resume", {});
-    opmsg(willPause ? "Очередь остановлена" : "Очередь запущена", "ok");
-  } catch(e){ opmsg(e.message, "err"); }
+btnStop.addEventListener("click", async ()=>{
+  const ids = currentRows.filter(r=>r.state==="queued"||r.state==="prep"||r.state==="running").map(r=>r.id);
+  if (!ids.length) { try{ await rpc("pause", {}); }catch(e){} return; }
+  if (!confirm(`Остановить ${ids.length} активных файлов? Их процессы будут прерваны, файлы перейдут в состояние «остановлен».`)) return;
+  let n=0;
+  try { const res = await rpc("bulk-cancel", {ids}); n = res.cancelled || 0; } catch(e){ opmsg(e.message, "err"); }
+  try{ await rpc("pause", {}); }catch(e){}
+  opmsg("Остановлено активных: "+n, "ok");
+});
+btnResume.addEventListener("click", async ()=>{
+  const ids = currentRows.filter(r=>r.state==="stopped"||r.state==="error").map(r=>r.id);
+  try{ await rpc("resume", {}); }catch(e){}
+  if (ids.length) {
+    try {
+      const res = await rpc("restart", {ids});
+opmsg("Запущено: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
+    } catch(e){ opmsg(e.message, "err"); }
+  } else {
+    opmsg("Очередь запущена", "ok");
+  }
 });
 btnClearCompleted.addEventListener("click", async ()=>{
-  const done = currentRows.filter(r=>r.state==="ok"||r.state==="skip"||r.state==="error");
-  if (done.length===0) { opmsg("Нет завершённых файлов", ""); return; }
-  if (!confirm(`Удалить ${done.length} завершённых файлов из списка?`)) return;
-  for (const r of done) { try{ await rpc("remove", {id:r.id}); }catch(e){} }
-  opmsg("Удалено завершённых: "+done.length, "ok");
+  const done = currentRows.filter(r=>r.state==="ok");
+  if (done.length===0) { opmsg("Нет успешно завершённых файлов", ""); return; }
+  if (!confirm(`Удалить ${done.length} успешно завершённых файлов из списка?`)) return;
+  try {
+    const res = await rpc("clear-done", {});
+    opmsg("Удалено завершённых: "+(res.removed||0), "ok");
+  } catch(e){ opmsg(e.message, "err"); }
 });
-btnBatchStop && btnBatchStop.addEventListener("click", async ()=>{
+btnBatchStop.addEventListener("click", async ()=>{
   const ids = [...selectedIds].filter(id=>{
     const r = currentRows.find(x=>x.id===id);
     return r && (r.state==="queued"||r.state==="prep"||r.state==="running");
   });
   if (!ids.length) { opmsg("Нет активных файлов среди выделенных", ""); return; }
-  for (let id of ids) try{ await rpc("cancel-file", {id}); }catch(e){}
-  opmsg("Остановлено: "+ids.length, "ok");
+  try {
+    const res = await rpc("bulk-cancel", {ids});
+    opmsg("Остановлено: "+(res.cancelled||0)+" из "+ids.length, "ok");
+  } catch(e){ opmsg(e.message, "err"); }
 });
-const btnBatchStart = el("btn-batch-start");
-btnBatchStart && btnBatchStart.addEventListener("click", async ()=>{
-  // Серверный restart универсален: завершённые запускает сразу, активные
-  // сначала останавливает и ждёт — фильтровать не нужно, шлём всех.
-  const ids = [...selectedIds];
-  if (!ids.length) { opmsg("Ничего не выбрано — отметьте файлы галками", ""); return; }
+btnBatchStart.addEventListener("click", async ()=>{
+  // Перезапускаем только неактивные (stopped/error): активные уже работают,
+  // их router restart остановил бы и ждал до 20с на каждый.
+  const ids = [...selectedIds].filter(id=>{
+    const r = currentRows.find(x=>x.id===id);
+    return r && (r.state==="stopped"||r.state==="error");
+  });
+  if (!ids.length) { opmsg("Нет файлов для запуска среди выделенных", ""); return; }
   opmsg("Запуск выделенных...", "");
   try {
     const res = await rpc("restart", {ids});
-    opmsg("Запущено снова: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
+    opmsg("Запущено: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
   } catch(e){ opmsg(e.message, "err"); }
 });
-btnBatchDelete && btnBatchDelete.addEventListener("click", async ()=>{
+btnBatchDelete.addEventListener("click", async ()=>{
   const ids = [...selectedIds];
   if (!ids.length) return;
-  if (!confirm(`Удалить ${ids.length} выделенных файлов?`)) return;
-  for (let id of ids) try{ await rpc("remove", {id}); }catch(e){}
+  if (!confirm(`Удалить ${ids.length} выделенных файлов? Если какие-то обрабатываются, обработка будет прервана.`)) return;
+  try { await rpc("bulk-remove", {ids}); } catch(e){ opmsg(e.message, "err"); }
   selectedIds.clear();
 });
+const headMove = (btn, dir)=>{
+  btn && btn.addEventListener("click", async ()=>{
+    const block = currentRows.filter(r=>selectedIds.has(r.id)).map(r=>r.id);
+    if (!block.length) { opmsg("Ничего не выбрано — отметьте файлы галками", ""); return; }
+    await moveBlock(block, dir);
+  });
+};
+headMove(btnBatchTop, "top");
+headMove(btnBatchUp, "up");
+headMove(btnBatchDown, "down");
+headMove(btnBatchBottom, "bottom");
 chkAll && chkAll.addEventListener("change", ()=>{
   if (chkAll.checked) currentRows.forEach(r=>selectedIds.add(r.id));
   else selectedIds.clear();

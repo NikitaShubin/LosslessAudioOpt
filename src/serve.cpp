@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <httplib.h>
@@ -192,13 +193,16 @@ nlohmann::json DaemonSession::session_options() const {
 }
 
 nlohmann::json DaemonSession::counters() const {
-    int total = 0, done = 0, failed = 0;
+    int total = 0, done = 0, failed = 0, stopped = 0, ok = 0;
     for (const auto& r : st_->snapshot()) {
         total++;
-        if (r.state == "ok" || r.state == "skip" || r.state == "error") done++;
+        if (r.state == "ok" || r.state == "stopped" || r.state == "error") done++;
         if (r.state == "error") failed++;
+        if (r.state == "stopped") stopped++;
+        if (r.state == "ok") ok++;
     }
-    return {{"total", total}, {"done", done}, {"failed", failed}};
+    return {{"total", total}, {"done", done}, {"failed", failed},
+            {"stopped", stopped}, {"ok", ok}};
 }
 
 bool DaemonSession::paused() const { return paused_.load(); }
@@ -281,7 +285,13 @@ bool DaemonSession::cancel_file(uint64_t id) {
     auto snap = engine_->snapshot();
     for (const auto& f : snap)
         if (f.idx == (size_t)id) {
+            bool active = !(f.state == "ok" || f.state == "stopped" ||
+                            f.state == "error" || f.state == "removed");
             engine_->remove((size_t)id);
+            if (active) {
+                ev_->push("stopped", {{"id", id}});
+                st_->set_state(id, "stopped");
+            }
             return true;
         }
     return false;
@@ -297,7 +307,7 @@ bool DaemonSession::remove_locked(uint64_t id) {
         if (f.idx == (size_t)id) {
             found = true;
             path_to_remove = f.path;
-            is_done = (f.state == "ok" || f.state == "skip" || f.state == "error" ||
+            is_done = (f.state == "ok" || f.state == "stopped" || f.state == "error" ||
                        f.state == "removed");
             break;
         }
@@ -317,10 +327,77 @@ bool DaemonSession::remove(uint64_t id) {
     return remove_locked(id);
 }
 
+uint64_t DaemonSession::bulk_remove(const std::vector<size_t>& ids) {
+    if (!engine_) return 0;
+    std::lock_guard<std::mutex> lk(mt_);
+    uint64_t removed = 0;
+    for (size_t id : ids)
+        if (remove_locked(id)) removed++;
+    return removed;
+}
+
+uint64_t DaemonSession::bulk_cancel(const std::vector<size_t>& ids) {
+    if (!engine_) return 0;
+    std::lock_guard<std::mutex> lk(mt_);
+    auto snap = engine_->snapshot();
+    uint64_t cancelled = 0;
+    for (size_t id : ids) {
+        bool active = false;
+        for (const auto& f : snap)
+            if (f.idx == id) {
+                active = !(f.state == "ok" || f.state == "stopped" ||
+                           f.state == "error" || f.state == "removed");
+                break;
+            }
+        if (!active) continue;
+        engine_->remove(id);
+        ev_->push("stopped", {{"id", id}});
+        st_->set_state(id, "stopped");
+        cancelled++;
+    }
+    return cancelled;
+}
+
+size_t DaemonSession::sort_by_path() {
+    if (!engine_) return 0;
+    std::lock_guard<std::mutex> lk(mt_);
+    auto snap = engine_->snapshot();
+    std::unordered_map<size_t, size_t> pos;
+    pos.reserve(snap.size());
+    for (size_t k = 0; k < snap.size(); k++) pos[snap[k].idx] = k;
+    std::vector<size_t> order;
+    order.reserve(snap.size());
+    for (const auto& f : snap) order.push_back(f.idx);
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        const std::string& pa = snap[pos[a]].path;
+        const std::string& pb = snap[pos[b]].path;
+        if (pa.empty()) {
+            if (pb.empty()) return false;
+            return false;  // пустые пути — в конец
+        }
+        if (pb.empty()) return true;
+        return pa < pb;
+    });
+    if (!engine_->reorder(order)) return 0;
+    st_->reorder(order);
+    ev_->push("reordered", {{"order", order}});
+    return order.size();
+}
+
+uint64_t DaemonSession::clear_done() {
+    if (!engine_) return 0;
+    std::lock_guard<std::mutex> lk(mt_);
+    auto rows = st_->snapshot();
+    uint64_t removed = 0;
+    for (const auto& r : rows)
+        if (r.state == "ok" && remove_locked(r.id)) removed++;
+    return removed;
+}
+
 namespace {
 
 bool is_done_state(const std::string& st) {
-    return st == "ok" || st == "skip" || st == "error" || st == "removed";
+    return st == "ok" || st == "stopped" || st == "error" || st == "removed";
 }
 
 }  // namespace
@@ -328,11 +405,12 @@ bool is_done_state(const std::string& st) {
 bool DaemonSession::restart(uint64_t id) {
     if (!engine_) return false;
     // Универсальный перезапуск: активный файл сначала останавливается
-    // (cancel + мгновенный kill процессов), ожидается завершение, затем
-    // строка заменяется новым заданием (remove + tombstone, затем add).
-    // Дубликатов в списке не остаётся.
+    // (cancel + мгновенный kill процессов), ожидается завершение. Затем
+    // НОВАЯ строка добавляется СНАЧАЛА, и только после успешного добавления
+    // удаляется старая. Так исключено «исчезновение файла из списка» даже
+    // когда старая строка уже была автоубрана движком после отмены.
     std::string path;
-    bool already_done = false;
+    bool was_active = false;
     {
         auto snap = engine_->snapshot();
         bool found = false;
@@ -340,41 +418,100 @@ bool DaemonSession::restart(uint64_t id) {
             if (f.idx == (size_t)id) {
                 found = true;
                 path = f.path;
-                already_done = is_done_state(f.state);
+                was_active = !is_done_state(f.state);
                 break;
             }
         if (!found || path.empty()) return false;
-        if (!already_done) engine_->remove((size_t)id);  // cancel + kill, без зеркала
-    }
-    // Если файл уже завершён (в т.ч. "removed" после cancel-file) —
-    // не ждём, сразу заменяем. Если ещё дорабатывает — ждём ≤20с.
-    if (!already_done) {
-        bool settled = false;
-        for (int i = 0; i < 200; i++) {
-            auto snap = engine_->snapshot();
-            for (const auto& f : snap)
-                if (f.idx == (size_t)id && is_done_state(f.state)) {
-                    settled = true;
-                    break;
-                }
-            if (settled) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (was_active) engine_->remove((size_t)id);  // cancel + kill, без зеркала
+        if (was_active) {
+            bool settled = false;
+            for (int i = 0; i < 200; i++) {
+                auto s2 = engine_->snapshot();
+                for (const auto& f : s2)
+                    if (f.idx == (size_t)id && is_done_state(f.state)) {
+                        settled = true;
+                        break;
+                    }
+                if (settled) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!settled) return false;
         }
-        if (!settled) return false;
     }
-    // Для уже завершённого (ok/skip/error/removed) перезапуск имеет смысл
-    // только если исходный файл ещё существует на диске: после успешной
-    // замены (ok) исходник заменён другим форматом и перезапускать нечего.
-    // Проверку делаем только для already_done — активный файл мы только что
-    // со стоп-процессом не трогали, и он на месте.
-    if (already_done && !util::dir_exists(path) && !util::file_exists(path)) return false;
+    // Исходник должен существовать: после успешной обработки (ok) файл
+    // заменён другим форматом, перезапускать нечего.
+    if (!util::dir_exists(path) && !util::file_exists(path)) return false;
     std::lock_guard<std::mutex> lk(mt_);
-    if (!remove_locked(id)) return false;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
                           {"rejected", nlohmann::json::array()}};
     std::vector<size_t> new_ids;
     add_locked({path}, tmp, new_ids);
-    return !new_ids.empty();
+    if (new_ids.empty()) return false;  // старую строку не трогаем
+    size_t new_id = new_ids.front();
+    // Позицию старой строки берём из ВИДИМОГО списка (зеркало) в текущий
+    // момент — она уже учитывает все удалённые/завершённые строки. Позиция в
+    // движке может отличаться (движок хранит и «зомби»-строки), поэтому
+    // движок переупорядочиваем по его же позиции.
+    size_t mirror_pos = SIZE_MAX;
+    size_t engine_pos = SIZE_MAX;
+    {
+        auto rows = st_->snapshot();
+        for (size_t k = 0; k < rows.size(); k++)
+            if (rows[k].id == (size_t)id) {
+                mirror_pos = k;
+                break;
+            }
+        auto snap = engine_->snapshot();
+        for (size_t k = 0; k < snap.size(); k++)
+            if (snap[k].idx == (size_t)id) {
+                engine_pos = k;
+                break;
+            }
+    }
+    // Старая строка может отсутствовать (автоуборка после отмены) — не ошибка.
+    {
+        auto snap = engine_->snapshot();
+        for (const auto& f : snap)
+            if (f.idx == (size_t)id) {
+                remove_locked(id);
+                break;
+            }
+    }
+    // Восстанавливаем прежнюю позицию строки, чтобы перезапуск не выглядел
+    // как «файл удалён из списка» и не ломал ручную перетасовку очереди.
+    // Зеркало (видимый список) и движок переупорядочиваются отдельно: движок
+    // хранит отменённые строки-«зомби» (idx, которые из зеркала уже ушли),
+    // поэтому подавать туда зеркальный порядок нельзя.
+    {
+        auto rows = st_->snapshot();
+        std::vector<size_t> morder;
+        morder.reserve(rows.size());
+        for (const auto& r : rows)
+            if (r.id != new_id) morder.push_back(r.id);
+        if (!morder.empty()) {
+            size_t goal = mirror_pos != SIZE_MAX && mirror_pos < morder.size()
+                              ? mirror_pos
+                              : morder.size();
+            morder.insert(morder.begin() + goal, new_id);
+            if (st_->reorder(morder)) ev_->push("reordered", {{"order", morder}});
+        }
+        auto snap = engine_->snapshot();
+        std::vector<size_t> eorder;
+        eorder.reserve(snap.size());
+        for (const auto& f : snap)
+            if (f.idx != new_id) eorder.push_back(f.idx);
+        if (!eorder.empty()) {
+            size_t goal = engine_pos != SIZE_MAX && engine_pos < eorder.size()
+                              ? engine_pos
+                              : eorder.size();
+            eorder.insert(eorder.begin() + goal, new_id);
+            engine_->reorder(eorder);
+        }
+    }
+    // Ручной перезапуск при остановленной очереди должен снимать паузу,
+    // иначе файл добавится и останется в «queued» навсегда.
+    if (paused_.load()) set_paused(false);
+    return true;
 }
 
 bool DaemonSession::reorder(const std::vector<size_t>& order) {
@@ -393,6 +530,11 @@ void DaemonSession::request_shutdown(bool /*force*/) {
 
 nlohmann::json DaemonSession::formats() const {
     return {{"formats", formats_cache_}};
+}
+
+nlohmann::json DaemonSession::debug_state() {
+    if (!engine_) return nullptr;
+    return engine_->debug_state();
 }
 
 void DaemonSession::shutdown() {

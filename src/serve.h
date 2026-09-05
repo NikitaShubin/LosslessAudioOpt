@@ -48,9 +48,14 @@ public:
     bool cancel_file(uint64_t id) override;
     bool remove(uint64_t id) override;
     bool restart(uint64_t id) override;
+    uint64_t bulk_remove(const std::vector<size_t>& ids) override;
+    uint64_t bulk_cancel(const std::vector<size_t>& ids) override;
+    size_t sort_by_path() override;
+    uint64_t clear_done() override;
     bool reorder(const std::vector<size_t>& order) override;
     void request_shutdown(bool force) override;
     nlohmann::json formats() const override;
+    nlohmann::json debug_state() override;
 
     // Graceful shutdown: остановить движок, подождать активные файлы,
     // записать отчёт, снять discovery (если задан). Вызывается после

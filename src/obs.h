@@ -40,17 +40,20 @@ struct Sink {
     // Расширенный вариант с метаданными задач (для демона/веба).
     virtual void set_tasks(size_t, const std::vector<TaskInfo>&) {}
 
+    // Форматы, исключённые по caps для этого файла (жёлтые точки в вебе).
+    virtual void set_excluded(size_t, const std::vector<std::string>&) {}
+
     // Смена состояния варианта task_idx.
     virtual void task(size_t, size_t, TaskState) {}
 
     // Файл обработан успешно; pct — процент выигрыша в сжатии.
     virtual void end_file(size_t, double) {}
 
-    // Файл не конвертирован (skip).
-    virtual void mark_skip(size_t) {}
-
     // Файл завершился ошибкой.
     virtual void mark_error(size_t) {}
+
+    // Файл остановлен/не подходит (пользователь остановил, или ранний отсев).
+    virtual void mark_stopped(size_t) {}
 
     // Печать диагностической строки (подавляется в интерактивном режиме).
     virtual void log(const std::string&) {}

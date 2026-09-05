@@ -179,8 +179,8 @@ def main():
 
         # ждём завершение хотя бы одного файла для restart-теста
         st = wait_state(d, lambda s: any(
-            x["state"] in ("ok", "skip", "error") for x in s["rows"]), timeout=180)
-        done = [x for x in st["rows"] if x["state"] in ("ok", "skip", "error")]
+            x["state"] in ("ok", "stopped", "error") for x in s["rows"]), timeout=180)
+        done = [x for x in st["rows"] if x["state"] in ("ok", "stopped", "error")]
         check(bool(done), f"at least one done file: {st['counters']}")
 
         # 6. restart остановленного через cancel-file файла: замена, не append.
@@ -253,6 +253,101 @@ def main():
         st = d.get("/api/state")
         matches = [x for x in st["rows"] if x["label"] == "race.wav"]
         check(len(matches) == 1, f"single race.wav row: {matches}")
+
+        # 7.6. restart остановленного при включённой паузе: должен снять паузу
+        # и запустить файл (регрессия: раньше снималась — файл добавлялся в
+        # «queued», не стартовал, на UI выглядело как «удаление из списка»).
+        pw = os.path.join(workdir, "pause_restart.wav")
+        gen_wav(pw, 700)
+        r = d.rpc("add", {"paths": [pw]})
+        pid = r["result"]["added"][0]["id"]
+        d.rpc("bulk-cancel", {"ids": [pid]})   # «остановить всё»
+        check(d.rpc("pause", {})["result"]["paused"] is True, "pause before restart")
+        r = d.rpc("restart", {"ids": [pid]})
+        check(r["ok"] and r["result"]["restarted"] == [pid],
+              f"restart while paused: {r}")
+        st = wait_state(d, lambda s: (not s["paused"]) and any(
+            x["state"] in ("prep", "running") for x in s["rows"]),
+            timeout=30, interval=1)
+        check(st is not None and not st["paused"],
+              "restart при паузе снял паузу и запустил файл")
+
+        # 7.7. bulk-cancel / bulk-remove: один RPC, корректные счётчики
+        bw = os.path.join(workdir, "bulk_target.wav")
+        gen_wav(bw, 500)
+        r = d.rpc("add", {"paths": [bw]})
+        bid = r["result"]["added"][0]["id"]
+        r = d.rpc("bulk-cancel", {"ids": [bid]})
+        check(r["ok"] and r["result"]["cancelled"] == 1, f"bulk-cancel: {r}")
+        st = d.get("/api/state")
+        row = [x for x in st["rows"] if x["id"] == bid]
+        check(row and row[0]["state"] == "stopped",
+              f"bulk-cancel -> stopped: {st['rows']}")
+        r = d.rpc("bulk-remove", {"ids": [bid]})
+        check(r["ok"] and r["result"]["removed"] == 1, f"bulk-remove: {r}")
+        st = d.get("/api/state")
+        check(bid not in [x["id"] for x in st["rows"]], "bulk-remove убрал строку")
+
+        # 7.8. sort: стабильная сортировка по полному пути; id сохраняются
+        a_path = os.path.join(workdir, "zd.wav")
+        b_path = os.path.join(workdir, "aa.wav")
+        gen_wav(b_path, 300)
+        gen_wav(a_path, 900)
+        r = d.rpc("add", {"paths": [b_path, a_path]})
+        ids = [x["id"] for x in r["result"]["added"]]
+        r = d.rpc("sort", {})
+        check(r["ok"] and r["result"]["sorted"] >= 2, f"sort: {r}")
+        st = d.get("/api/state")
+        idx = {x["id"]: i for i, x in enumerate(st["rows"])}
+        check(idx[ids[0]] < idx[ids[1]], f"sort ставит aa перед zd: {st['rows']}")
+
+        # 7.9. дедуп движка: повторное добавление папки с активным файлом
+        dup_dir = os.path.join(workdir, "dupdir")
+        os.makedirs(dup_dir, exist_ok=True)
+        gen_wav(os.path.join(dup_dir, "inner.wav"), 250)
+        r1 = d.rpc("add", {"paths": [dup_dir]})
+        check(len(r1["result"]["added"]) == 1, f"first add dir: {r1}")
+        d.rpc("pause", {})
+        r2 = d.rpc("add", {"paths": [dup_dir]})
+        check(len(r2["result"]["added"]) == 0, f"second add dir filtered: {r2}")
+        st = d.get("/api/state")
+        matches = [x for x in st["rows"] if x["label"] == "inner.wav"]
+        check(len(matches) == 1, f"no dup inner.wav: {matches}")
+        d.rpc("resume", {})
+
+        # 7.10. restart сохраняет позицию строки: ручная перестановка очереди
+        # не должна теряться при возобновлении остановленного файла. Прогоняем
+        # несколько циклов подряд — каждые стоп+старт оставляют в движке
+        # «зомби»-строку, которая раньше сбивала восстановление позиции.
+        zpath = os.path.join(workdir, "pos_z.wav")
+        apath2 = os.path.join(workdir, "pos_a.wav")
+        gen_wav(zpath, 311)
+        gen_wav(apath2, 322)
+        r = d.rpc("add", {"paths": [zpath, apath2]})
+        zid = r["result"]["added"][0]["id"]
+        aid2 = r["result"]["added"][1]["id"]
+        # ручная перестановка: [pos_z, pos_a] -> [pos_a, pos_z]
+        check(d.rpc("reorder", {"order": [aid2, zid]})["result"]["reordered"] is True,
+              "reorder перед restart")
+        st = d.get("/api/state")
+        pos_z = [i for i, x in enumerate(st["rows"]) if x["id"] == zid][0]
+        check(pos_z == 1, f"pos_z на позиции 1: {pos_z}")
+        for cycle in range(3):
+            d.rpc("cancel-file", {"id": zid})
+            time.sleep(1)
+            r = d.rpc("restart", {"ids": [zid]})
+            check(r["ok"] and r["result"]["restarted"] == [zid],
+                  f"restart (цикл {cycle}): {r}")
+            st = wait_state(d, lambda s: any(
+                x["label"] == os.path.basename(zpath) and x["id"] != zid
+                for x in s["rows"]), timeout=30, interval=1)
+            check(st is not None, f"после restart (цикл {cycle}) новая строка на месте")
+            newrows = [x for x in st["rows"]
+                       if x["label"] == os.path.basename(zpath)]
+            check(newrows and [i for i, x in enumerate(st["rows"])
+                               if x["label"] == os.path.basename(zpath)][0] == pos_z,
+                  f"restart сохраняет позицию (цикл {cycle}): было {pos_z}")
+            zid = newrows[0]["id"]
 
         # 8. shutdown: процесс вышел, discovery удалён
         rc = d.stop()

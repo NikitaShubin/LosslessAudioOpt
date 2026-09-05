@@ -1,0 +1,18 @@
+{
+  "comment": "Входные аудиоформаты, который принимаются на вход (в т.ч. lossy), но не являются целевыми кодеками. Расширения форматов из formats/*.json и базовые wav/aiff/ogg добавляются автоматически. Добавление нового входа не требует перекомпиляции.",
+  "inputs": [
+    { "ext": "mp3",  "kind": "lossy" },
+    { "ext": "aac",  "kind": "lossy" },
+    { "ext": "mp2",  "kind": "lossy" },
+    { "ext": "m4a",  "kind": "lossy" },
+    { "ext": "mp4",  "kind": "lossy" },
+    { "ext": "wma",  "kind": "lossy" },
+    { "ext": "opus", "kind": "lossy" },
+    { "ext": "oga",  "kind": "lossy" },
+    { "ext": "ac3",  "kind": "lossy" },
+    { "ext": "dts",  "kind": "lossy" },
+    { "ext": "mka",  "kind": "lossy" },
+    { "ext": "mkv",  "kind": "lossy" },
+    { "ext": "webm", "kind": "lossy" }
+  ]
+}

@@ -61,7 +61,7 @@ void write_report(const std::string& path, const std::vector<FileSummary>& files
     uint64_t t_orig = 0, t_best = 0;
     for (const auto& f : files) {
         if (f.status == "ok") n_ok++;
-        else if (f.status == "skip") n_skip++;
+        else if (f.status == "stopped") n_skip++;
         else n_err++;
         if (f.replaced) n_replaced++;
         t_orig += f.original;

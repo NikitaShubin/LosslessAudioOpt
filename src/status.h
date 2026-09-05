@@ -38,8 +38,9 @@ void task(size_t idx, size_t task_idx, TaskState st);
 // pct — процент выигрыша в сжатии (для отображения справа).
 void end_file(size_t idx, double pct);
 
-// Файл не конвертирован (skip): полоса целиком тускло-серая.
-void mark_skip(size_t idx);
+// Файл остановлен/не подходит (пользователь остановил, ранний отсев):
+// полоса целиком тускло-серая.
+void mark_stopped(size_t idx);
 
 // Файл завершился ошибкой: полоса целиком красная.
 void mark_error(size_t idx);
