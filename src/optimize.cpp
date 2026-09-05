@@ -34,6 +34,17 @@ namespace json = nlohmann;
 
 namespace {
 
+// Приводит путь к единому виду для сравнения при дедупликации. Демон получает
+// пути и через HTTP (разделители «/»), и из файловой системы wine («\» в смеси
+// со «/» от пользовательских корней), поэтому сравниваются только
+// нормализованные значения — иначе дубли вложенных папок не распознаются.
+std::string norm_path(const std::string& p) {
+    std::string s = p;
+    for (auto& c : s)
+        if (c == '\\') c = '/';
+    return s;
+}
+
 // Число потоков из опций: целое jobs — как есть, вещественное — множитель числа
 // ядер; 0/отрицательное — авто (2× ядра). Не меньше 1.
 int resolve_jobs(double jobs, bool jobs_float) {
@@ -133,6 +144,9 @@ std::string tmp_token(const std::string& path) {
 // подпапка на процесс исключает конфликты имён между параллельными прогонами
 // llao (tok — хэш пути — у них одинаковый) и упрощает очистку: после прогона
 // подпапка удаляется целиком, а чужие подпапки не трогаются.
+// Используется только монолитным CLI (optimize/restore): демон работает
+// single-instance и единолично владеет базовым tmp, поэтому сессия пишет
+// напрямую в базу без pid-уровня (см. Engine::init в serve-режиме).
 static std::string base_tmp_dir(const std::string& custom) {
     return custom.empty() ? tmp_dir() : custom;
 }
@@ -148,6 +162,17 @@ std::string session_tmp_dir(const std::string& custom) {
 void clear_session_tmp_dir_impl(const std::string& custom) {
     std::error_code ec;
     fs::remove_all(fs::u8path(session_tmp_dir(custom)), ec);
+}
+
+// Удаляет базовый tmp-каталог целиком (подпапки всех сессий/PID) и создаёт его
+// заново. Используется демоном: он единственный процесс, работающий со своим
+// базовым tmp («--tmp» или exe_dir/tmp), поэтому при старте убирает всё —
+// включая остатки аварийно завершённых сессий и следы сирот прошлых запусков.
+void clear_tmp_base(const std::string& custom) {
+    std::string d = base_tmp_dir(custom);
+    std::error_code ec;
+    fs::remove_all(fs::u8path(d), ec);
+    util::mkdirs(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +231,24 @@ public:
     }
 
     // Явное удаление tmp-директории (до деструктора, для раннего освобождения
-    // места). После вызова dir_ пуста — деструктор ничего не удалит.
+    // места). После вызова dir_ пуста — деструктор ничего не удалит. Если папку
+    // не удалось убрать (занятость/ошибка ФС), папка остаётся в tmp до следующего
+    // clear_tmp_base — это важно видеть в логе для диагностики «кучи .dec.wav».
     void cleanup() {
         if (!dir_.empty()) {
             std::error_code ec;
             fs::remove_all(fs::u8path(dir_), ec);
+            for (int attempt = 0; attempt < 3 && ec; attempt++) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1200 * (attempt + 1)));
+                ec.clear();
+                fs::remove_all(fs::u8path(dir_), ec);
+            }
+            if (ec) {
+                obs::sink()->log("WARN: FileSession cleanup failed for '" + dir_ +
+                                 "': " + ec.message() + "\n");
+            } else {
+                obs::sink()->log("[tmp] session dir '" + dir_ + "' removed\n");
+            }
             dir_.clear();
         }
     }
@@ -218,7 +256,7 @@ public:
     bool ok() const { return !dir_.empty(); }
 
 private:
-    std::string dir_;   // tmp/<pid>/<tok>/
+    std::string dir_;   // tmp/<tok>/  (у демона — прямо в базе tmp, без pid)
     std::string path_;  // оригинальный путь к файлу
 };
 
@@ -467,12 +505,26 @@ std::string encode_candidate(const std::string& wav, const std::string& candidat
     return {};
 }
 
+// Удаление файла валидации (dec.wav) с длинным ретраем. Wine (wineserver) и
+// антивирус удерживают свежезаписанный файл дольше, чем покрывает базовая
+// remove_file (~3 сек): handle декодера закрывается с задержкой, и одиночная
+// попытка оставляет «кучу dec.wav» на диске до конца job. Повторяем нарастающими
+// паузами до ~20 сек.
+bool remove_dec_wav(const std::string& p) {
+    if (util::remove_file(p)) return true;
+    for (int attempt = 0; attempt < 4; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500 * (attempt + 1)));
+        if (!util::file_exists(p)) return true;
+        if (util::remove_file(p)) return true;
+    }
+    return false;
+}
+
 // Полная валидация кандидата: builtin-проверка формата (flac -t и т.п.) + декод
 // и побитовое сравнение PCM с эталонным WAV (потоковое, без загрузки в память).
 // Возвращает пустую строку при успехе, иначе текст ошибки.
 std::string validate_candidate(const std::string& wav, const std::string& candidate,
-                               const Env& env,
-                               const std::atomic<bool>* kill = nullptr) {
+                               const Env& env, const std::atomic<bool>* kill = nullptr) {
     const config::Format& f = *env.fmt;
     if (f.verify_kind == "builtin" && !f.verify_cmd.empty()) {
         std::vector<std::string> vargs = build_cmd(f.verify_cmd, env.decoder, candidate, "",
@@ -498,14 +550,35 @@ std::string validate_candidate(const std::string& wav, const std::string& candid
     }
     proc::Result dr = proc::run(dec_args, env.decode_timeout, "", {}, kill);
     if (!dr.started || dr.timed_out || dr.exit_code != 0) {
-        if (util::file_exists(dec_wav)) util::remove_file(dec_wav);
         std::string out = util::trim(dr.output);
+        // Диагностика «кучи .dec.wav»: фиксируем момент, когда декодер не
+        // довёл файл до конца, — именно такие софт-прерывания (таймаут, kill,
+        // крах wine-декодера) оставляют частично записанный dec.wav на диске.
+        obs::sink()->log("[v] decode FAIL candidate='" + candidate + "' rc=" +
+                         std::to_string(dr.exit_code) + " timed_out=" +
+                         (dr.timed_out ? "1" : "0") + " out='" + out + "'\n");
+        if (util::file_exists(dec_wav)) {
+            bool rm = remove_dec_wav(dec_wav);
+            obs::sink()->log("[v] decode-fail cleanup '" + dec_wav + "' => " +
+                             (rm ? "removed" : "REMOVE_FAILED") + "\n");
+        }
         return i18n::fmt("candidate decode failed (code %d)", dr.exit_code) +
                (out.empty() ? "" : ": " + out);
     }
     std::string perr;
     bool same = media::wav_data_compare(wav, dec_wav, &perr);
-    util::remove_file(dec_wav);
+    if (!remove_dec_wav(dec_wav)) {
+        // Даже длинный ретрай не помог (процесс-декодер по-прежнему держит
+        // handle). Файл останется до конца обработки — папку сессии целиком
+        // уберёт FileSession::cleanup при финализации (или clear_tmp_base при
+        // старте; в рамках живой сессии это последний рубеж).
+        obs::sink()->log("WARN: could not remove " + dec_wav +
+                         " (kept until job end)\n");
+    } else {
+        obs::sink()->log("[v] compare '" + candidate + "' => " +
+                         (same ? "identical" : "DIFFERENT") + ", rm '" + dec_wav +
+                         "' ok\n");
+    }
     if (!same) return i18n::str("PCM does not match the source: ") + perr;
     return {};
 }
@@ -586,6 +659,9 @@ struct FileJob {
     uint64_t wav_est = 0;    // оценка размера WAV по probe (для бюджета)
     uint64_t peak_file = 0;  // файловый бюджет (file_peak_bytes)
     bool deferred = false;   // try_reserve не прошёл — повторить позже
+    // Повтор отложенного prep не раньше этого момента (анти-спин: воркер не
+    // должен стучаться в бюджет по кругу, когда tmp-диск переполнен).
+    std::chrono::steady_clock::time_point defer_until{};
     int bits = 16;
     media::Probe probe;
     tags::TagSet ts;
@@ -719,6 +795,11 @@ struct Runner {
     int prep_active = 0;  // число выполняющихся prep (могут идти параллельно)
     size_t total_done = 0;
     std::vector<std::unique_ptr<FileJob>> jobs;
+    // Дедуп «по сессии»: полные пути файлов, принятых в очередь и не удалённых
+    // из неё. Снимаются при remove/cancel/clear-done — после удаления файл
+    // снова можно добавить. Так добавление родительской папки после уже
+    // обработанной вложенной не дублирует файлы ни в каком состоянии.
+    std::unordered_set<std::string> seen_paths_;
     std::atomic<int> failed{0};
     std::atomic<bool> abort{false};  // при ошибке файла без --ignore-errors: прекращаем прогон
     std::atomic<bool> shutdown_requested{false};  // демон: остановить воркеры (graceful shutdown)
@@ -749,21 +830,14 @@ struct Runner {
         std::vector<std::string> labels;
         {
             std::lock_guard<std::mutex> lk(qm);
-            // Дедуп по полному пути: пропускаем кандидатов, чей путь уже
-            // есть среди активных заданий (подпапка/надпапка/повторное
-            // добавление). Остановленные и удалённые активными не считаются —
-            // их можно добавлять заново.
-            std::unordered_set<std::string> active;
-            active.reserve(jobs.size() * 2);
-            for (const auto& jp : jobs)
-                if (!jp->done && !jp->cancelled) active.insert(jp->path);
-            for (const auto& it : items) {
-                if (active.count(it.path)) {
-                    obs::sink()->log("SKIP " + it.path +
-                                     " — duplicate (already in queue)");
-                    continue;
-                }
-                active.insert(it.path);
+            // Дедуп по полному пути (в рамках сессии): файл уже принимался в
+            // очередь в любом состоянии (queued/prep/running/ok/stopped) и не
+            // был удалён из неё. Добавление родительской папки после уже
+            // обработанной вложенной НЕ дублирует файлы; повторно добавить
+            // можно после remove/clear-done — путь снимается из seen_paths_.
+for (const auto& it : items) {
+                if (seen_paths_.count(norm_path(it.path))) continue;
+                seen_paths_.insert(norm_path(it.path));
                 size_t i = jobs.size();
                 jobs.emplace_back(std::make_unique<FileJob>());
                 make_job(*jobs[i], i, it);
@@ -808,6 +882,9 @@ struct Runner {
         size_t pos = find_pos_locked(idx);
         if (pos == SIZE_MAX) return;
         FileJob& j = *jobs[pos];
+        // Удаление из очереди (любого состояния) снимает «запрет на повторное
+        // добавление»: после remove/cancel/clear-done файл можно добавить снова.
+        seen_paths_.erase(norm_path(j.path));
         if (j.done) return;
         if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
@@ -817,7 +894,7 @@ struct Runner {
             j.summary.path = j.path;
             j.summary.status = "stopped";
             j.summary.detail = i18n::str("removed from queue");
-            j.session.reset();
+            discard_job_tmp(j);
             total_done++;
             cv.notify_all();
             obs::sink()->mark_stopped(j.idx);
@@ -828,6 +905,18 @@ struct Runner {
             std::lock_guard<std::mutex> jl(*j.m);
             j.cancelled = true;
         }
+    }
+
+    // Единая точка очистки временных файлов job'а: освобождает дисковый бюджет
+    // и удаляет подпапку сессии (RAII FileSession). Вызывается из всех веток,
+    // где работа над файлом прекращена — штатно, при снятии из очереди или по
+    // исключению — чтобы подпапка tmp не оставалась в рамках живой сессии.
+    void discard_job_tmp(FileJob& j) {
+        if (j.peak_file > 0) {
+            rm.release_disk(j.peak_file);
+            j.peak_file = 0;
+        }
+        if (j.session) j.session.reset();
     }
 
     // Переупорядочивает очередь (reorder): ids — стабильные idx файлов
@@ -902,16 +991,35 @@ struct Runner {
         return false;
     }
 
+    // Наступает ли срок повторения отложенного prep (дефер-файл, чьё время
+    // defer_until уже прошло) — для cv-предиката и анти-спина.
+    bool deferred_retry_locked() {
+        if (abort.load()) return false;
+        if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
+        auto now = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < jobs.size(); i++) {
+            const FileJob& j = *jobs[i];
+            if (j.done || j.prep_done || j.prep_running || !j.deferred) continue;
+            if (now >= j.defer_until) return true;
+        }
+        return false;
+    }
+
     // Находит следующий файл, требующий prep (не done, не prep_done), начиная
     // с курсора next_prep по кругу. Динамическая очередь: файлы могут быть
     // добавлены (append_files) — они всегда c индексом >= текущего, курсор
     // их естественно достигнет; повторный круг ловит промежуточные (deferred).
     bool find_next_prep_locked(size_t* out) {
         if (jobs.empty()) return false;
+        auto now = std::chrono::steady_clock::now();
         for (size_t k = 0; k < jobs.size(); k++) {
             size_t i = (next_prep + k) % jobs.size();
             FileJob& j = *jobs[i];
             if (j.done || j.prep_done || j.prep_running) continue;
+            // Отложенный файл, чей срок повторения ещё не наступил, не берём:
+            // без бюджета его нельзя декодировать, а находиться в активном цикле
+            // он не должен (тот же анти-спин, что и в take_work_locked).
+            if (j.deferred && now < j.defer_until) continue;
             *out = i;
             return true;
         }
@@ -964,6 +1072,9 @@ struct Runner {
             for (size_t i = 0; i < jobs.size(); i++) {
                 FileJob& j = *jobs[i];
                 if (j.done || j.prep_done || j.prep_running || !j.deferred) continue;
+                // Анти-спин: с момента отложения прошло меньше времени, чем
+                // установил prep_file (500 мс) — не стучимся в бюджет по кругу.
+                if (std::chrono::steady_clock::now() < j.defer_until) continue;
                 if (j.probe.ok && j.wav_est > 0) {
                     j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
                     if (rm.request_disk(j.peak_file).status == ResourceRequest::Status::Granted) {
@@ -1124,6 +1235,11 @@ struct Runner {
             j.peak_file = file_peak_bytes(j.wav_est, opts.verify);
             if (rm.request_disk(j.peak_file).status != ResourceRequest::Status::Granted) {
                 j.deferred = true;
+                // Бюджет не зарезервирован — сбрасываем, чтобы повторный prep
+                // (через бюджетную prep-ветку take_work) запросил его снова.
+                j.peak_file = 0;
+                j.defer_until =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
                 return;
             }
         }
@@ -1456,8 +1572,7 @@ struct Runner {
             j.summary.path = j.path;
             j.summary.status = "stopped";
             j.summary.detail = i18n::str("removed from queue");
-            rm.release_disk(j.peak_file);
-            j.session.reset();
+            discard_job_tmp(j);
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
@@ -1678,11 +1793,19 @@ struct Runner {
         }
 
         // Освобождаем файловый бюджет и чистим временные файлы.
-        rm.release_disk(j.peak_file);
         // Удаляем побеждшего кандидата из tmp (он уже скопирован на место).
         if (j.best_valid) util::remove_file(j.best.path);
         // RAII: remove_all почистит ref.wav, dec.wav, sidecar, losers.
-        j.session.reset();
+        discard_job_tmp(j);
+
+        // Инвариант: после корректного завершения job'а временные файлы обязаны
+        // быть удалены. Если что-то их пересоздало — добиваем и отмечаем.
+        if (j.session) {
+            if (logger) {
+                logger->event({{"type", "tmp_cleanup_warn"}, {"file", j.path}});
+            }
+            j.session.reset();
+        }
 
         if (!msg.empty()) obs::sink()->log(msg);
         if (j.summary.status == "error") obs::sink()->mark_error(j.idx);
@@ -1713,6 +1836,7 @@ struct Runner {
                 cv.wait_for(lk, std::chrono::milliseconds(50), [&] {
                     return proc::cancelled() || shutdown_requested.load() ||
                            variant_launchable_locked() || prep_allowed_locked() ||
+                           deferred_retry_locked() ||
                            (opts->mode == SessionMode::OneShot && all_done_locked());
                 });
                 if (proc::cancelled()) break;
@@ -1731,6 +1855,8 @@ struct Runner {
                     prep_file(*w.job);
                 } catch (const std::exception& exc) {
                     perr = exc.what();
+                } catch (...) {
+                    perr = "unknown exception during prep";
                 }
                 if (proc::cancelled() || proc::aborted()) break;  // отмена — счётчики не трогаем, tmp почистит main
                 if (!perr.empty()) {
@@ -1742,20 +1868,31 @@ struct Runner {
                             obs::sink()->error("ERROR [" + j.path + "]: " + perr + "\n");
                 }
                 bool finish_now = false;
+                bool prep_retry = false;
                 {
                     std::lock_guard<std::mutex> lk(qm);
                     FileJob& j = *w.job;
-                    j.prep_done = true;
-                    j.prep_running = false;
-                    if (prep_active > 0) prep_active--;
-                    if (j.tasks.empty() || j.cancelled) {
-                        j.done = true;
-                        total_done++;
-                        finish_now = true;
+                    // Отложенный файл (не хватило дискового бюджета): не закрываем,
+                    // оставляем кандидатом на повторный prep, когда бюджет освободится.
+                    if (j.deferred && j.tasks.empty()) {
+                        j.prep_done = false;
+                        j.prep_running = false;
+                        if (prep_active > 0) prep_active--;
+                        prep_retry = true;
+                        cv.notify_all();
+                    } else {
+                        j.prep_done = true;
+                        j.prep_running = false;
+                        if (prep_active > 0) prep_active--;
+                        if (j.tasks.empty() || j.cancelled) {
+                            j.done = true;
+                            total_done++;
+                            finish_now = true;
+                        }
                     }
                     cv.notify_all();
                 }
-                if (!finish_now) {
+                if (!finish_now && !prep_retry) {
                     FileJob& job = *w.job;
                     std::vector<obs::TaskInfo> infos;
                     infos.reserve(job.tasks.size());
@@ -1776,6 +1913,8 @@ struct Runner {
                     oc = run_variant(*w.job, w.task);
                 } catch (const std::exception& exc) {
                     verr = exc.what();
+                } catch (...) {
+                    verr = "unknown exception during variant";
                 }
                 if (proc::cancelled() || proc::aborted()) break;  // отмена/прерывание — счётчики не трогаем
                 // Без --ignore-errors (и не в режиме демона) любая ошибка
@@ -1905,9 +2044,13 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
 
     i.jobs = resolve_jobs(i.opts.jobs, i.opts.jobs_float);
 
-    // Изолированный tmp-каталог демона (текущий PID).
-    clear_session_tmp_dir(i.opts.tmp_dir);
-    i.tmp = session_tmp_dir(i.opts.tmp_dir);
+    // Изолированный tmp-каталог демона. Демон — единственный процесс
+    // (single-instance) и единственный хозяин базового tmp, поэтому пишем
+    // прямо в базу без подпапки по PID: подпапка одного файла — tmp/<hash>/.
+    // При старте убираем базу целиком: очищаются остатки аварийно завершённых
+    // сессий (kill -9, крах) и следы сирот прошлых запусков.
+    clear_tmp_base(i.opts.tmp_dir);
+    i.tmp = base_tmp_dir(i.opts.tmp_dir);
 
     if (i.opts.debug)
         i.logger = std::make_unique<report::Logger>(
@@ -1942,6 +2085,7 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
         size_t idx = r.jobs.size();
         r.jobs.emplace_back(std::make_unique<FileJob>());
         r.make_job(*r.jobs[idx], idx, it);
+        r.seen_paths_.insert(norm_path(it.path));
     }
     for (size_t k = 0; k < r.jobs.size(); k++)
         obs::sink()->begin_file(r.jobs[k]->idx, r.jobs[k]->rel);
@@ -2095,7 +2239,9 @@ void Engine::shutdown() {
                         {"done", i.r.total_done},
                         {"failed", i.r.failed.load()}});
     }
-    clear_session_tmp_dir(i.opts.tmp_dir);
+    // Демон — единственный процесс: после остановки воркеров временные файлы
+    // никому не нужны, убираем всю базу целиком.
+    clear_tmp_base(i.opts.tmp_dir);
     i.started = false;
 }
 

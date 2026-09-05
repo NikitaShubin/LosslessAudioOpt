@@ -573,6 +573,25 @@ void DaemonSession::shutdown() {
 int main(int argc, char** argv) {
     dsvc::install_signal_handlers();
 
+#ifdef _WIN32
+    // Одиночный экземпляр демона. Именованный мьютекс в пространстве «Local\»
+    // (одна копия на сессию пользователя): вторая копия на другом порту будет
+    // отвергнута, чтобы не делить tmp-каталог и очередь. Handle держим до
+    // выхода — при завершении процесса ОС сама освободит имя.
+    HANDLE singleton = CreateMutexW(nullptr, FALSE, L"Local\\llao-daemon-singleton");
+    if (!singleton) {
+        std::fprintf(stderr, "ERROR: could not create singleton mutex (error %lu)\n",
+                     (unsigned long)GetLastError());
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::fprintf(stderr, "ERROR: another LLAO daemon is already running\n");
+        CloseHandle(singleton);
+        return 1;
+    }
+    (void)singleton;  // живёт до завершения процесса; закрытие — за ОС
+#endif
+
     std::string bind = "127.0.0.1";
     int port = 0;
     std::string token;

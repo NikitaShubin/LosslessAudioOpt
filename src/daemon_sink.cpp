@@ -45,6 +45,14 @@ void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
                                                    : "failed";
     ev_->push("task", {{"id", id}, {"idx", idx}, {"state", s}});
     st_->set_task(id, idx, s);
+    // Старт варианта делает файл «в работе»: prep может быть долгим, и строка
+    // должна перейти в running по первому реально запущенному варианту
+    // (а держаться в prep до этого). Состояние же строки выставлять в ok/failed
+    // тут нельзя — это прерогатива end_file/mark_stopped/mark_error.
+    if (st == obs::TaskState::Running) {
+        ev_->push("state", {{"id", id}, {"state", "running"}});
+        st_->set_state(id, "running");
+    }
 }
 
 void DaemonSink::end_file(size_t id, double pct) {
