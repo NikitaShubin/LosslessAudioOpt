@@ -2,6 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <string>
 
 #include <httplib.h>
@@ -75,6 +78,17 @@ uint64_t clamp_since(const std::string& s) {
     }
 }
 
+// Dev-режим: отдаёт web/<name> из каталога запуска демона, если файл есть.
+// Позволяет править UI без пересборки и перезапуска — обновлением страницы.
+std::optional<std::string> read_web_file(const std::string& name) {
+    std::ifstream f(std::string("web/") + name, std::ios::binary);
+    if (!f) return std::nullopt;
+    std::string data((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+    if (data.empty()) return std::nullopt;
+    return data;
+}
+
 }  // namespace
 
 int mount(httplib::Server& svr, const ApiContext& ctx) {
@@ -87,6 +101,11 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
 
     svr.Get("/", [have_web](const httplib::Request&, httplib::Response& res) {
         res.set_header("Cache-Control", "no-store");
+        // Dev-режим: сначала внешний index.html (горячий цикл разработки).
+        if (auto ext = read_web_file("index.html")) {
+            res.set_content(*ext, "text/html; charset=utf-8");
+            return;
+        }
         if (have_web) {
             const std::string* data = web_assets::get("index.html");
             if (data) {
@@ -119,6 +138,11 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
         if (sub.find("..") != std::string::npos) {
             res.status = 400;
             res.set_content("Bad path", "text/plain");
+            return;
+        }
+        // Dev-режим: сначала внешний файл web/<sub> из каталога запуска.
+        if (auto ext = read_web_file(sub)) {
+            res.set_content(*ext, web_assets::mime_type(sub));
             return;
         }
         const std::string* data = web_assets::get(sub);

@@ -25,18 +25,15 @@ function opmsg(text, cls) {
   opMsgEl.style.visibility = text ? "visible" : "hidden";
 }
 const btnStop = el("btn-stop"), btnResume = el("btn-resume"), btnClearCompleted = el("btn-clear-completed");
-const pausedBadge = el("paused-badge"), doneBadge = el("c-done-badge");
 const chkAll = el("chk-all");
 const btnBatchStop = el("btn-batch-stop"), btnBatchStart = el("btn-batch-start"), btnBatchDelete = el("btn-batch-delete");
 const btnBatchTop = el("btn-batch-top"), btnBatchUp = el("btn-batch-up"), btnBatchDown = el("btn-batch-down"), btnBatchBottom = el("btn-batch-bottom");
 const btnAutoscroll = el("btn-autoscroll"), tableWrap = el("table-wrap");
 const btnSort = el("btn-sort");
 let autoScrollOn = false;
-let autoAnimId = 0;
 let autoScrollBoost = false;
-// Оценка скорости смещения центра масс активных строк (px/с), сглаженная EMA.
-let centerHistoryT = 0, centerSmooth = 0, speedSmooth = 0;
-const SPEED_ALPHA = 0.4, HORIZON_MS = 1000; // горизонт предикции — один полл вперёд
+let lastAutoGoal = -1;
+const POLL_PERIOD_MS = 1000;                 // фиксированный период полла (setInterval)
 
 function showLogin(msg) {
   loginDiv.classList.remove("hidden");
@@ -93,8 +90,9 @@ function setConn(ok, text) {
 }
 function chipState(s) {
   const m = {queued:"queued", prep:"prep", running:"running", ok:"ok", stopped:"stopped", error:"error"};
+  const icons = {queued:"⏳", prep:"⚙️", running:"⚙️", ok:"✓", stopped:"‖", error:"✗"};
   const cls = m[s] || "queued";
-  return `<span class="chip chip-${cls}">${s}</span>`;
+  return `<span class="chip chip-${cls}" title="${s}">${icons[s] || "?"}</span>`;
 }
 function taskDot(st, idx, info) {
   const c = st==="ok" ? "ok" : st==="running" ? "running" : st==="failed" ? "failed" : "pend";
@@ -119,83 +117,45 @@ function taskRunningCount(r){
 function maybeAutoScroll(){
   if (!tableWrap || !btnAutoscroll || !autoScrollOn) return;
   // Активность файла — число задач, обрабатываемых прямо сейчас (running).
-  // Строки, у которых нет идущих процессов (только pend/ожидают), в центр
-  // масс не включаются, чтобы автоскролл не ставил в центр «середину
-  // подготовленных» файлов.
+  // Строки без идущих процессов в центр масс не включаются.
   let act = currentRows.filter(r=>r.state==="prep"||r.state==="running");
   let byTask = act.filter(r=>taskRunningCount(r) > 0);
   if (byTask.length) act = byTask;
   if (!act.length) return;
-  // Вес строки — число одновременно идущих процессов: файл с 31 задачей
-  // смещает центр масс сильнее, чем файл с одной.
+  // Вес строки — число одновременно идущих процессов.
   const weight = new Map();
   for (const r of act) weight.set(r.id, Math.max(1, taskRunningCount(r)));
-  let firstTop = null, wy = 0, wsum = 0;
+  let wy = 0, wsum = 0;
   tableWrap.querySelectorAll("tbody tr[data-id]").forEach(tr=>{
     const id = parseInt(tr.getAttribute("data-id"),10);
     if (!weight.has(id)) return;
     const w = weight.get(id);
-    const top = tr.offsetTop;
-    if (firstTop===null || top<firstTop) firstTop = top;
-    wy += w * (top + tr.offsetHeight/2);
+    wy += w * (tr.offsetTop + tr.offsetHeight/2);
     wsum += w;
   });
-  if (firstTop===null || wsum===0) return;
+  if (wsum === 0) return;
   const centerMass = wy/wsum;
-  // Фильтр скорости изменения центра масс: мгновенная скорость по разности
-  // между поллами, сглаженная экспоненциально (EMA), чтобы погасить дрожание
-  // от завершения отдельных задач и шум таймингов полла.
-  const nowMs = performance.now();
-  let vInst = 0;
-  if (centerHistoryT > 0) {
-    const dtMs = nowMs - centerHistoryT;
-    if (dtMs > 50 && dtMs < 8000) vInst = (centerMass - centerSmooth) / (dtMs/1000);
-  } else {
-    speedSmooth = 0;
-  }
-  if (centerHistoryT > 0) speedSmooth = SPEED_ALPHA*vInst + (1-SPEED_ALPHA)*speedSmooth;
-  centerSmooth = centerMass;
-  centerHistoryT = nowMs;
-  // Предикция на один полл вперёд: едем не в текущий центр, а туда, где он
-  // окажется при текущей (отфильтрованной) скорости — не отстаём от прогресса.
-  const pred = centerMass + speedSmooth*HORIZON_MS/1000;
-  const target = pred - tableWrap.clientHeight/2;
   const max = tableWrap.scrollHeight - tableWrap.clientHeight;
-  const fast = autoScrollBoost; // первичная доводка — быстрая, дальше ползём по скорости
-  autoScrollBoost = false;
-  smoothScrollTo(Math.max(0, Math.min(target, max)), fast);
-}
-function smoothScrollTo(target, fast){
-  if (!tableWrap) return;
-  cancelAnimationFrame(autoAnimId);
-  const start = tableWrap.scrollTop;
-  if (Math.abs(target-start) < 0.5) {
-    tableWrap.scrollTop = target;
+  const goal = clampTarget(centerMass - tableWrap.clientHeight/2, max);
+
+  if (autoScrollBoost) {
+    // Первичная доводка при включении — одно плавное движение к текущему центру.
+    autoScrollBoost = false;
+    lastAutoGoal = goal;
+    tableWrap.scrollTo({top: goal, behavior: "smooth"});
     return;
   }
-  // Длительность анимации адаптивна: чем быстрее движется центр масс, тем
-  // быстрее догоняем; на медленном прогрессе плавно ползём.
-  let dur;
-  if (fast) dur = 700;
-  else {
-    const sp = Math.max(80, Math.abs(speedSmooth)); // минимальная скорость доводки, px/с
-    dur = Math.min(3000, Math.max(250, Math.abs(target-start)/sp));
+  // Максимально просто: каждый тик — если центр ушёл ниже текущего положения
+  // на заметную величину, плавно догоняем. Вверх не едем никогда.
+  if (goal > tableWrap.scrollTop + 8 && goal > lastAutoGoal + 8) {
+    lastAutoGoal = goal;
+    tableWrap.scrollTo({top: goal, behavior: "smooth"});
   }
-  const t0 = performance.now();
-  const step = (now)=>{
-    const t = Math.min(1, (now-t0)/dur);
-    const e = 1 - Math.pow(1-t, 4); // easeOutQuart: быстрый старт, долгая мягкая доводка
-    tableWrap.scrollTop = start + (target-start)*e;
-    if (t < 1) autoAnimId = requestAnimationFrame(step);
-  };
-  autoAnimId = requestAnimationFrame(step);
 }
+function clampTarget(v, max){ return Math.max(0, Math.min(v, max)); }
 function setAutoScroll(on){
   autoScrollOn = on;
-  if (!on) {
-    cancelAnimationFrame(autoAnimId);
-    centerHistoryT = 0; speedSmooth = 0; // сброс оценки скорости между включениями
-  }
+  if (!on) lastAutoGoal = -1;
   if (btnAutoscroll) btnAutoscroll.classList.toggle("on", on);
   try { localStorage.setItem("llao_autoscroll", on ? "1" : "0"); } catch(e){}
   if (on) { autoScrollBoost = true; maybeAutoScroll(); }
@@ -227,21 +187,17 @@ async function moveBlock(block, dir){
 
 function progressBar(r){
   const tasks = r.tasks || [];
-  if (tasks.length===0) {
-    if (r.state==="queued") return `<span class="muted">—</span>`;
-    if (r.state==="prep") return `<span class="bar"><span class="bar-fill" style="width:15%"></span></span> prep`;
+  if (r.state==="queued"||r.state==="prep"||r.state==="stopped"||r.state==="error") {
+    return `<span class="muted">—</span>`;
+  }
+  if (r.state==="ok") {
+    const save = (r.pct!==undefined && r.pct!==null) ? r.pct.toFixed(1) : "0.0";
+    return `<span class="pct-val prog-ok">${save}%</span>`;
   }
   const done = tasks.filter(t=>t==="ok"||t==="failed").length;
   const total = tasks.length;
   const pct = total ? (done/total*100) : 0;
-  if (r.state==="ok") {
-    const save = (r.pct!==undefined && r.pct!==null) ? r.pct.toFixed(1) : "0.0";
-    return `<span class="bar"><span class="bar-fill" style="width:100%"></span></span> 100% <span class="saving">(${save}%)</span>`;
-  }
-  if (r.state==="stopped"||r.state==="error") {
-    return `<span class="bar"><span class="bar-fill" style="width:100%"></span></span> ${pct.toFixed(0)}%`;
-  }
-  return `<span class="bar"><span class="bar-fill" style="width:${pct}%"></span></span> ${pct.toFixed(0)}%`;
+  return `<span class="pct-val prog-run">${pct.toFixed(0)}%</span>`;
 }
 
 function updateSelectionUI(){
@@ -299,26 +255,25 @@ function renderQueue(rows){
     const bar = progressBar(r);
     const infos = r.task_infos || [];
     const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx])).join("") + excludedDots(r.excluded);
+    const canUp = i>0, canDown = i<rows.length-1;
     let actions = `<span class="action-btns">`;
     if (r.state==="ok") {
-      actions += `<button data-clear="${r.id}" class="icon-btn" title="Удалить завершённый файл из списка">🧹</button> `;
+      actions += `<button data-clear="${r.id}" class="icon-btn" title="Удалить завершённый файл из списка">🧹</button>`;
     } else if (r.state==="queued"||r.state==="prep"||r.state==="running") {
-      actions += `<button data-stop="${r.id}" class="icon-btn" title="Остановить">⏹</button> `;
+      actions += `<button data-stop="${r.id}" class="icon-btn" title="Остановить">⏹</button>`;
     } else {
-      actions += `<button data-restart="${r.id}" class="icon-btn" title="Запустить">▶</button> `;
+      actions += `<button data-restart="${r.id}" class="icon-btn" title="Запустить">▶</button>`;
     }
-    actions += `<button data-remove="${r.id}" class="icon-btn danger" title="Удалить">🗑</button></span>`;
-    const canUp = i>0, canDown = i<rows.length-1;
-    actions += `<span class="move-btns">`;
     actions += `<button data-move="top" data-id="${r.id}" class="icon-btn" title="В начало" ${canUp?"":"disabled"}>⇤</button>`;
     actions += `<button data-move="up" data-id="${r.id}" class="icon-btn" title="Вверх" ${canUp?"":"disabled"}>↑</button>`;
     actions += `<button data-move="down" data-id="${r.id}" class="icon-btn" title="Вниз" ${canDown?"":"disabled"}>↓</button>`;
     actions += `<button data-move="bottom" data-id="${r.id}" class="icon-btn" title="В конец" ${canDown?"":"disabled"}>⇥</button>`;
+    actions += `<button data-remove="${r.id}" class="icon-btn danger" title="Удалить">🗑</button>`;
     actions += `</span>`;
     const handle = `<span class="drag-handle" draggable="true" data-drag="${r.id}" title="Перетащите">≡</span>`;
     const chk = `<input type="checkbox" data-chk="${r.id}" ${selectedIds.has(r.id)?"checked":""}>`;
     const selClass = selectedIds.has(r.id) ? "selected" : "";
-    html += `<tr data-id="${r.id}" class="${selClass}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td>${esc(r.label)}</td><td>${chipState(r.state)}</td><td>${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
+    html += `<tr data-id="${r.id}" class="${selClass}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td>${esc(r.label)}</td><td class="td-center">${chipState(r.state)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
   }
   queueBody.innerHTML = html;
   updateSelectionUI();
@@ -473,13 +428,11 @@ async function pollState(){
     btnResume.disabled = !hasStopped;
     btnStop.title = hasActive ? "Остановить активные файлы" : "Нет активных файлов";
     btnResume.title = hasStopped ? "Запустить остановленные файлы" : "Нет остановленных файлов";
-    if (pausedBadge) pausedBadge.textContent = isPaused ? "Очередь остановлена" : "";
-    if (doneBadge) {
-      const rows = j.rows || [];
-      const n = rows.filter(r=>r.state==="ok").length;
-      doneBadge.textContent = n > 0 ? "(" + n + ")" : "";
-      btnClearCompleted.disabled = n === 0;
-    }
+    const okCount = (j.rows||[]).filter(r=>r.state==="ok").length;
+    btnClearCompleted.disabled = okCount === 0;
+    btnClearCompleted.title = okCount > 0
+      ? `Удалить только успешно завершённые (ok) — ${okCount}`
+      : "Удалить только успешно завершённые (ok)";
     lastSeqEl.textContent = "seq "+(j.last_seq||0);
     renderQueue(j.rows);
     maybeAutoScroll();
@@ -509,16 +462,14 @@ btnSort && btnSort.addEventListener("click", async ()=>{
   } catch(e){ opmsg(e.message, "err"); }
 });
 if (tableWrap) {
-  // Различие: автоскролл пишет scrollTop по rAF и НЕ порождает событий ввода,
-  // а человек прокручивает списком колесом/тачем/клавиатурой/скроллбаром.
-  // Поэтому вмешательством считаем события ввода, а `scroll` не слушаем вовсе —
-  // иначе собственная прокрутка распознаётся как ручная и гасит себя.
-  tableWrap.addEventListener("wheel", ()=>{ if (autoScrollOn){ cancelAnimationFrame(autoAnimId); setAutoScroll(false); } }, {passive:true});
-  tableWrap.addEventListener("touchstart", ()=>{ if (autoScrollOn){ cancelAnimationFrame(autoAnimId); setAutoScroll(false); } }, {passive:true});
+  // Вмешательством человека считаем события ввода (колесо/тач/клавиатура/
+  // скроллбар), а `scroll` не слушаем вовсе — иначе собственная прокрутка
+  // браузерной анимацией распознавалась бы как ручная и гасила бы себя.
+  tableWrap.addEventListener("wheel", ()=>{ if (autoScrollOn) setAutoScroll(false); }, {passive:true});
+  tableWrap.addEventListener("touchstart", ()=>{ if (autoScrollOn) setAutoScroll(false); }, {passive:true});
   tableWrap.addEventListener("keydown", (e)=>{
     if (!autoScrollOn) return;
     if (!/^(ArrowUp|ArrowDown|PageUp|PageDown|Home|End|Space)$/.test(e.key)) return;
-    cancelAnimationFrame(autoAnimId);
     setAutoScroll(false);
   });
   tableWrap.addEventListener("pointerdown", (e)=>{
@@ -526,7 +477,6 @@ if (tableWrap) {
     // Клики по строкам (чекбокс, кнопки) автоскролл не трогаем; «вмешательство»
     // — это drag по скроллбару, когда событие приходит на сам контейнер.
     if (e.target !== tableWrap) return;
-    cancelAnimationFrame(autoAnimId);
     setAutoScroll(false);
   });
 }

@@ -11,9 +11,64 @@
 #include "proc.h"
 #include "util.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace media {
 
 namespace json = nlohmann;
+
+namespace {
+// Потоковый читатель WAV. Под Windows открывает дескриптор с FILE_SHARE_DELETE:
+// иначе DeleteFile (util::remove_file) получает STATUS_SHARING_VIOLATION от
+// нашего же живого handle чтения, и свежие .dec.wav «залипают» под wine.
+struct WavReader {
+    std::ifstream fs;
+#ifdef _WIN32
+    HANDLE h = INVALID_HANDLE_VALUE;
+#endif
+
+    ~WavReader() {
+#ifdef _WIN32
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+#endif
+    }
+    bool open(const std::string& p) {
+#ifdef _WIN32
+        h = CreateFileW(util::u2w(p).c_str(), GENERIC_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        return h != INVALID_HANDLE_VALUE;
+#else
+        fs.open(std::filesystem::u8path(p), std::ios::binary);
+        return fs.good();
+#endif
+    }
+    bool seek(uint64_t pos) {
+#ifdef _WIN32
+        LARGE_INTEGER li;
+        li.QuadPart = (LONGLONG)pos;
+        return SetFilePointerEx(h, li, nullptr, FILE_BEGIN) != 0;
+#else
+        fs.clear();
+        fs.seekg((std::streamoff)pos);
+        return fs.good();
+#endif
+    }
+    size_t read(char* buf, size_t n) {
+#ifdef _WIN32
+        DWORD rd = 0;
+        if (n > 0x7FFFFFFF) n = 0x7FFFFFFF;
+        if (!ReadFile(h, buf, (DWORD)n, &rd, nullptr)) return 0;
+        return (size_t)rd;
+#else
+        fs.read(buf, (std::streamsize)n);
+        return (size_t)fs.gcount();
+#endif
+    }
+};
+}  // namespace
 
 static uint32_t rd32le(const uint8_t* p) {
     return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -191,20 +246,15 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
 
 // Поиск data-чанка WAV: возвращает смещение данных и их размер. Файл читается
 // потоково; возвращает false, если WAV-заголовок не найден или data-чанка нет.
-static bool wav_data_chunk_stream(std::ifstream& f, uint64_t* off, uint64_t* sz) {
+static bool wav_data_chunk_stream(WavReader& f, uint64_t* off, uint64_t* sz) {
     char hdr[12];
-    f.seekg(0);
-    f.read(hdr, 12);
-    if (f.gcount() != 12 || memcmp(hdr, "RIFF", 4) != 0 ||
+    if (!f.seek(0) || f.read(hdr, 12) != 12 || memcmp(hdr, "RIFF", 4) != 0 ||
         memcmp(hdr + 8, "WAVE", 4) != 0)
         return false;
     uint64_t o = 12;
     while (true) {
         char ch[8];
-        f.clear();
-        f.seekg((std::streamoff)o);
-        f.read(ch, 8);
-        if (f.gcount() != 8) return false;
+        if (!f.seek(o) || f.read(ch, 8) != 8) return false;
         uint32_t chsz = rd32le((uint8_t*)ch + 4);
         if (memcmp(ch, "data", 4) == 0) {
             *off = o + 8;
@@ -217,9 +267,8 @@ static bool wav_data_chunk_stream(std::ifstream& f, uint64_t* off, uint64_t* sz)
 }
 
 bool wav_data_compare(const std::string& a, const std::string& b, std::string* err) {
-    std::ifstream fa(std::filesystem::u8path(a), std::ios::binary);
-    std::ifstream fb(std::filesystem::u8path(b), std::ios::binary);
-    if (!fa || !fb) {
+    WavReader fa, fb;
+    if (!fa.open(a) || !fb.open(b)) {
         *err = i18n::str("could not open the WAV for comparison");
         return false;
     }
@@ -237,19 +286,17 @@ bool wav_data_compare(const std::string& a, const std::string& b, std::string* e
                           std::to_string(asz).c_str(), std::to_string(bsz).c_str());
         return false;
     }
-    fa.clear();
-    fb.clear();
-    fa.seekg((std::streamoff)ao);
-    fb.seekg((std::streamoff)bo);
+    if (!fa.seek(ao) || !fb.seek(bo)) {
+        *err = i18n::str("could not find the data chunk in the WAV");
+        return false;
+    }
     constexpr size_t kChunk = 1u << 20;  // 1 МБ
     std::vector<char> ba(kChunk), bb(kChunk);
     uint64_t left = asz;
     while (left > 0) {
         size_t n = left < kChunk ? (size_t)left : kChunk;
-        fa.read(ba.data(), (std::streamsize)n);
-        size_t ga = (size_t)fa.gcount();
-        fb.read(bb.data(), (std::streamsize)n);
-        size_t gb = (size_t)fb.gcount();
+        size_t ga = fa.read(ba.data(), n);
+        size_t gb = fb.read(bb.data(), n);
         if (ga != n || gb != n) {
             *err = i18n::str("corrupted WAV (data chunk extends beyond the file)");
             return false;
