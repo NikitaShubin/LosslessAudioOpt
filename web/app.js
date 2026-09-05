@@ -145,9 +145,14 @@ function maybeAutoScroll(){
     tableWrap.scrollTo({top: goal, behavior: "smooth"});
     return;
   }
-  // Максимально просто: каждый тик — если центр ушёл ниже текущего положения
-  // на заметную величину, плавно догоняем. Вверх не едем никогда.
-  if (goal > tableWrap.scrollTop + 8 && goal > lastAutoGoal + 8) {
+  // Вниз догоняем при любом заметном уходе центра (восходящий прогон новых
+  // файлов), вверх — только когда активные строки вышли из видимой зоны:
+  // это случается при резких действиях (clear-done, перемещение в начало),
+  // иначе мелкие колебания центра дёргали бы скролл сам по себе.
+  const scrollTop = tableWrap.scrollTop;
+  const down = goal > scrollTop + 8;
+  const up = scrollTop - goal > tableWrap.clientHeight / 2;
+  if ((down || up) && Math.abs(goal - lastAutoGoal) > 8) {
     lastAutoGoal = goal;
     tableWrap.scrollTo({top: goal, behavior: "smooth"});
   }
