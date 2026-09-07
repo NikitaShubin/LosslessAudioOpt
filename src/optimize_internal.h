@@ -98,7 +98,8 @@ std::vector<std::string> build_cmd(const std::vector<std::string>& tmpl,
 std::string decoder_path(const config::Format& fmt, const std::string& encoder);
 DecodeStatus decode_source_native(const config::Format* src_fmt, const std::string& path,
                                   const std::string& out_wav, int bits,
-                                  const std::atomic<bool>* kill = nullptr);
+                                  const std::atomic<bool>* kill = nullptr,
+                                  const proc::OutputMonitor* mon = nullptr);
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
                              const std::vector<std::string>& params, const Env& env,
                              const proc::OutputMonitor& monitor = {},

@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "proc.h"
+
 namespace media {
 
 // Результат анализа входного файла (ffprobe).
@@ -41,7 +43,8 @@ Probe probe_file(const std::string& path, const std::string& ffprobe,
 // Возвращает true при успехе; err — текст ошибки.
 bool decode_to_wav(const std::string& input, const std::string& output_wav,
                    const std::string& ffmpeg, int bits, std::string* err,
-                   const std::atomic<bool>* kill = nullptr);
+                   const std::atomic<bool>* kill = nullptr,
+                   const proc::OutputMonitor* mon = nullptr);
 
 // Путь к ffprobe: bin/ffmpeg/ffprobe.exe (рядом с exe) или из PATH.
 std::string find_ffprobe();

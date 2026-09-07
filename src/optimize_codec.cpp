@@ -214,7 +214,8 @@ const char* pcm_codec(int bits) {
 
 DecodeStatus decode_source_native(const config::Format* src_fmt, const std::string& path,
                                   const std::string& out_wav, int bits,
-                                  const std::atomic<bool>* kill) {
+                                  const std::atomic<bool>* kill,
+                                  const proc::OutputMonitor* mon) {
     if (!src_fmt) return DecodeStatus::Failed;
     tool::Status sst = tool::ensure(*src_fmt, false, "[" + src_fmt->id + "] ", kill);
     if (kill && kill->load(std::memory_order_relaxed)) return DecodeStatus::Failed;
@@ -251,7 +252,8 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
         sargs = build_cmd(src_fmt->decode_cmd, senv.decoder, input_path, out_wav, {},
                           src_fmt->engine_codec, src_fmt->engine_container);
     }
-    proc::Result dr = proc::run(sargs, senv.decode_timeout, "", {}, kill);
+    proc::Result dr = proc::run(sargs, senv.decode_timeout, "",
+                                mon ? *mon : proc::OutputMonitor{}, kill);
     bool ok = dr.started && !dr.timed_out && dr.exit_code == 0 && util::file_exists(out_wav);
     if (!ok) util::remove_file(out_wav);
 
