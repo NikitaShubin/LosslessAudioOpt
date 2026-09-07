@@ -309,6 +309,7 @@ void Runner::prep_file(FileJob& j) {
         j.error_reported = true;
     };
 
+    auto prep_t0 = std::chrono::steady_clock::now();
     media::Probe probe = media::probe_file(j.path, ffprobe, &j.kill_requested);
     if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
         release_deferred_budget();
@@ -449,6 +450,7 @@ void Runner::prep_file(FileJob& j) {
     std::string derr;
     bool decoded = src_decoded;
     prep_mon.hard_timeout_sec = remaining_sec();
+    auto dec_t0 = std::chrono::steady_clock::now();
     if (!decoded) {
         const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
         if (src_fmt) {
@@ -469,6 +471,9 @@ void Runner::prep_file(FileJob& j) {
     if (!decoded)
         decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr,
                                        &j.kill_requested, &prep_mon);
+    j.decode_wall_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - dec_t0)
+                           .count();
     if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
         release_deferred_budget();
         if (j.session) j.session->cleanup();
@@ -560,6 +565,10 @@ void Runner::prep_file(FileJob& j) {
         }
         if (j.mode == JobMode::Restore && !j.restore_to.empty()) break;
     }
+    j.prep_wall_ms =
+        (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - prep_t0)
+            .count();
     j.prep_ok = true;
 }
 
@@ -579,6 +588,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         return VariantOutcome::Cancelled;
 
     uint64_t cpu0 = proc::child_cpu_ms() + proc::thread_cpu_ms();
+    auto wall0 = std::chrono::steady_clock::now();
 
     std::string candidate = j.session->candidate_path(f.id, v.id, f.extension);
     util::remove_file(candidate);
@@ -595,6 +605,8 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         {"format", f.id},
         {"variant", v.id},
         {"verify", verify_name(opts.verify)},
+        {"prep_wall_ms", j.prep_wall_ms},
+        {"decode_wall_ms", j.decode_wall_ms},
     };
 
     auto record_error = [&](const std::string& err) {
@@ -604,6 +616,9 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         rec["status"] = "error";
         rec["error"] = err;
         rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
+        rec["wall_ms"] = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - wall0)
+                             .count();
         if (logger) {
             logger->event({{"type", "candidate"},
                            {"file", j.path},
@@ -611,7 +626,8 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
                            {"variant", v.id},
                            {"status", "error"},
                            {"error", err},
-                           {"cpu_ms", rec["cpu_ms"]}});
+                           {"cpu_ms", rec["cpu_ms"]},
+                           {"wall_ms", rec["wall_ms"]}});
         }
         j.stat_records.push_back(std::move(rec));
     };
@@ -718,6 +734,9 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
     rec["has_tags"] = cand.has_tags;
     rec["status"] = "ok";
     rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
+    rec["wall_ms"] = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - wall0)
+                         .count();
     if (logger) {
         logger->event({{"type", "candidate"},
                        {"file", j.path},
@@ -726,8 +745,9 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
                        {"status", "ok"},
                        {"size", cand.size},
                        {"sidecar", cand.sidecar},
-                       {"cost", cand.cost},
-                       {"cpu_ms", rec["cpu_ms"]}});
+{"cost", cand.cost},
+                        {"cpu_ms", rec["cpu_ms"]},
+                        {"wall_ms", rec["wall_ms"]}});
     }
 
     {
