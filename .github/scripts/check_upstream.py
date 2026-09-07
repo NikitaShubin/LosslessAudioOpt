@@ -50,6 +50,8 @@ def load_formats():
     for path in sorted(glob.glob(os.path.join(FORMATS_DIR, "*.json"))):
         with open(path, encoding="utf-8") as f:
             fmt = json.load(f)
+        if not isinstance(fmt.get("id"), str):
+            continue  # inputs.json / tag_tables.json — не кодеки
         out[fmt["id"]] = fmt
     return out
 
