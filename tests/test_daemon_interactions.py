@@ -81,15 +81,10 @@ def main():
         new_ids = [x["id"] for x in r["result"]["added"]]
         check(len(new_ids) == 2, f"re-add accepted: {new_ids}")
         # новые задания обязаны покинуть queued (движок жив, бюджет цел)
-        deadline = time.time() + 120
-        progressed = False
-        while time.time() < deadline:
-            st = d.rows()
-            if any(x["state"] in ("prep", "running", "ok", "stopped", "error")
-                   for x in st if x["id"] in new_ids):
-                progressed = True
-                break
-            time.sleep(3)
+        progressed = H.wait_until(
+            lambda: any(x["state"] in ("prep", "running", "ok", "stopped", "error")
+                        for x in d.rows() if x["id"] in new_ids),
+            timeout=120, interval=3)
         check(progressed, "re-added files leave queued (no stall)")
 
         print("case 3: pause блокирует, resume продолжает, дублей нет")
@@ -189,15 +184,11 @@ def main():
               f"batch restart all {len(ids2)}: got {len(restarted)}")
         # После рестарта исходные id должны быть заменены новыми заданиями —
         # в этой же очереди появляются НОВЫЕ id (не исходные).
-        deadline = time.time() + 15
-        new_ids = []
-        while time.time() < deadline:
-            cur = d2.rows()
-            new_ids = [x["id"] for x in cur if x["id"] not in ids2]
-            if new_ids:
-                break
-            time.sleep(1)
-        check(len(new_ids) >= 1,
+        new_ids = H.wait_until(
+            lambda: [x["id"] for x in d2.rows() if x["id"] not in ids2]
+            or None,
+            timeout=15, interval=1)
+        check(len(new_ids or []) >= 1,
               f"restart produced new jobs (engine alive): {new_ids}")
         check(d2.stop() == 0, "case 7: exit 0")
 
@@ -220,16 +211,11 @@ def main():
         check(len(added8) == 1, f"re-add accepted after cancel-file: added={len(added8)} rej={rejected8}")
         # новые задания стартуют
         new_id8 = added8[0]["id"]
-        deadline = time.time() + 20
-        started = False
-        while time.time() < deadline:
-            st = d3.rows()
-            for x in st:
-                if x["id"] == new_id8 and x["state"] in ("prep", "running", "ok", "stopped"):
-                    started = True
-                    break
-            if started: break
-            time.sleep(2)
+        started = H.wait_until(
+            lambda: any(x["id"] == new_id8
+                        and x["state"] in ("prep", "running", "ok", "stopped")
+                        for x in d3.rows()),
+            timeout=20, interval=2)
         check(started, "re-added file after cancel-file leaves queued")
         check(d3.stop() == 0, "case 8: exit 0")
 
@@ -258,9 +244,11 @@ def main():
         restarted9 = r["result"]["restarted"]
         check(len(restarted9) == len(ids9),
               f"batch restart after reorder: {len(restarted9)}/{len(ids9)}")
-        deadline = time.time() + 15
-        new_ids9 = [x["id"] for x in d4.rows() if x["id"] not in ids9]
-        check(len(new_ids9) >= 1,
+        new_ids9 = H.wait_until(
+            lambda: [x["id"] for x in d4.rows() if x["id"] not in ids9]
+            or None,
+            timeout=15, interval=1)
+        check(len(new_ids9 or []) >= 1,
               f"restart after reorder produced new jobs: {new_ids9}")
         check(d4.stop() == 0, "case 9: exit 0")
 

@@ -102,16 +102,30 @@ def resolve_daemon(argv, default=None):
     return default or DEFAULT_DAEMON
 
 
-def wait_state(d, pred, timeout=120, interval=3):
-    """Поллит /api/state пока pred(state) или до таймаута; None при таймауте."""
+def wait_until(fn, timeout=60, interval=1):
+    """Универсальный поллинг: зовёт fn() пока та не вернёт непустой результат;
+    возвращает последний результат (None/False, если до таймаута не дождались).
+
+    Единая точка ожидания вместо повторяющихся deadline+while-циклов в тестах.
+    fn должна быть дешёвой и возвращать truthy при достижении условия."""
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
-        last = d.get("/api/state")
-        if pred(last):
+        last = fn()
+        if last:
             return last
         time.sleep(interval)
     return last
+
+
+def wait_state(d, pred, timeout=120, interval=3):
+    """Поллит /api/state пока pred(state) или до таймаута; None при таймауте.
+
+    Тонкая обвязка над wait_until: возвращает последний снимок состояния."""
+    def check():
+        st = d.get("/api/state")
+        return st if pred(st) else None
+    return wait_until(check, timeout=timeout, interval=interval)
 
 
 class Daemon:
