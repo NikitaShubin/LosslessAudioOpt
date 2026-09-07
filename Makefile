@@ -21,10 +21,20 @@ COMMON_SRCS := src/util.cpp \
         src/stats.cpp \
         src/report.cpp \
         src/media.cpp \
-        src/tags.cpp \
+        src/tags_core.cpp \
+        src/tags_vorbis.cpp \
+        src/tags_apev2.cpp \
+        src/tags_id3.cpp \
+        src/tags_mp4.cpp \
+        src/tags_wav.cpp \
+        src/tags_sidecar.cpp \
+        src/tags_write.cpp \
         src/linear_sink.cpp \
         src/obs.cpp \
         src/optimize.cpp \
+        src/optimize_util.cpp \
+        src/optimize_codec.cpp \
+        src/optimize_runner.cpp \
         third_party/miniz/miniz.c
 
 # --- Событийный слой сервера (HTTP-API, RPC, очередь, персистентность) ---
@@ -32,7 +42,11 @@ SERVER_SRCS := src/events.cpp \
         src/daemon_sink.cpp \
         src/rpc.cpp \
         src/persist.cpp \
-        src/http_api.cpp
+        src/http_api.cpp \
+        src/serve_session.cpp \
+        src/serve_queue.cpp \
+        src/serve_persist.cpp \
+        src/serve_entry.cpp
 
 # Веб-ассеты вшиваются в единый бинарник.
 WEB_ASSETS_SRCS := src/web_assets.cpp src/web_assets_data.cpp
@@ -59,9 +73,10 @@ OBJ_FROM_SRC = $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$1)) \
 COMMON_OBJS := $(call OBJ_FROM_SRC,$(COMMON_SRCS))
 SERVER_OBJS := $(call OBJ_FROM_SRC,$(SERVER_SRCS))
 WEB_ASSETS_OBJS := $(call OBJ_FROM_SRC,$(WEB_ASSETS_SRCS))
-# Единый бинарник: движок + событийный слой + serve.cpp (точка входа) +
-# main.cpp (диспетчер CLI/серверных подкоманд) + веб-ассеты.
-MAIN_OBJS := $(COMMON_OBJS) $(SERVER_OBJS) $(OBJDIR)/serve.o $(OBJDIR)/main.o $(WEB_ASSETS_OBJS)
+# Единый бинарник: движок + событийный слой (serve_session/queue/persist/entry —
+# декомпозиция serve.cpp) + main.cpp (диспетчер CLI/серверных подкоманд) +
+# веб-ассеты.
+MAIN_OBJS := $(COMMON_OBJS) $(SERVER_OBJS) $(OBJDIR)/main.o $(WEB_ASSETS_OBJS)
 
 all: $(BIN)
 

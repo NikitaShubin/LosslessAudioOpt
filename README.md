@@ -310,10 +310,13 @@ Sidecar доставляется той же транзакцией (`.<имя>.
 - Запуск под wine: `wine llao.exe …` (утилиты кодеков — Windows-версии).
   На Linux обёртка `llao` подавляет шум wine (`WINEDEBUG=-all`).
 - Зависимости для сборки: `nlohmann/json` и `miniz` лежат в `third_party/`.
-- Собирается один бинарник `llao` (`llao.exe` / `llao-linux`): движок, событийный
-  слой, `serve.cpp` (точка входа сервера) и `main.cpp` (диспетчер подкоманд)
+- Собирается один бинарник `llao` (`llao.exe` / `llao-linux`): движок
+  (`optimize*.cpp`, `tags_*.cpp` — декомпозированные модули), событийный
+  слой (`serve_*.cpp`, `serve_internal.h`) и `main.cpp` (диспетчер подкоманд)
   линкуются вместе (`Makefile`). Веб-ассеты вшиваются через
   `tools/embed_assets.py` (перегенерируется при правке `web/*`).
+- Подробности архитектуры и история декомпозиции монолитов — в
+  `docs/architecture-audit.md`.
 - Схема конфигов форматов — в `formats/README.md`.
 
 ### Тесты
