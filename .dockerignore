@@ -1,0 +1,11 @@
+.git
+build
+bin
+tmp
+*.log
+llao.exe
+llao-linux
+llao-daemon.exe
+llao-daemon-linux
+test-unit
+test-daemon-core

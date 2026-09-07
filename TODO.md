@@ -348,6 +348,46 @@
   готовых файлов, пути относительно корня (`rel`) + горизонтальная прокрутка
   `←/→` с многоточиями, подсказка в футере (`F` — следовать), CPU-время вместо
   wall-time в статистике (`proc::Result.cpu_ms`).
+- **Обёртка `llao` для запуска `llao.exe` под wine без правок самого exe**:
+  зафиксированный `WINEPREFIX` (`~/.llao-wine`, переопределяется
+  `LLAO_WINEPREFIX`/`WINEPREFIX`) — именованный мьютекс синглтона живёт в одном
+  wineserver, поэтому вторая копия `serve` отвергается, как в Windows;
+  свежий префикс инициализируется через `wineboot -u` (как в CI); шум
+  отладчика подавляется `WINEDEBUG=-all`, stderr уходит в
+  `${LLAO_LOG:-/tmp/llao-wine.log}`; ширина статус-бара берётся из
+  `stty`/`tput` (`LLAO_STATUS_SIZE`, т.к. `GetConsoleScreenBufferInfo` в wine
+  падает). Синглтон проверен на реальном `llao.exe` в dev-контейнере:
+  вторая копия `serve` выходит с кодом 1 и сообщением
+  `ERROR: another LLAO server is already running` (serve_entry.cpp:149).
+- **Dev-контейнер (`Dockerfile`)**: llvm-mingw (Ubuntu 24.04) + wine 9
+  (wine32:i386 для 32-битных кодеков `tak`/`la`) + ffmpeg + p7zip + curl.
+  `make docker-image`, `make docker-build` (llao.exe + llao-linux),
+  `make docker-shell`. Решает раз и навсегда проблему отсутствия
+  кросс-компилятора/wine на хосте; проверено на `mstorsjo/llvm-mingw:20260826`.
+- **README: синтаксис serve-опций приведён к реальному парсеру**: для `serve`
+  используется раздельная форма (`--port N`, `--report PATH`, `--token HEX`,
+  `--bind ADDR`, `--discovery PATH`, `--verify all|winner|none`,
+  `--restore-to ID`, `--jobs N|M.F`) вместе с `=`-формой для CLI
+  (`optimize`/`restore` — `--jobs=N`, `--report=`, `--verify=` и т.д.). Ранее
+  серверная секция README ошибочно писала `--port=N`, из-за чего `serve`
+  падал с `unknown option: --port=0` (README.md:181 → исправлено).
+- **Антифлак daemon-тестов: единая функция ожидания**: `wait_until(fn,
+  timeout, interval)` в `tests/_daemon_harness.py` (поллинг условия вместо
+  ручных `deadline+while now<deadline` циклов), `wait_state` — тонкая обвязка
+  над ней. Ручные циклы заменены в `test_daemon_queue.py` (сценарии ghost/
+  cancel-file/bulk-cancel/restart) и `test_daemon_interactions.py` (прогресс
+  re-add, restart new_ids, started после cancel-file, restart после reorder);
+  `deadline`-переменных не осталось ни в одном daemon-тесте.
+- **Фикс tmp-гонки «стоп → старт»** (`FileSession`): каталог сессии в `tmp/`
+  назывался `tmp_token(path)` — хэшем исходного пути. При «стоп → старт»
+  того же файла старый `FileSession` в деструкторе удалял каталог, пока
+  новый писал `ref.wav` → `Error opening output .../ref.wav: No such file
+  or directory` (воспроизведено стресс-тестом, ~первые же циклы). Имя заменено
+  на `session_cookie()` = `<pid>-<счётчик>`: pid разводит процессы, атомарный
+  монотонный счётчик — экземпляры внутри процесса (в т.ч. повторные
+  «стоп → старт» одного пути); сброс — вместе с `clear_tmp_base()` при старте
+  движка. Стресс-прогон (120 циклов on-the-fly перезапуска, jobs=2.0) — 0
+  ошибок; `make test-daemon` — 3 последовательных прогона зелёные.
 
 ## 1. Гистограммы размеров и экономии
 
@@ -448,9 +488,12 @@
   `out_path` не работает для in-place-результатов (показывает false при
   реально лежащем рядом sidecar). Заполнять `out_path` (или флаг) и для
   in-place-доставки.
-- **Флаки `test_daemon_queue` (wine)**: частично сняты переводом тест-файлов
-  на 0.25 с и `jobs=2.0` (см. «Единый бинарник» в разделе 0). Открытые риски
-  среды (медленные `cli_check`/prep под wine, отсутствие watchdog) остаются —
+- **Флаки `test_daemon_queue` (wine)**: сняты переводом тест-файлов на 0.25 с
+  и `jobs=2.0`, добавлением единой `wait_until`/`wait_state` в
+  `tests/_daemon_harness.py` (поллинг вместо ручных `deadline`-циклов) и
+  фиксом tmp-гонки «стоп → старт» в `FileSession` (имя каталога
+  `<pid>-<счётчик>` вместо хэша пути — см. раздел 0). Открытые риски среды
+  (медленные `cli_check`/prep под wine, отсутствие watchdog) остаются —
   см. пункт про watchdog.
 - **Мультисессионность**: вкладки/группы очередей для нескольких папок в одном
   демоне вместо одного общего списка.
