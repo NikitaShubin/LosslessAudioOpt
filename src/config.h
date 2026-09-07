@@ -37,6 +37,8 @@ struct Format {
     std::string extension;
     std::string homepage;
     bool enabled = true;
+    bool lossless = true;                  // целевой кодек — lossless
+    std::string ffprobe_codec;             // codec_name, который отдаёт ffprobe (если отличается от id)
 
     std::string engine_kind;               // binary | ffmpeg
     std::string engine_executable;
@@ -86,6 +88,15 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// Обратные таблицы ключей тегов для чтения нативных контейнеров, чьи ключи
+// не совпадают с канонической схемой (ID3v2 frame id, MP4 4CC, WAV LIST INFO).
+// Хранятся в formats/tag_tables.json (data-driven, не хардкодятся в C++).
+struct TagTables {
+    std::map<std::string, std::string> id3;   // TIT2 -> title
+    std::map<std::string, std::string> mp4;   // \xa9nam -> title
+    std::map<std::string, std::string> wav;   // IART -> artist
+};
+
 // Каталог formats/ рядом с exe.
 std::string formats_dir();
 // Каталог bin/ рядом с exe.
@@ -96,7 +107,8 @@ std::string bin_dir();
 std::string load_settings_lang();
 
 // Загружает и валидирует все formats/*.json (сортировка по имени файла).
-// Пропускает formats/inputs.json (описание входных форматов, не кодируемых).
+// Пропускает formats/inputs.json (описание входных форматов, не кодируемых) и
+// formats/tag_tables.json (таблицы ключей тегов).
 std::vector<Format> load_all();
 // Расширения входных форматов из formats/inputs.json (например lossy-исходники,
 // принимаемые на вход, но не являющиеся целевыми кодеками).
@@ -105,5 +117,9 @@ std::set<std::string> input_extensions();
 const Format& load_one(const std::vector<Format>& all, const std::string& id);
 // Валидирует один конфиг (после разбора JSON).
 Format validate(const nlohmann::json& data);
+
+// Загружает formats/tag_tables.json (обратные карты ключей нативных тегов).
+// Кэшируется. При отсутствии файла возвращает пустые таблицы.
+const TagTables& load_tag_tables();
 
 }  // namespace config

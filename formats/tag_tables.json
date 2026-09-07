@@ -1,0 +1,43 @@
+{
+  "comment": "Обратные таблицы ключей нативных тегов для чтения контейнеров, чьи ключи не совпадают с канонической схемой: ID3v2 (frame id), MP4 ilst (4CC), WAV LIST INFO. Ключи формата -> канонический ключ. Data-driven: не хардкодятся в C++.",
+  "id3": {
+    "TIT2": "title",
+    "TPE1": "artist",
+    "TPE2": "album_artist",
+    "TALB": "album",
+    "TCOM": "composer",
+    "TCON": "genre",
+    "TDRC": "date",
+    "TRCK": "track",
+    "TPOS": "disc",
+    "COMM": "comment",
+    "TSRC": "isrc",
+    "TENC": "encoder",
+    "TCOP": "copyright"
+  },
+  "mp4": {
+    "©nam": "title",
+    "©ART": "artist",
+    "©alb": "album",
+    "aART": "album_artist",
+    "©wrt": "composer",
+    "©gen": "genre",
+    "©day": "date",
+    "©cmt": "comment",
+    "©too": "encoder",
+    "©lyr": "lyrics",
+    "cprt": "copyright"
+  },
+  "wav": {
+    "IART": "artist",
+    "INAM": "title",
+    "IPRD": "album",
+    "ITRK": "track",
+    "ICMT": "comment",
+    "ICRD": "date",
+    "IDIT": "date",
+    "IGNR": "genre",
+    "ICOP": "copyright",
+    "ISFT": "encoder"
+  }
+}

@@ -74,15 +74,30 @@ static uint32_t rd32le(const uint8_t* p) {
     return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+// Множество lossless-кодеков строится из formats/*.json (флаг "lossless"),
+// а не хардкодится: для каждого формата берутся id, engine_codec (имя, которое
+// отдаёт ffprobe для ffmpeg-кодеков) и явный ffprobe_codec (для binary-кодеков,
+// где ffprobe-имя отличается от id, напр. Monkey's Audio -> "ape").
+// Кэшируется, т.к. вызывается часто (пробы, ранжирование).
+static const std::set<std::string>& lossless_codec_set() {
+    static const std::set<std::string> ls = [] {
+        std::set<std::string> s;
+        for (const auto& f : config::load_all()) {
+            if (!f.lossless) continue;
+            if (!f.id.empty()) s.insert(f.id);
+            if (!f.engine_codec.empty()) s.insert(f.engine_codec);
+            if (!f.ffprobe_codec.empty()) s.insert(f.ffprobe_codec);
+        }
+        return s;
+    }();
+    return ls;
+}
+
 bool codec_is_lossless(const std::string& codec_name) {
     std::string c = codec_name;
     if (c.empty()) return true;  // неизвестный кодек — не блокируем обработку
     if (c.compare(0, 4, "pcm_") == 0 || c.compare(0, 4, "dsd_") == 0) return true;
-    static const std::set<std::string> ls = {
-        "flac", "alac", "wavpack", "tta", "tak", "ape", "ofr", "la",
-        "mp4als", "truehd", "mlp", "wmalossless",
-    };
-    return ls.count(c) != 0;
+    return lossless_codec_set().count(c) != 0;
 }
 
 bool Probe::is_lossless() const {

@@ -101,6 +101,8 @@ Format validate(const json::json& data) {
     f.extension = data.at("extension").get<std::string>();
     f.homepage = get_str(data, "homepage");
     f.enabled = data.value("enabled", true);
+    f.lossless = data.value("lossless", true);
+    f.ffprobe_codec = get_str(data, "ffprobe_codec");
     f.notes = get_str(data, "notes");
 
     // engine
@@ -264,7 +266,8 @@ std::vector<Format> load_all() {
     for (const auto& entry : fs::directory_iterator(fs::u8path(formats_dir()), ec)) {
         if (ec) break;
         if (entry.is_regular_file() && entry.path().extension() == ".json" &&
-            entry.path().filename() != "inputs.json") {
+            entry.path().filename() != "inputs.json" &&
+            entry.path().filename() != "tag_tables.json") {
             files.push_back(entry.path().u8string());
         }
     }
@@ -317,6 +320,45 @@ const Format& load_one(const std::vector<Format>& all, const std::string& id) {
         if (f.id == id) return f;
     }
     throw Error(i18n::fmt("format '%s' not found in %s", id.c_str(), formats_dir().c_str()));
+}
+
+// Кеш обратных таблиц ключей нативных тегов (formats/tag_tables.json). Пустые
+// таблицы, если файла нет. Демон не меняет конфиги на лету, поэтому кеш
+// безопасен.
+static TagTables read_tag_tables() {
+    TagTables t;
+    std::string path = util::join_path(formats_dir(), "tag_tables.json");
+    if (!util::file_exists(path)) return t;
+    std::ifstream fh(path, std::ios::binary);
+    if (!fh) return t;
+    json::json data;
+    try {
+        fh >> data;
+    } catch (const nlohmann::detail::parse_error&) {
+        return t;
+    }
+    auto fill = [](std::map<std::string, std::string>& m, const json::json& src) {
+        if (!src.is_object()) return;
+        for (auto& [k, v] : src.items()) {
+            if (v.is_string()) m[k] = v.get<std::string>();
+        }
+    };
+    if (data.is_object()) {
+        if (data.contains("id3")) fill(t.id3, data.at("id3"));
+        if (data.contains("mp4")) {
+            // 4CC ключи с raw \xa9 нормализуем как в форматах.
+            if (data.at("mp4").is_object())
+                for (auto& [k, v] : data.at("mp4").items())
+                    if (v.is_string()) t.mp4[normalize_4cc(k)] = v.get<std::string>();
+        }
+        if (data.contains("wav")) fill(t.wav, data.at("wav"));
+    }
+    return t;
+}
+
+const TagTables& load_tag_tables() {
+    static const TagTables cached = read_tag_tables();
+    return cached;
 }
 
 }  // namespace config
