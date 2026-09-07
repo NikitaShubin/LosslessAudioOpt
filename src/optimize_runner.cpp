@@ -279,19 +279,55 @@ void Runner::prep_file(FileJob& j) {
     std::string ref_wav = j.session->ref_wav_path();
     bool src_decoded = false;
 
+    // Watchdog prep: общий бюджет времени на подготовку файла (аналог encode).
+    uint64_t src_ns = util::file_size(j.path);
+    uint64_t prep_budget = src_ns / 50000;
+    if (prep_budget < 1800) prep_budget = 1800;
+    if (prep_budget > 7200) prep_budget = 7200;
+    const auto prep_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(prep_budget);
+    auto remaining_sec = [&]() -> int {
+        auto rem = std::chrono::duration_cast<std::chrono::seconds>(
+                       prep_deadline - std::chrono::steady_clock::now())
+                       .count();
+        return rem > 0 ? (int)rem : 0;
+    };
+    auto prep_watchdog_error = [&](const std::string& step) {
+        j.summary.path = j.path;
+        j.summary.status = "error";
+        j.summary.detail =
+            i18n::fmt("prep watchdog timeout (%s, limit %llu s)", step.c_str(),
+                      (unsigned long long)prep_budget);
+        if (logger) {
+            logger->event({{"type", "file_done"},
+                           {"file", j.path},
+                           {"status", "error"},
+                           {"reason", j.summary.detail}});
+        }
+        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " +
+                                           j.summary.detail + "\n");
+        j.error_reported = true;
+    };
+
     media::Probe probe = media::probe_file(j.path, ffprobe, &j.kill_requested);
     if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
         release_deferred_budget();
         return;
     }
+    proc::OutputMonitor prep_mon;
+    prep_mon.path = ref_wav;
+    prep_mon.stall_timeout_sec = 120;
+    prep_mon.hard_timeout_sec = remaining_sec();
     if (!probe.ok) {
         const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
         if (src_fmt && src_fmt->id != probe.format_name) {
-            DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, 16);
+            DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, 16,
+                                                   &j.kill_requested, &prep_mon);
             if (ds == DecodeStatus::NeedsCopy) {
                 std::string copy = util::join_path(j.session->dir(), "src_copy." + lower_ext(j.path));
                 if (util::copy_file(j.path, copy)) {
-                    ds = decode_source_native(src_fmt, copy, ref_wav, 16);
+                    ds = decode_source_native(src_fmt, copy, ref_wav, 16,
+                                              &j.kill_requested, &prep_mon);
                     util::remove_file(copy);
                 }
             }
@@ -308,6 +344,12 @@ void Runner::prep_file(FileJob& j) {
                     src_decoded = true;
                 }
             }
+        }
+        if (!probe.ok && remaining_sec() <= 0) {
+            release_deferred_budget();
+            if (j.session) j.session->cleanup();
+            prep_watchdog_error("probe/native-decode");
+            return;
         }
         if (!probe.ok) {
             if (j.session) j.session->cleanup();
@@ -406,17 +448,18 @@ void Runner::prep_file(FileJob& j) {
 
     std::string derr;
     bool decoded = src_decoded;
+    prep_mon.hard_timeout_sec = remaining_sec();
     if (!decoded) {
         const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
         if (src_fmt) {
             DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, bits,
-                                                   &j.kill_requested);
+                                                   &j.kill_requested, &prep_mon);
             if (ds == DecodeStatus::NeedsCopy) {
                 std::string copy = util::join_path(j.session->dir(),
                                                    "src_copy." + lower_ext(j.path));
                 if (util::copy_file(j.path, copy)) {
                     ds = decode_source_native(src_fmt, copy, ref_wav, bits,
-                                              &j.kill_requested);
+                                              &j.kill_requested, &prep_mon);
                     util::remove_file(copy);
                 }
             }
@@ -425,10 +468,16 @@ void Runner::prep_file(FileJob& j) {
     }
     if (!decoded)
         decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr,
-                                       &j.kill_requested);
+                                       &j.kill_requested, &prep_mon);
     if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
         release_deferred_budget();
         if (j.session) j.session->cleanup();
+        return;
+    }
+    if (!decoded && remaining_sec() <= 0) {
+        release_deferred_budget();
+        if (j.session) j.session->cleanup();
+        prep_watchdog_error("decode");
         return;
     }
     if (!decoded) {
