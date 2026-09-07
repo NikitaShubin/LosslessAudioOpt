@@ -1,0 +1,777 @@
+{
+ "counters": {
+  "done": 1,
+  "failed": 0,
+  "ok": 1,
+  "stopped": 0,
+  "total": 1
+ },
+ "last_seq": 245,
+ "paused": false,
+ "rows": [
+  {
+   "excluded": [],
+   "id": 1,
+   "label": "t1.wav",
+   "mode": "optimize",
+   "out_path": "",
+   "pct": 94.17207810605288,
+   "state": "ok",
+   "target_dir": "",
+   "task_infos": [
+    {
+     "fmt": "tta",
+     "note": "стандартное сжатие ffmpeg/tta",
+     "params": [],
+     "variant": "default"
+    },
+    {
+     "fmt": "la",
+     "note": "быстрее, чуть хуже сжатие (seek включён)",
+     "params": [],
+     "variant": "default"
+    },
+    {
+     "fmt": "la",
+     "note": "без таблицы поиска — чуть меньше",
+     "params": [
+      "-noseek"
+     ],
+     "variant": "noseek"
+    },
+    {
+     "fmt": "la",
+     "note": "максимальное сжатие (медленно)",
+     "params": [
+      "-high"
+     ],
+     "variant": "high"
+    },
+    {
+     "fmt": "la",
+     "note": "макс. сжатие + без таблицы поиска",
+     "params": [
+      "-high",
+      "-noseek"
+     ],
+     "variant": "high_noseek"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "high, без доп. обработки",
+     "params": [
+      "-h",
+      "-x0"
+     ],
+     "variant": "h_x0"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-h",
+      "-x1"
+     ],
+     "variant": "h_x1"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-h",
+      "-x2"
+     ],
+     "variant": "h_x2"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-h",
+      "-x3"
+     ],
+     "variant": "h_x3"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно (генерация фильтров)",
+     "params": [
+      "-h",
+      "-x4"
+     ],
+     "variant": "h_x4"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно",
+     "params": [
+      "-h",
+      "-x5"
+     ],
+     "variant": "h_x5"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно",
+     "params": [
+      "-h",
+      "-x6"
+     ],
+     "variant": "h_x6"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "принудительно mid/side joint-stereo",
+     "params": [
+      "-h",
+      "-x6",
+      "-j1"
+     ],
+     "variant": "h_x6_j1"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "блок 131072",
+     "params": [
+      "-h",
+      "-x6",
+      "--blocksize=131072"
+     ],
+     "variant": "h_x6_bs"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "mid/side + блок 131072",
+     "params": [
+      "-h",
+      "-x6",
+      "-j1",
+      "--blocksize=131072"
+     ],
+     "variant": "h_x6_j1_bs"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "very high, без доп. обработки",
+     "params": [
+      "-hh",
+      "-x0"
+     ],
+     "variant": "hh_x0"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-hh",
+      "-x1"
+     ],
+     "variant": "hh_x1"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-hh",
+      "-x2"
+     ],
+     "variant": "hh_x2"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-hh",
+      "-x3"
+     ],
+     "variant": "hh_x3"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно",
+     "params": [
+      "-hh",
+      "-x4"
+     ],
+     "variant": "hh_x4"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно",
+     "params": [
+      "-hh",
+      "-x5"
+     ],
+     "variant": "hh_x5"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "mid/side joint-stereo",
+     "params": [
+      "-hh",
+      "-x5",
+      "-j1"
+     ],
+     "variant": "hh_x5_j1"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-hh",
+      "-x5",
+      "--blocksize=131072"
+     ],
+     "variant": "hh_x5_bs"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "",
+     "params": [
+      "-hh",
+      "-x5",
+      "-j1",
+      "--blocksize=131072"
+     ],
+     "variant": "hh_x5_j1_bs"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "очень медленно",
+     "params": [
+      "-hh",
+      "-x6"
+     ],
+     "variant": "hh_x6"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "принудительно mid/side joint-stereo",
+     "params": [
+      "-hh",
+      "-x6",
+      "-j1"
+     ],
+     "variant": "hh_x6_j1"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "блок 131072",
+     "params": [
+      "-hh",
+      "-x6",
+      "--blocksize=131072"
+     ],
+     "variant": "hh_x6_bs"
+    },
+    {
+     "fmt": "wavpack",
+     "note": "mid/side + блок 131072",
+     "params": [
+      "-hh",
+      "-x6",
+      "-j1",
+      "--blocksize=131072"
+     ],
+     "variant": "hh_x6_j1_bs"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "быстрейший режим",
+     "params": [
+      "0"
+     ],
+     "variant": "p0"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "1"
+     ],
+     "variant": "p1"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "режим по умолчанию",
+     "params": [
+      "2"
+     ],
+     "variant": "p2"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "3"
+     ],
+     "variant": "p3"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "4"
+     ],
+     "variant": "p4"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "5"
+     ],
+     "variant": "p5"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "6"
+     ],
+     "variant": "p6"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "7"
+     ],
+     "variant": "p7"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "8"
+     ],
+     "variant": "p8"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "",
+     "params": [
+      "9"
+     ],
+     "variant": "p9"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "ultranew-light",
+     "params": [
+      "10"
+     ],
+     "variant": "p10"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "максимальное сжатие (очень медленно)",
+     "params": [
+      "max"
+     ],
+     "variant": "max"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "пресет 9 + адаптивное кодирование",
+     "params": [
+      "9",
+      "--acm"
+     ],
+     "variant": "p9_acm"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "пресет 10 + адаптивное кодирование",
+     "params": [
+      "10",
+      "--acm"
+     ],
+     "variant": "p10_acm"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "пресет 10 + оптимизация best",
+     "params": [
+      "10",
+      "--optimize",
+      "best"
+     ],
+     "variant": "p10_optbest"
+    },
+    {
+     "fmt": "optimfrog",
+     "note": "промежуточный между 9 и max",
+     "params": [
+      "9",
+      "--acm",
+      "--optimize",
+      "best"
+     ],
+     "variant": "p9_acm_optbest"
+    },
+    {
+     "fmt": "monkeys_audio",
+     "note": "fast (на шумоподобном контенте может оказаться лучшим)",
+     "params": [
+      "-c1000"
+     ],
+     "variant": "c1000"
+    },
+    {
+     "fmt": "monkeys_audio",
+     "note": "normal",
+     "params": [
+      "-c2000"
+     ],
+     "variant": "c2000"
+    },
+    {
+     "fmt": "monkeys_audio",
+     "note": "high",
+     "params": [
+      "-c3000"
+     ],
+     "variant": "c3000"
+    },
+    {
+     "fmt": "monkeys_audio",
+     "note": "extra high",
+     "params": [
+      "-c4000"
+     ],
+     "variant": "c4000"
+    },
+    {
+     "fmt": "monkeys_audio",
+     "note": "insane (максимальное сжатие)",
+     "params": [
+      "-c5000"
+     ],
+     "variant": "c5000"
+    },
+    {
+     "fmt": "tak",
+     "note": "fast",
+     "params": [
+      "-p0"
+     ],
+     "variant": "p0"
+    },
+    {
+     "fmt": "tak",
+     "note": "turbo",
+     "params": [
+      "-p1"
+     ],
+     "variant": "p1"
+    },
+    {
+     "fmt": "tak",
+     "note": "normal",
+     "params": [
+      "-p2"
+     ],
+     "variant": "p2"
+    },
+    {
+     "fmt": "tak",
+     "note": "нормальный + Extra evaluation",
+     "params": [
+      "-p2e"
+     ],
+     "variant": "p2e"
+    },
+    {
+     "fmt": "tak",
+     "note": "нормальный + Max evaluation",
+     "params": [
+      "-p2m"
+     ],
+     "variant": "p2m"
+    },
+    {
+     "fmt": "tak",
+     "note": "high",
+     "params": [
+      "-p3"
+     ],
+     "variant": "p3"
+    },
+    {
+     "fmt": "tak",
+     "note": "high + Max evaluation",
+     "params": [
+      "-p3m"
+     ],
+     "variant": "p3m"
+    },
+    {
+     "fmt": "tak",
+     "note": "max (максимальное сжатие)",
+     "params": [
+      "-p4"
+     ],
+     "variant": "p4"
+    },
+    {
+     "fmt": "tak",
+     "note": "max + Max evaluation (== pMax, самое сильное)",
+     "params": [
+      "-p4m"
+     ],
+     "variant": "p4m"
+    },
+    {
+     "fmt": "flac",
+     "note": "быстро, наименьшее сжатие",
+     "params": [
+      "-0"
+     ],
+     "variant": "0"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-1"
+     ],
+     "variant": "1"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-2"
+     ],
+     "variant": "2"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-3"
+     ],
+     "variant": "3"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-4"
+     ],
+     "variant": "4"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-5"
+     ],
+     "variant": "5"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-6"
+     ],
+     "variant": "6"
+    },
+    {
+     "fmt": "flac",
+     "note": "",
+     "params": [
+      "-7"
+     ],
+     "variant": "7"
+    },
+    {
+     "fmt": "flac",
+     "note": "максимальное сжатие",
+     "params": [
+      "-8"
+     ],
+     "variant": "8"
+    },
+    {
+     "fmt": "flac",
+     "note": "точный поиск квантования LP-коэффициентов",
+     "params": [
+      "-8",
+      "-p"
+     ],
+     "variant": "8_p"
+    },
+    {
+     "fmt": "flac",
+     "note": "другая аподизация",
+     "params": [
+      "-8",
+      "-A",
+      "partial_tukey(2)"
+     ],
+     "variant": "8_ptukey"
+    },
+    {
+     "fmt": "flac",
+     "note": "другая аподизация",
+     "params": [
+      "-8",
+      "-A",
+      "punchout_tukey(3)"
+     ],
+     "variant": "8_punchout"
+    },
+    {
+     "fmt": "flac",
+     "note": "другая аподизация",
+     "params": [
+      "-8",
+      "-A",
+      "kaiser_bessel"
+     ],
+     "variant": "8_kaiser"
+    },
+    {
+     "fmt": "flac",
+     "note": "другая аподизация",
+     "params": [
+      "-8",
+      "-A",
+      "hann"
+     ],
+     "variant": "8_hann"
+    },
+    {
+     "fmt": "flac",
+     "note": "LPC до 24-го порядка (не-Subset)",
+     "params": [
+      "-8",
+      "--lax",
+      "-l",
+      "24"
+     ],
+     "variant": "8_l24"
+    },
+    {
+     "fmt": "flac",
+     "note": "LPC до 32-го порядка (не-Subset)",
+     "params": [
+      "-8",
+      "--lax",
+      "-l",
+      "32"
+     ],
+     "variant": "8_l32"
+    },
+    {
+     "fmt": "flac",
+     "note": "LPC 24 + точный поиск (не-Subset)",
+     "params": [
+      "-8",
+      "--lax",
+      "-l",
+      "24",
+      "-p"
+     ],
+     "variant": "8_l24_p"
+    },
+    {
+     "fmt": "alac",
+     "note": "единственный режим (без уровней)",
+     "params": [],
+     "variant": "default"
+    }
+   ],
+   "tasks": [
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok",
+    "ok"
+   ]
+  }
+ ],
+ "session": {
+  "options": {
+   "dry_run": false,
+   "ignore_errors": true,
+   "jobs": 2.0,
+   "jobs_float": false,
+   "verify": "winner"
+  }
+ },
+ "version": "2.0.0-dev"
+}

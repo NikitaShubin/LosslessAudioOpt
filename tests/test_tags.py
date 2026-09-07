@@ -64,7 +64,7 @@ def rd(b, o):
 # Канонические ключи — повторяют src/tags.cpp::canonical_key().
 _CANON = {
     "title": "title", "artist": "artist", "album": "album",
-    "albumartist": "album_artist", "album_artist": "album_artist",
+    "albumartist": "album_artist",
     "composer": "composer", "genre": "genre",
     "date": "date", "year": "date", "originaldate": "date",
     "track": "track", "tracknumber": "track",
@@ -680,7 +680,6 @@ def gen_fixtures():
                       "album": ["Restored Album"], "comment": ["Restored Comment"],
                       "track": ["7"]},
                      pictures=[("image/png", png)])
-    shutil.move(os.path.join(FIX, "v1.tags.zip"), os.path.join(FIX, "v1.tags.zip"))
 
     write_sidecar_v2(os.path.join(FIX, "v2_id3"),
                      [{"type": "id3v2", "fields": {"title": ["ID3 Single Title"],

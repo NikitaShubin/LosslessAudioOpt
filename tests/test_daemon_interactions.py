@@ -5,23 +5,20 @@
 каждая комбинация add/reorder/remove/cancel/restart/pause/resume проверяется
 утверждением о точном составе очереди после неё.
 
-Требует: собранный llao-daemon-linux, ffmpeg в PATH. Без ffmpeg — SKIP.
+Требует: собранный llao-linux, ffmpeg в PATH. Без ffmpeg — SKIP.
 Демон поднимается свой, на случайном порту (--no-auth), 18180 не трогает.
 
-Запуск: python3 tests/test_daemon_interactions.py [--daemon ./llao-daemon-linux]
+Запуск: python3 tests/test_daemon_interactions.py [--daemon ./llao-linux]
 """
 import concurrent.futures as fut
-import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import _daemon_harness as H
+
 FAILURES = []
 
 
@@ -33,89 +30,13 @@ def check(cond, msg):
         FAILURES.append(msg)
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class Daemon:
-    def __init__(self, binary, workdir):
-        self.binary = binary
-        self.workdir = workdir
-        self.port = free_port()
-        self.disc = os.path.join(workdir, "daemon.json")
-        self.proc = None
-
-    def start(self, extra=()):
-        log = os.path.join(self.workdir, "daemon.log")
-        with open(log, "w") as lf:
-            self.proc = subprocess.Popen(
-                [self.binary, "serve", "--port", str(self.port),
-                 "--no-auth", "--jobs", "2", *extra],
-                cwd=ROOT, stdout=lf, stderr=subprocess.STDOUT,
-                env={**os.environ, "LLAO_DISCOVERY": self.disc})
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                self.get("/api/state")
-                return
-            except Exception:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("daemon exited early, see " + log)
-                time.sleep(0.2)
-        raise RuntimeError("daemon did not start, see " + log)
-
-    def _req(self, path, body=None):
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
-                                     data=data,
-                                     headers={"Content-Type": "application/json"},
-                                     method="POST" if body is not None else "GET")
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read().decode())
-
-    def get(self, path):
-        return self._req(path)
-
-    def rpc(self, cmd, args=None):
-        return self._req("/rpc", {"cmd": cmd, "args": args or {}})
-
-    def rows(self):
-        return self.get("/api/state")["rows"]
-
-    def ids(self):
-        return [x["id"] for x in self.rows()]
-
-    def stop(self):
-        try:
-            self.rpc("shutdown", {})
-        except Exception:
-            pass
-        try:
-            self.proc.wait(timeout=15)
-        except Exception:
-            self.proc.kill()
-        return self.proc.returncode
-
-
-def gen_wav(path, freq):
-    r = subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
-                        f"sine=frequency={freq}:duration=1",
-                        "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", path],
-                       capture_output=True)
-    if r.returncode != 0 or not os.path.exists(path):
-        raise RuntimeError("ffmpeg failed")
-
-
 def no_dupes(rows):
     ids = [x["id"] for x in rows]
     return len(ids) == len(set(ids))
 
 
 def main():
-    binary = sys.argv[sys.argv.index("--daemon") + 1] \
-        if "--daemon" in sys.argv else os.path.join(ROOT, "llao-daemon-linux")
+    binary = H.resolve_daemon(sys.argv)
     if not os.path.exists(binary):
         print(f"SKIP: нет бинарника {binary}")
         return 0
@@ -128,10 +49,10 @@ def main():
         paths = []
         for i, freq in enumerate((440, 880, 330, 550)):
             p = os.path.join(workdir, f"f{i}.wav")
-            gen_wav(p, freq)
+            H.gen_wav(p, freq)
             paths.append(p)
 
-        d = Daemon(binary, workdir)
+        d = H.Daemon(binary, workdir, jobs=2.0)
         d.start()
 
         print("case 1: add + двойной reorder + действия по id бьют точно")
@@ -240,23 +161,27 @@ def main():
         check(isinstance(st.get("rows"), list), "daemon alive after bad input")
 
         print("case 7: batch-stop-all → batch-start — рестарт работает")
-        d2 = Daemon(binary, workdir)
+        d2 = H.Daemon(binary, workdir, jobs=2.0)
         d2.start()
         paths2 = []
         for i, freq in enumerate((500, 600, 700)):
             p = os.path.join(workdir, f"bs{i}.wav")
-            gen_wav(p, freq)
+            H.gen_wav(p, freq)
             paths2.append(p)
         r = d2.rpc("add", {"paths": paths2})
         ids2 = [x["id"] for x in r["result"]["added"]]
         check(len(ids2) == 3, f"added 3 files: {ids2}")
-        # дать файлам начать обработку
-        time.sleep(4)
+        # Пауза до обработки: при jobs=2.0 (все ядра) и коротких файлах они
+        # могут завершиться ok и замениться in-place раньше, чем тест успеет
+        # их остановить (тогда restart по ok-строке невозможен — исходника
+        # уже нет). Пауза фиксирует файлы в queued (активны, не стартовали) —
+        # сценарий «остановленные выделенные» воспроизводится без гонки.
+        d2.rpc("pause", {})
+        time.sleep(0.5)
         # batch cancel-file (эмуляция «Остановить выделенные»)
         for fid in ids2:
             d2.rpc("cancel-file", {"id": fid})
-        time.sleep(1)
-        # batch restart (эмуляция «Запустить выделенные»)
+        # batch restart (эмуляция «Запустить выделенные»; restart снимает паузу)
         r = d2.rpc("restart", {"ids": ids2})
         restarted = r["result"]["restarted"]
         # Главная регрессия пользователя: restart после остановки возвращал 0.
@@ -277,10 +202,10 @@ def main():
         check(d2.stop() == 0, "case 7: exit 0")
 
         print("case 8: cancel-file → re-add тот же путь — принят и стартует")
-        d3 = Daemon(binary, workdir)
+        d3 = H.Daemon(binary, workdir, jobs=2.0)
         d3.start()
         p8 = os.path.join(workdir, "cancel_readd.wav")
-        gen_wav(p8, 999)
+        H.gen_wav(p8, 999)
         r = d3.rpc("add", {"paths": [p8]})
         ids8 = [x["id"] for x in r["result"]["added"]]
         check(len(ids8) == 1, "add 1 file")
@@ -309,12 +234,12 @@ def main():
         check(d3.stop() == 0, "case 8: exit 0")
 
         print("case 9: batch-stop → reorder → batch-start — reorder не ломает рестарт")
-        d4 = Daemon(binary, workdir)
+        d4 = H.Daemon(binary, workdir, jobs=2.0)
         d4.start()
         paths9 = []
         for i, freq in enumerate((1000, 1100, 1200)):
             p = os.path.join(workdir, f"r{i}.wav")
-            gen_wav(p, freq)
+            H.gen_wav(p, freq)
             paths9.append(p)
         r = d4.rpc("add", {"paths": paths9})
         ids9 = [x["id"] for x in r["result"]["added"]]

@@ -1,0 +1,12 @@
+{"id": 0, "label": "src.wav", "seq": 1, "type": "begin_file"}
+{"id": 0, "mode": "restore", "seq": 2, "target_dir": "/d/Work/DINOv3/LosslessAudioOpt/tests/golden/_dump-work/out", "type": "job_meta"}
+{"id": 0, "seq": 3, "type": "prep"}
+{"id": 0, "seq": 4, "task_infos": [{"fmt": "flac", "note": "LPC 24 + точный поиск (не-Subset)", "params": ["-8", "--lax", "-l", "24", "-p"], "variant": "8_l24_p"}], "total": 1, "type": "set_tasks"}
+{"id": 0, "idx": 0, "seq": 5, "state": "running", "type": "task"}
+{"id": 0, "seq": 6, "state": "running", "type": "state"}
+{"id": 0, "idx": 0, "seq": 7, "state": "ok", "type": "task"}
+{"line": "[v] compare '/d/Work/DINOv3/LosslessAudioOpt/tmp/4b2ac810c3747e3b/flac.8_l24_p.flac' => identical, rm '/d/Work/DINOv3/LosslessAudioOpt/tmp/4b2ac810c3747e3b/flac.8_l24_p.flac.dec.wav' ok\n", "seq": 8, "type": "log"}
+{"line": "[tmp] session dir '/d/Work/DINOv3/LosslessAudioOpt/tmp/4b2ac810c3747e3b' removed\n", "seq": 9, "type": "log"}
+{"line": "OK   src.wav: restore to flac/8_l24_p (0.2 MB -> 0.0 MB, 87.3%)\n      -> restored to /d/Work/DINOv3/LosslessAudioOpt/tests/golden/_dump-work/out/src.flac\n", "seq": 10, "type": "log"}
+{"id": 0, "pct": 87.27660104942258, "seq": 11, "type": "end_file"}
+{"id": 0, "path": "/d/Work/DINOv3/LosslessAudioOpt/tests/golden/_dump-work/out/src.flac", "seq": 12, "type": "out_file"}

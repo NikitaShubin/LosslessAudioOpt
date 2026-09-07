@@ -31,16 +31,20 @@ static int failures = 0;
 static void test_event_buffer() {
     EventBuffer ev;
     CHECK(ev.last_seq() == 0);
-    ev.push("begin_file", {{"id", 0}, {"label", "a.flac"}});
-    ev.push("prep", {{"id", 0}});
+    ev.push("prep", {{"tag", "x"}});
+    ev.push_for(7, "begin_file", {{"label", "a.flac"}});
     CHECK(ev.last_seq() == 2);
 
     auto p = ev.copy_since(0);
     CHECK(!p.resync);
     CHECK(p.events.size() == 2);
     CHECK(p.events[0].seq == 1);
-    CHECK(p.events[0].type == "begin_file");
-    CHECK(p.events[0].args["id"] == 0);
+    CHECK(p.events[0].type == "prep");
+    CHECK(!p.events[0].has_id);
+    CHECK(p.events[1].type == "begin_file");
+    CHECK(p.events[1].has_id);
+    CHECK(p.events[1].file_id == 7);
+    CHECK(p.events[1].payload["label"] == "a.flac");
     CHECK(p.last_seq == 2);
 
     // since=1 -> одно событие (seq 2)
@@ -69,7 +73,6 @@ static void test_daemon_sink() {
     StateMirror st;
     DaemonSink sink(&ev, &st);
 
-    sink.init_session(2);
     sink.begin_file(0, "rel/a.wav");
     sink.begin_file(1, "rel/b.wav");
     CHECK(st.size() == 2);
@@ -95,24 +98,34 @@ static void test_daemon_sink() {
     CHECK(rows[0].state == "ok");
     CHECK(rows[0].pct == 12.5);
 
-    sink.mark_skip(1);
+    sink.mark_stopped(1);
     rows = st.snapshot();
     CHECK(rows.size() == 2);
-    CHECK(rows[1].state == "skip");
+    CHECK(rows[1].state == "stopped");
 
-    // события: seq монотонны, типы корректны
+    // события: seq монотонны, типы корректны, файловые события несут id
     auto evs = ev.copy_since(0);
-    CHECK(evs.events[0].type == "session");
-    CHECK(evs.events[1].type == "begin_file");
+    CHECK(evs.events[0].type == "begin_file");
+    CHECK(evs.events[0].has_id && evs.events[0].file_id == 0);
+    CHECK(evs.events[0].payload["label"] == "rel/a.wav");
     CHECK(evs.last_seq == evs.events[evs.events.size() - 1].seq);
 
-    // error-строка с id:null (аналог obs::error(line))
+    // единая модель ошибки файла: error_file -> одно событие с id и reason
+    sink.error_file(0, "boom\n");
+    evs = ev.copy_since(0);
+    auto& ev_err = evs.events[evs.events.size() - 1];
+    CHECK(ev_err.type == "error_file");
+    CHECK(ev_err.has_id && ev_err.file_id == 0);
+    CHECK(ev_err.payload["reason"] == "boom\n");
+    CHECK(st.snapshot()[0].state == "error");
+
+    // глобальная error-строка (без файла) не несёт id
     sink.error("boom\n");
     evs = ev.copy_since(0);
     auto& ev_last = evs.events[evs.events.size() - 1];
     CHECK(ev_last.type == "error");
-    CHECK(ev_last.args["line"] == "boom\n");
-    CHECK(ev_last.args["id"].is_null());
+    CHECK(!ev_last.has_id);
+    CHECK(ev_last.payload["line"] == "boom\n");
 }
 
 // --- StateMirror: tombstones и subset-reorder ---
@@ -129,13 +142,22 @@ static void test_mirror_remove_reorder() {
     // remove + запоздалые события воркера: призрака быть не должно
     st.remove(1);
     CHECK(st.size() == 2);
+    CHECK(!st.alive(1));
+    auto before = ev.copy_since(0);
+    uint64_t seq_before = before.last_seq;
     s2.prep(1);
     s2.set_tasks(1, 2);
     s2.task(1, 0, obs::TaskState::Running);
-    s2.task(1, 1, obs::TaskState::Ok);
+    s2.task(1, 0, obs::TaskState::Ok);
     s2.end_file(1, 10.0);
+    s2.error_file(1, "late\n");
     CHECK(st.size() == 2);
     for (const auto& r : st.snapshot()) CHECK(r.id != 1);
+    // зеркало и буфер согласованы: запоздалые события по удалённой строке
+    // не публикуются вообще (иначе клиент получил бы «призрачный» task/state)
+    auto after = ev.copy_since(seq_before);
+    CHECK(after.events.empty());
+    CHECK(after.last_seq == seq_before);
 
     // subset-reorder видимых строк
     CHECK(st.reorder({2, 0}) == true);
@@ -171,9 +193,11 @@ struct FakeDaemon : Daemon {
     }
     bool paused() const override { return paused_flag; }
     void set_paused(bool p) override { paused_flag = p; }
-    void add(const std::vector<std::string>& paths, bool recursive,
+    void add(const std::vector<std::string>& paths,
+             const std::string& mode, const std::string& target_dir,
              nlohmann::json& result) override {
-        (void)recursive;
+        (void)mode;
+        (void)target_dir;
         for (const auto& p : paths) {
             if (p == "/missing")
                 result["rejected"].push_back({{"path", p}, {"reason", "not found"}});
@@ -201,7 +225,9 @@ struct FakeDaemon : Daemon {
     uint64_t bulk_cancel(const std::vector<size_t>& ids) override {
         return ids.size();
     }
+    uint64_t cancel_all_active() override { return 7; }
     size_t sort_by_path() override { return 0; }
+    uint64_t clear_done() override { return 0; }
     bool reorder(const std::vector<size_t>& order) override {
         (void)order;
         return true;
@@ -233,6 +259,7 @@ static void test_rpc() {
     CHECK(d.cancelled_id == 3);
 
     auto ca = dsvc::call(d, "cancel-all", nlohmann::json::object());
+    CHECK(ca["result"]["cancelled"] == 7);
     CHECK(ca["result"]["paused"] == true);
     CHECK(d.paused_flag == true);
 
@@ -309,7 +336,7 @@ static void test_mirror_ghost_storm() {
     s.task(0, 1, obs::TaskState::Running);
     s.task(0, 2, obs::TaskState::Failed);
     s.end_file(0, 42.0);
-    s.mark_skip(0);
+    s.mark_stopped(0);
     s.mark_error(0);
     s.log("late log\n");
     s.error("late error\n");
@@ -517,9 +544,8 @@ static void test_rpc_matrix() {
     auto st_empty = dsvc::call(d, "stat", nlohmann::json::object());
     CHECK(st_empty["ok"] == true && st_empty["result"]["paths"].empty());
 
-    // add: пустой список, recursive=false
-    auto ad = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
-                                    {"recursive", false}});
+    // add: пустой список
+    auto ad = dsvc::call(d, "add", {{"paths", nlohmann::json::array()}});
     CHECK(ad["ok"] == true);
     CHECK(ad["result"]["added"].empty() && ad["result"]["rejected"].empty());
 
@@ -530,10 +556,23 @@ static void test_rpc_matrix() {
     CHECK(ad_ns["ok"] == true);
     CHECK(ad_ns["result"]["rejected"].size() == 1);
     CHECK(ad_ns["result"]["rejected"][0]["reason"] == "not a string path");
-    // add: кривой recursive игнорируется (default true), не исключение
+    // add: неизвестные ключи (recursive и т.п.) игнорируются, не исключение
     auto ad_rc = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
                                        {"recursive", "yes"}});
     CHECK(ad_rc["ok"] == true);
+    // add: строгие типы mode/target_dir
+    auto ad_mnum = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
+                                         {"mode", 123}});
+    CHECK(ad_mnum["ok"] == false && ad_mnum["code"] == "bad_args");
+    auto ad_mbad = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
+                                         {"mode", "magic"}});
+    CHECK(ad_mbad["ok"] == false && ad_mbad["code"] == "bad_args");
+    auto ad_tnum = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
+                                         {"target_dir", 42}});
+    CHECK(ad_tnum["ok"] == false && ad_tnum["code"] == "bad_args");
+    auto ad_mok = dsvc::call(d, "add", {{"paths", nlohmann::json::array()},
+                                        {"mode", "restore"}});
+    CHECK(ad_mok["ok"] == true);
 
     // stat: paths не массив -> bad_args; не-строки -> invalid
     auto st_np = dsvc::call(d, "stat", {{"paths", "nope"}});

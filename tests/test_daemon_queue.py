@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Интеграционный тест очереди демона (замысловатые сценарии).
 
-Требует: собранный llao-daemon-linux (или llao-daemon.exe под wine — не здесь),
+Требует: собранный llao-linux (или llao.exe под wine — не здесь),
 ffmpeg в PATH для генерации тестовых wav. Без ffmpeg тест пропускается (exit 0).
 
 Сценарии (все против живого HTTP-API демона на случайном порту, --no-auth):
@@ -13,21 +13,20 @@ ffmpeg в PATH для генерации тестовых wav. Без ffmpeg т�
   5. pause -> resume: те же id, без дублей
   6. restart завершённого: старая строка заменена новой, дублей нет
   7. restart активного/неизвестного -> пустой restarted; restart без ids -> bad_args
+  7.11 optimize с target_dir: результат в target_dir/<rel>, оригинал не тронут;
+       повторный optimize уже оптимизированного — всё равно пишется в цель
   8. shutdown: процесс завершается, discovery-файл удалён
 
-Запуск: python3 tests/test_daemon_queue.py [--daemon ./llao-daemon-linux]
+Запуск: python3 tests/test_daemon_queue.py [--daemon ./llao-linux]
 """
-import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import _daemon_harness as H
+
 FAILURES = []
 
 
@@ -37,105 +36,27 @@ def check(cond, msg):
         FAILURES.append(msg)
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-class Daemon:
-    def __init__(self, binary, workdir):
-        self.binary = binary
-        self.workdir = workdir
-        self.port = free_port()
-        self.disc = os.path.join(workdir, "daemon.json")
-        self.log = os.path.join(workdir, "daemon.log")
-        self.proc = None
-
-    def start(self, extra=()):
-        with open(self.log, "w") as log:
-            self.proc = subprocess.Popen(
-                [self.binary, "serve", "--port", str(self.port),
-                 "--no-auth", "--jobs", "1", *extra],
-                cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
-                env={**os.environ, "LLAO_DISCOVERY": self.disc})
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                self.get("/api/state")
-                return
-            except Exception:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("daemon exited early, see " + self.log)
-                time.sleep(0.2)
-        raise RuntimeError("daemon did not start, see " + self.log)
-
-    def _req(self, path, body=None):
-        data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
-                                     data=data,
-                                     headers={"Content-Type": "application/json"},
-                                     method="POST" if body is not None else "GET")
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return r.status, json.loads(r.read().decode())
-
-    def get(self, path):
-        return self._req(path)[1]
-
-    def rpc(self, cmd, args=None):
-        return self._req("/rpc", {"cmd": cmd, "args": args or {}})[1]
-
-    def stop(self):
-        try:
-            self.rpc("shutdown", {})
-        except Exception:
-            pass
-        try:
-            self.proc.wait(timeout=15)
-        except Exception:
-            self.proc.kill()
-        return self.proc.returncode
-
-
-def gen_wav(path, freq):
-    r = subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i",
-                        f"sine=frequency={freq}:duration=1",
-                        "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", path],
-                       capture_output=True)
-    if r.returncode != 0 or not os.path.exists(path):
-        raise RuntimeError("ffmpeg failed")
-
-
-def wait_state(d, pred, timeout=120, interval=3):
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        last = d.get("/api/state")
-        if pred(last):
-            return last
-        time.sleep(interval)
-    return last
-
-
 def main():
-    binary = sys.argv[sys.argv.index("--daemon") + 1] \
-        if "--daemon" in sys.argv else os.path.join(ROOT, "llao-daemon-linux")
+    binary = H.resolve_daemon(sys.argv)
     if not os.path.exists(binary):
         print(f"SKIP: нет бинарника {binary}")
         return 0
-    if shutil.which("ffmpeg") is None:
+    if not H.ffmpeg_available():
         print("SKIP: нет ffmpeg")
         return 0
 
     workdir = tempfile.mkdtemp(prefix="llao-qtest-")
+    # Параллелизм: движок параллелит варианты кодеков одного файла, поэтому
+    # на серийном jobs=1 тест тянется минуты на файл и не укладывается в лимиты.
+    # jobs=2.0 — множитель ядер (автоопределение числа воркеров).
     try:
         files = []
         for i, freq in enumerate((440, 880, 330)):
             p = os.path.join(workdir, f"t{i}.wav")
-            gen_wav(p, freq)
+            H.gen_wav(p, freq)
             files.append(p)
 
-        d = Daemon(binary, workdir)
+        d = H.Daemon(binary, workdir, jobs=2.0)
         d.start()
 
         # 1. add трёх файлов
@@ -153,12 +74,15 @@ def main():
 
         # 3. remove running-файла: призраков нет, замены нет
         check(d.rpc("remove", {"id": 2})["result"]["removed"] is True, "remove 2")
-        for _ in range(4):
-            time.sleep(3)
+        deadline = time.time() + 24
+        while time.time() < deadline:
+            time.sleep(1)
             st = d.get("/api/state")
             ids = [x["id"] for x in st["rows"]]
             check(2 not in ids, f"no ghost row 2, got {ids}")
             check(len(ids) == len(set(ids)), f"no dupes: {ids}")
+            if 2 not in ids:
+                break
         check(not os.path.exists(files[2] + ".tak")
               and not os.path.exists(os.path.splitext(files[2])[0] + ".tak"),
               "removed file not replaced")
@@ -178,8 +102,9 @@ def main():
         check(sorted(ids) == [0, 1], f"same ids after resume: {ids}")
 
         # ждём завершение хотя бы одного файла для restart-теста
-        st = wait_state(d, lambda s: any(
-            x["state"] in ("ok", "stopped", "error") for x in s["rows"]), timeout=180)
+        # (прогон вариантов медленный: на quiet-машинах до ~150с на файл)
+        st = H.wait_state(d, lambda s: any(
+            x["state"] in ("ok", "stopped", "error") for x in s["rows"]), timeout=360)
         done = [x for x in st["rows"] if x["state"] in ("ok", "stopped", "error")]
         check(bool(done), f"at least one done file: {st['counters']}")
 
@@ -188,11 +113,18 @@ def main():
         # queued/prep — исходник на месте, не заменён), затем restart. Это
         # ровно пользовательский сценарий «остановил -> запустил выделенные».
         rst_wav = os.path.join(workdir, "restart_target.wav")
-        gen_wav(rst_wav, 640)
+        H.gen_wav(rst_wav, 640)
         r = d.rpc("add", {"paths": [rst_wav]})
         new_id = r["result"]["added"][0]["id"]
         d.rpc("cancel-file", {"id": new_id})
-        time.sleep(1)
+        # ждём, пока строка перестанет быть активной (cancel завершил транзакцию)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            rows = d.get("/api/state")["rows"]
+            row = next((x for x in rows if x["id"] == new_id), None)
+            if row is None or row["state"] not in ("queued", "prep", "running"):
+                break
+            time.sleep(0.5)
         r = d.rpc("restart", {"ids": [new_id]})
         check(r["ok"] and r["result"]["restarted"] == [new_id],
               f"restart after cancel {new_id}: {r}")
@@ -241,7 +173,7 @@ def main():
         # 7.5. параллельные add одного пути: ровно одно добавление, без дублей
         import concurrent.futures as _fut
         race_wav = os.path.join(workdir, "race.wav")
-        gen_wav(race_wav, 660)
+        H.gen_wav(race_wav, 660)
 
         def _add_once():
             return d.rpc("add", {"paths": [race_wav]})
@@ -258,7 +190,7 @@ def main():
         # и запустить файл (регрессия: раньше снималась — файл добавлялся в
         # «queued», не стартовал, на UI выглядело как «удаление из списка»).
         pw = os.path.join(workdir, "pause_restart.wav")
-        gen_wav(pw, 700)
+        H.gen_wav(pw, 700)
         r = d.rpc("add", {"paths": [pw]})
         pid = r["result"]["added"][0]["id"]
         d.rpc("bulk-cancel", {"ids": [pid]})   # «остановить всё»
@@ -266,7 +198,7 @@ def main():
         r = d.rpc("restart", {"ids": [pid]})
         check(r["ok"] and r["result"]["restarted"] == [pid],
               f"restart while paused: {r}")
-        st = wait_state(d, lambda s: (not s["paused"]) and any(
+        st = H.wait_state(d, lambda s: (not s["paused"]) and any(
             x["state"] in ("prep", "running") for x in s["rows"]),
             timeout=30, interval=1)
         check(st is not None and not st["paused"],
@@ -274,7 +206,7 @@ def main():
 
         # 7.7. bulk-cancel / bulk-remove: один RPC, корректные счётчики
         bw = os.path.join(workdir, "bulk_target.wav")
-        gen_wav(bw, 500)
+        H.gen_wav(bw, 500)
         r = d.rpc("add", {"paths": [bw]})
         bid = r["result"]["added"][0]["id"]
         r = d.rpc("bulk-cancel", {"ids": [bid]})
@@ -291,8 +223,8 @@ def main():
         # 7.8. sort: стабильная сортировка по полному пути; id сохраняются
         a_path = os.path.join(workdir, "zd.wav")
         b_path = os.path.join(workdir, "aa.wav")
-        gen_wav(b_path, 300)
-        gen_wav(a_path, 900)
+        H.gen_wav(b_path, 300)
+        H.gen_wav(a_path, 900)
         r = d.rpc("add", {"paths": [b_path, a_path]})
         ids = [x["id"] for x in r["result"]["added"]]
         r = d.rpc("sort", {})
@@ -304,7 +236,7 @@ def main():
         # 7.9. дедуп движка: повторное добавление папки с активным файлом
         dup_dir = os.path.join(workdir, "dupdir")
         os.makedirs(dup_dir, exist_ok=True)
-        gen_wav(os.path.join(dup_dir, "inner.wav"), 250)
+        H.gen_wav(os.path.join(dup_dir, "inner.wav"), 250)
         r1 = d.rpc("add", {"paths": [dup_dir]})
         check(len(r1["result"]["added"]) == 1, f"first add dir: {r1}")
         d.rpc("pause", {})
@@ -321,8 +253,8 @@ def main():
         # «зомби»-строку, которая раньше сбивала восстановление позиции.
         zpath = os.path.join(workdir, "pos_z.wav")
         apath2 = os.path.join(workdir, "pos_a.wav")
-        gen_wav(zpath, 311)
-        gen_wav(apath2, 322)
+        H.gen_wav(zpath, 311)
+        H.gen_wav(apath2, 322)
         r = d.rpc("add", {"paths": [zpath, apath2]})
         zid = r["result"]["added"][0]["id"]
         aid2 = r["result"]["added"][1]["id"]
@@ -334,11 +266,17 @@ def main():
         check(pos_z == 1, f"pos_z на позиции 1: {pos_z}")
         for cycle in range(3):
             d.rpc("cancel-file", {"id": zid})
-            time.sleep(1)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                rows = d.get("/api/state")["rows"]
+                row = next((x for x in rows if x["id"] == zid), None)
+                if row is None or row["state"] not in ("queued", "prep", "running"):
+                    break
+                time.sleep(0.5)
             r = d.rpc("restart", {"ids": [zid]})
             check(r["ok"] and r["result"]["restarted"] == [zid],
                   f"restart (цикл {cycle}): {r}")
-            st = wait_state(d, lambda s: any(
+            st = H.wait_state(d, lambda s: any(
                 x["label"] == os.path.basename(zpath) and x["id"] != zid
                 for x in s["rows"]), timeout=30, interval=1)
             check(st is not None, f"после restart (цикл {cycle}) новая строка на месте")
@@ -348,6 +286,65 @@ def main():
                                if x["label"] == os.path.basename(zpath)][0] == pos_z,
                   f"restart сохраняет позицию (цикл {cycle}): было {pos_z}")
             zid = newrows[0]["id"]
+
+        # 7.11. optimize с целевой папкой: результат пишется в target_dir/<rel>,
+        # оригинал не трогается (регрессия: раньше target_dir игнорировался для
+        # optimize, и файл заменялся на месте).
+        src_dir = os.path.join(workdir, "tg_src")
+        sub_dir = os.path.join(src_dir, "sub")
+        tgt_dir = os.path.join(workdir, "tg_out")
+        os.makedirs(sub_dir)
+        os.makedirs(tgt_dir)
+        song = os.path.join(sub_dir, "song.wav")
+        H.gen_wav(song, 515)
+        orig_size = os.path.getsize(song)
+        r = d.rpc("add", {"paths": [src_dir], "mode": "optimize",
+                          "target_dir": tgt_dir})
+        check(len(r["result"]["added"]) == 1, f"add tg optimize: {r}")
+        st = H.wait_state(d, lambda s: any(
+            x["label"].endswith("song.wav") and x["state"] in ("ok", "stopped", "error")
+            for x in s["rows"]), timeout=360)
+        check(st is not None, "tg optimize файл завершён")
+        row = [x for x in st["rows"] if x["label"].endswith("song.wav")]
+        row = row[-1]
+        check(row["state"] == "ok", f"tg optimize state ok: {row.get('state')}")
+        check(row.get("out_path", "").startswith(tgt_dir),
+              f"tg out_path внутри target_dir: {row.get('out_path')}")
+        produced = []
+        for root, _dirs, fnames in os.walk(tgt_dir):
+            for fn in fnames:
+                produced.append(os.path.join(root, fn))
+        exts = tuple("." + e for e in H.format_extensions())
+        check(any(fn.lower().endswith(exts)
+                  for _, fn in [os.path.split(p) for p in produced]),
+              f"target получил оптимизированный файл: {produced}")
+        check(os.path.exists(song) and os.path.getsize(song) == orig_size,
+              "оригинал на месте и не заменён")
+        check([f for f in os.listdir(sub_dir) if f != "song.wav"] == [],
+              f"рядом с оригиналом нет новых файлов: {os.listdir(sub_dir)}")
+
+        # 7.11b. повторный optimize уже оптимизированного файла в ту же цель:
+        # кандидат вряд ли меньше исходника, но в цель всё равно пишется,
+        # исходник не трогается (регрессия «всегда писать в цель»).
+        if produced:
+            src2 = produced[0]
+            base2 = os.path.basename(src2)
+            before_src2 = os.path.getsize(src2)
+            r = d.rpc("add", {"paths": [src2], "mode": "optimize",
+                              "target_dir": tgt_dir})
+            check(len(r["result"]["added"]) == 1, f"add tg re-opt: {r}")
+            st = H.wait_state(d, lambda s: any(
+                x["label"].endswith(base2)
+                and x["state"] in ("ok", "stopped", "error") for x in s["rows"]),
+                timeout=360)
+            check(st is not None, "tg re-opt файл завершён")
+            row2 = [x for x in st["rows"] if x["label"].endswith(base2)]
+            row2 = row2[-1]
+            check(row2["state"] == "ok", f"tg re-opt state ok: {row2.get('state')}")
+            check(row2.get("out_path", "").startswith(tgt_dir),
+                  f"tg re-opt доставлен в target: {row2.get('out_path')}")
+            check(os.path.exists(src2) and os.path.getsize(src2) == before_src2,
+                  "re-opt исходник не тронут")
 
         # 8. shutdown: процесс вышел, discovery удалён
         rc = d.stop()

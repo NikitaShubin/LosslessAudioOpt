@@ -1,0 +1,245 @@
+{"id": 0, "label": "t0.wav", "seq": 1, "type": "begin_file"}
+{"id": 0, "mode": "optimize", "seq": 2, "target_dir": "", "type": "job_meta"}
+{"id": 1, "label": "t1.wav", "seq": 3, "type": "begin_file"}
+{"id": 1, "mode": "optimize", "seq": 4, "target_dir": "", "type": "job_meta"}
+{"id": 0, "label": "t0.wav", "seq": 5, "type": "added"}
+{"id": 1, "label": "t1.wav", "seq": 6, "type": "added"}
+{"id": 0, "seq": 7, "type": "prep"}
+{"id": 1, "seq": 8, "type": "prep"}
+{"order": [1, 0], "seq": 9, "type": "reordered"}
+{"id": 1, "seq": 10, "task_infos": [{"fmt": "tta", "note": "стандартное сжатие ffmpeg/tta", "params": [], "variant": "default"}, {"fmt": "la", "note": "быстрее, чуть хуже сжатие (seek включён)", "params": [], "variant": "default"}, {"fmt": "la", "note": "без таблицы поиска — чуть меньше", "params": ["-noseek"], "variant": "noseek"}, {"fmt": "la", "note": "максимальное сжатие (медленно)", "params": ["-high"], "variant": "high"}, {"fmt": "la", "note": "макс. сжатие + без таблицы поиска", "params": ["-high", "-noseek"], "variant": "high_noseek"}, {"fmt": "wavpack", "note": "high, без доп. обработки", "params": ["-h", "-x0"], "variant": "h_x0"}, {"fmt": "wavpack", "note": "", "params": ["-h", "-x1"], "variant": "h_x1"}, {"fmt": "wavpack", "note": "", "params": ["-h", "-x2"], "variant": "h_x2"}, {"fmt": "wavpack", "note": "", "params": ["-h", "-x3"], "variant": "h_x3"}, {"fmt": "wavpack", "note": "очень медленно (генерация фильтров)", "params": ["-h", "-x4"], "variant": "h_x4"}, {"fmt": "wavpack", "note": "очень медленно", "params": ["-h", "-x5"], "variant": "h_x5"}, {"fmt": "wavpack", "note": "очень медленно", "params": ["-h", "-x6"], "variant": "h_x6"}, {"fmt": "wavpack", "note": "принудительно mid/side joint-stereo", "params": ["-h", "-x6", "-j1"], "variant": "h_x6_j1"}, {"fmt": "wavpack", "note": "блок 131072", "params": ["-h", "-x6", "--blocksize=131072"], "variant": "h_x6_bs"}, {"fmt": "wavpack", "note": "mid/side + блок 131072", "params": ["-h", "-x6", "-j1", "--blocksize=131072"], "variant": "h_x6_j1_bs"}, {"fmt": "wavpack", "note": "very high, без доп. обработки", "params": ["-hh", "-x0"], "variant": "hh_x0"}, {"fmt": "wavpack", "note": "", "params": ["-hh", "-x1"], "variant": "hh_x1"}, {"fmt": "wavpack", "note": "", "params": ["-hh", "-x2"], "variant": "hh_x2"}, {"fmt": "wavpack", "note": "", "params": ["-hh", "-x3"], "variant": "hh_x3"}, {"fmt": "wavpack", "note": "очень медленно", "params": ["-hh", "-x4"], "variant": "hh_x4"}, {"fmt": "wavpack", "note": "очень медленно", "params": ["-hh", "-x5"], "variant": "hh_x5"}, {"fmt": "wavpack", "note": "mid/side joint-stereo", "params": ["-hh", "-x5", "-j1"], "variant": "hh_x5_j1"}, {"fmt": "wavpack", "note": "", "params": ["-hh", "-x5", "--blocksize=131072"], "variant": "hh_x5_bs"}, {"fmt": "wavpack", "note": "", "params": ["-hh", "-x5", "-j1", "--blocksize=131072"], "variant": "hh_x5_j1_bs"}, {"fmt": "wavpack", "note": "очень медленно", "params": ["-hh", "-x6"], "variant": "hh_x6"}, {"fmt": "wavpack", "note": "принудительно mid/side joint-stereo", "params": ["-hh", "-x6", "-j1"], "variant": "hh_x6_j1"}, {"fmt": "wavpack", "note": "блок 131072", "params": ["-hh", "-x6", "--blocksize=131072"], "variant": "hh_x6_bs"}, {"fmt": "wavpack", "note": "mid/side + блок 131072", "params": ["-hh", "-x6", "-j1", "--blocksize=131072"], "variant": "hh_x6_j1_bs"}, {"fmt": "optimfrog", "note": "быстрейший режим", "params": ["0"], "variant": "p0"}, {"fmt": "optimfrog", "note": "", "params": ["1"], "variant": "p1"}, {"fmt": "optimfrog", "note": "режим по умолчанию", "params": ["2"], "variant": "p2"}, {"fmt": "optimfrog", "note": "", "params": ["3"], "variant": "p3"}, {"fmt": "optimfrog", "note": "", "params": ["4"], "variant": "p4"}, {"fmt": "optimfrog", "note": "", "params": ["5"], "variant": "p5"}, {"fmt": "optimfrog", "note": "", "params": ["6"], "variant": "p6"}, {"fmt": "optimfrog", "note": "", "params": ["7"], "variant": "p7"}, {"fmt": "optimfrog", "note": "", "params": ["8"], "variant": "p8"}, {"fmt": "optimfrog", "note": "", "params": ["9"], "variant": "p9"}, {"fmt": "optimfrog", "note": "ultranew-light", "params": ["10"], "variant": "p10"}, {"fmt": "optimfrog", "note": "максимальное сжатие (очень медленно)", "params": ["max"], "variant": "max"}, {"fmt": "optimfrog", "note": "пресет 9 + адаптивное кодирование", "params": ["9", "--acm"], "variant": "p9_acm"}, {"fmt": "optimfrog", "note": "пресет 10 + адаптивное кодирование", "params": ["10", "--acm"], "variant": "p10_acm"}, {"fmt": "optimfrog", "note": "пресет 10 + оптимизация best", "params": ["10", "--optimize", "best"], "variant": "p10_optbest"}, {"fmt": "optimfrog", "note": "промежуточный между 9 и max", "params": ["9", "--acm", "--optimize", "best"], "variant": "p9_acm_optbest"}, {"fmt": "monkeys_audio", "note": "fast (на шумоподобном контенте может оказаться лучшим)", "params": ["-c1000"], "variant": "c1000"}, {"fmt": "monkeys_audio", "note": "normal", "params": ["-c2000"], "variant": "c2000"}, {"fmt": "monkeys_audio", "note": "high", "params": ["-c3000"], "variant": "c3000"}, {"fmt": "monkeys_audio", "note": "extra high", "params": ["-c4000"], "variant": "c4000"}, {"fmt": "monkeys_audio", "note": "insane (максимальное сжатие)", "params": ["-c5000"], "variant": "c5000"}, {"fmt": "tak", "note": "fast", "params": ["-p0"], "variant": "p0"}, {"fmt": "tak", "note": "turbo", "params": ["-p1"], "variant": "p1"}, {"fmt": "tak", "note": "normal", "params": ["-p2"], "variant": "p2"}, {"fmt": "tak", "note": "нормальный + Extra evaluation", "params": ["-p2e"], "variant": "p2e"}, {"fmt": "tak", "note": "нормальный + Max evaluation", "params": ["-p2m"], "variant": "p2m"}, {"fmt": "tak", "note": "high", "params": ["-p3"], "variant": "p3"}, {"fmt": "tak", "note": "high + Max evaluation", "params": ["-p3m"], "variant": "p3m"}, {"fmt": "tak", "note": "max (максимальное сжатие)", "params": ["-p4"], "variant": "p4"}, {"fmt": "tak", "note": "max + Max evaluation (== pMax, самое сильное)", "params": ["-p4m"], "variant": "p4m"}, {"fmt": "flac", "note": "быстро, наименьшее сжатие", "params": ["-0"], "variant": "0"}, {"fmt": "flac", "note": "", "params": ["-1"], "variant": "1"}, {"fmt": "flac", "note": "", "params": ["-2"], "variant": "2"}, {"fmt": "flac", "note": "", "params": ["-3"], "variant": "3"}, {"fmt": "flac", "note": "", "params": ["-4"], "variant": "4"}, {"fmt": "flac", "note": "", "params": ["-5"], "variant": "5"}, {"fmt": "flac", "note": "", "params": ["-6"], "variant": "6"}, {"fmt": "flac", "note": "", "params": ["-7"], "variant": "7"}, {"fmt": "flac", "note": "максимальное сжатие", "params": ["-8"], "variant": "8"}, {"fmt": "flac", "note": "точный поиск квантования LP-коэффициентов", "params": ["-8", "-p"], "variant": "8_p"}, {"fmt": "flac", "note": "другая аподизация", "params": ["-8", "-A", "partial_tukey(2)"], "variant": "8_ptukey"}, {"fmt": "flac", "note": "другая аподизация", "params": ["-8", "-A", "punchout_tukey(3)"], "variant": "8_punchout"}, {"fmt": "flac", "note": "другая аподизация", "params": ["-8", "-A", "kaiser_bessel"], "variant": "8_kaiser"}, {"fmt": "flac", "note": "другая аподизация", "params": ["-8", "-A", "hann"], "variant": "8_hann"}, {"fmt": "flac", "note": "LPC до 24-го порядка (не-Subset)", "params": ["-8", "--lax", "-l", "24"], "variant": "8_l24"}, {"fmt": "flac", "note": "LPC до 32-го порядка (не-Subset)", "params": ["-8", "--lax", "-l", "32"], "variant": "8_l32"}, {"fmt": "flac", "note": "LPC 24 + точный поиск (не-Subset)", "params": ["-8", "--lax", "-l", "24", "-p"], "variant": "8_l24_p"}, {"fmt": "alac", "note": "единственный режим (без уровней)", "params": [], "variant": "default"}], "total": 76, "type": "set_tasks"}
+{"id": 1, "idx": 0, "seq": 11, "state": "running", "type": "task"}
+{"id": 1, "seq": 12, "state": "running", "type": "state"}
+{"id": 1, "idx": 0, "seq": 13, "state": "ok", "type": "task"}
+{"id": 1, "idx": 1, "seq": 14, "state": "running", "type": "task"}
+{"id": 1, "seq": 15, "state": "running", "type": "state"}
+{"id": 1, "idx": 1, "seq": 16, "state": "ok", "type": "task"}
+{"id": 1, "idx": 2, "seq": 17, "state": "running", "type": "task"}
+{"id": 1, "seq": 18, "state": "running", "type": "state"}
+{"id": 1, "idx": 2, "seq": 19, "state": "ok", "type": "task"}
+{"id": 1, "idx": 3, "seq": 20, "state": "running", "type": "task"}
+{"id": 1, "seq": 21, "state": "running", "type": "state"}
+{"id": 1, "idx": 3, "seq": 22, "state": "ok", "type": "task"}
+{"id": 1, "idx": 4, "seq": 23, "state": "running", "type": "task"}
+{"id": 1, "seq": 24, "state": "running", "type": "state"}
+{"id": 1, "idx": 4, "seq": 25, "state": "ok", "type": "task"}
+{"id": 1, "idx": 5, "seq": 26, "state": "running", "type": "task"}
+{"id": 1, "seq": 27, "state": "running", "type": "state"}
+{"id": 1, "idx": 5, "seq": 28, "state": "ok", "type": "task"}
+{"id": 1, "idx": 6, "seq": 29, "state": "running", "type": "task"}
+{"id": 1, "seq": 30, "state": "running", "type": "state"}
+{"id": 1, "idx": 6, "seq": 31, "state": "ok", "type": "task"}
+{"id": 1, "idx": 7, "seq": 32, "state": "running", "type": "task"}
+{"id": 1, "seq": 33, "state": "running", "type": "state"}
+{"id": 1, "idx": 7, "seq": 34, "state": "ok", "type": "task"}
+{"id": 1, "idx": 8, "seq": 35, "state": "running", "type": "task"}
+{"id": 1, "seq": 36, "state": "running", "type": "state"}
+{"id": 1, "idx": 8, "seq": 37, "state": "ok", "type": "task"}
+{"id": 1, "idx": 9, "seq": 38, "state": "running", "type": "task"}
+{"id": 1, "seq": 39, "state": "running", "type": "state"}
+{"id": 1, "idx": 9, "seq": 40, "state": "ok", "type": "task"}
+{"id": 1, "idx": 10, "seq": 41, "state": "running", "type": "task"}
+{"id": 1, "seq": 42, "state": "running", "type": "state"}
+{"id": 1, "idx": 10, "seq": 43, "state": "ok", "type": "task"}
+{"id": 1, "idx": 11, "seq": 44, "state": "running", "type": "task"}
+{"id": 1, "seq": 45, "state": "running", "type": "state"}
+{"id": 1, "idx": 11, "seq": 46, "state": "ok", "type": "task"}
+{"id": 1, "idx": 12, "seq": 47, "state": "running", "type": "task"}
+{"id": 1, "seq": 48, "state": "running", "type": "state"}
+{"id": 1, "idx": 12, "seq": 49, "state": "ok", "type": "task"}
+{"id": 1, "idx": 13, "seq": 50, "state": "running", "type": "task"}
+{"id": 1, "seq": 51, "state": "running", "type": "state"}
+{"id": 1, "idx": 13, "seq": 52, "state": "ok", "type": "task"}
+{"id": 1, "idx": 14, "seq": 53, "state": "running", "type": "task"}
+{"id": 1, "seq": 54, "state": "running", "type": "state"}
+{"id": 1, "idx": 14, "seq": 55, "state": "ok", "type": "task"}
+{"id": 1, "idx": 15, "seq": 56, "state": "running", "type": "task"}
+{"id": 1, "seq": 57, "state": "running", "type": "state"}
+{"id": 1, "idx": 15, "seq": 58, "state": "ok", "type": "task"}
+{"id": 1, "idx": 16, "seq": 59, "state": "running", "type": "task"}
+{"id": 1, "seq": 60, "state": "running", "type": "state"}
+{"id": 1, "idx": 16, "seq": 61, "state": "ok", "type": "task"}
+{"id": 1, "idx": 17, "seq": 62, "state": "running", "type": "task"}
+{"id": 1, "seq": 63, "state": "running", "type": "state"}
+{"id": 1, "idx": 17, "seq": 64, "state": "ok", "type": "task"}
+{"id": 1, "idx": 18, "seq": 65, "state": "running", "type": "task"}
+{"id": 1, "seq": 66, "state": "running", "type": "state"}
+{"id": 1, "idx": 18, "seq": 67, "state": "ok", "type": "task"}
+{"id": 1, "idx": 19, "seq": 68, "state": "running", "type": "task"}
+{"id": 1, "seq": 69, "state": "running", "type": "state"}
+{"id": 1, "idx": 19, "seq": 70, "state": "ok", "type": "task"}
+{"id": 1, "idx": 20, "seq": 71, "state": "running", "type": "task"}
+{"id": 1, "seq": 72, "state": "running", "type": "state"}
+{"id": 1, "idx": 20, "seq": 73, "state": "ok", "type": "task"}
+{"id": 1, "idx": 21, "seq": 74, "state": "running", "type": "task"}
+{"id": 1, "seq": 75, "state": "running", "type": "state"}
+{"id": 1, "idx": 21, "seq": 76, "state": "ok", "type": "task"}
+{"id": 1, "idx": 22, "seq": 77, "state": "running", "type": "task"}
+{"id": 1, "seq": 78, "state": "running", "type": "state"}
+{"id": 1, "idx": 22, "seq": 79, "state": "ok", "type": "task"}
+{"id": 1, "idx": 23, "seq": 80, "state": "running", "type": "task"}
+{"id": 1, "seq": 81, "state": "running", "type": "state"}
+{"id": 1, "idx": 23, "seq": 82, "state": "ok", "type": "task"}
+{"id": 1, "idx": 24, "seq": 83, "state": "running", "type": "task"}
+{"id": 1, "seq": 84, "state": "running", "type": "state"}
+{"id": 1, "idx": 24, "seq": 85, "state": "ok", "type": "task"}
+{"id": 1, "idx": 25, "seq": 86, "state": "running", "type": "task"}
+{"id": 1, "seq": 87, "state": "running", "type": "state"}
+{"id": 1, "idx": 25, "seq": 88, "state": "ok", "type": "task"}
+{"id": 1, "idx": 26, "seq": 89, "state": "running", "type": "task"}
+{"id": 1, "seq": 90, "state": "running", "type": "state"}
+{"id": 1, "idx": 26, "seq": 91, "state": "ok", "type": "task"}
+{"id": 1, "idx": 27, "seq": 92, "state": "running", "type": "task"}
+{"id": 1, "seq": 93, "state": "running", "type": "state"}
+{"id": 1, "idx": 27, "seq": 94, "state": "ok", "type": "task"}
+{"id": 1, "idx": 28, "seq": 95, "state": "running", "type": "task"}
+{"id": 1, "seq": 96, "state": "running", "type": "state"}
+{"id": 1, "idx": 28, "seq": 97, "state": "ok", "type": "task"}
+{"id": 1, "idx": 29, "seq": 98, "state": "running", "type": "task"}
+{"id": 1, "seq": 99, "state": "running", "type": "state"}
+{"id": 1, "idx": 29, "seq": 100, "state": "ok", "type": "task"}
+{"id": 1, "idx": 30, "seq": 101, "state": "running", "type": "task"}
+{"id": 1, "seq": 102, "state": "running", "type": "state"}
+{"id": 1, "idx": 30, "seq": 103, "state": "ok", "type": "task"}
+{"id": 1, "idx": 31, "seq": 104, "state": "running", "type": "task"}
+{"id": 1, "seq": 105, "state": "running", "type": "state"}
+{"id": 1, "idx": 31, "seq": 106, "state": "ok", "type": "task"}
+{"id": 1, "idx": 32, "seq": 107, "state": "running", "type": "task"}
+{"id": 1, "seq": 108, "state": "running", "type": "state"}
+{"id": 1, "idx": 32, "seq": 109, "state": "ok", "type": "task"}
+{"id": 1, "idx": 33, "seq": 110, "state": "running", "type": "task"}
+{"id": 1, "seq": 111, "state": "running", "type": "state"}
+{"id": 1, "idx": 33, "seq": 112, "state": "ok", "type": "task"}
+{"id": 1, "idx": 34, "seq": 113, "state": "running", "type": "task"}
+{"id": 1, "seq": 114, "state": "running", "type": "state"}
+{"id": 1, "idx": 34, "seq": 115, "state": "ok", "type": "task"}
+{"id": 1, "idx": 35, "seq": 116, "state": "running", "type": "task"}
+{"id": 1, "seq": 117, "state": "running", "type": "state"}
+{"id": 1, "idx": 35, "seq": 118, "state": "ok", "type": "task"}
+{"id": 1, "idx": 36, "seq": 119, "state": "running", "type": "task"}
+{"id": 1, "seq": 120, "state": "running", "type": "state"}
+{"id": 1, "idx": 36, "seq": 121, "state": "ok", "type": "task"}
+{"id": 1, "idx": 37, "seq": 122, "state": "running", "type": "task"}
+{"id": 1, "seq": 123, "state": "running", "type": "state"}
+{"id": 1, "idx": 37, "seq": 124, "state": "ok", "type": "task"}
+{"id": 1, "idx": 38, "seq": 125, "state": "running", "type": "task"}
+{"id": 1, "seq": 126, "state": "running", "type": "state"}
+{"id": 1, "idx": 38, "seq": 127, "state": "ok", "type": "task"}
+{"id": 1, "idx": 39, "seq": 128, "state": "running", "type": "task"}
+{"id": 1, "seq": 129, "state": "running", "type": "state"}
+{"id": 1, "idx": 39, "seq": 130, "state": "ok", "type": "task"}
+{"id": 1, "idx": 40, "seq": 131, "state": "running", "type": "task"}
+{"id": 1, "seq": 132, "state": "running", "type": "state"}
+{"id": 1, "idx": 40, "seq": 133, "state": "ok", "type": "task"}
+{"id": 1, "idx": 41, "seq": 134, "state": "running", "type": "task"}
+{"id": 1, "seq": 135, "state": "running", "type": "state"}
+{"id": 1, "idx": 41, "seq": 136, "state": "ok", "type": "task"}
+{"id": 1, "idx": 42, "seq": 137, "state": "running", "type": "task"}
+{"id": 1, "seq": 138, "state": "running", "type": "state"}
+{"id": 1, "idx": 42, "seq": 139, "state": "ok", "type": "task"}
+{"id": 1, "idx": 43, "seq": 140, "state": "running", "type": "task"}
+{"id": 1, "seq": 141, "state": "running", "type": "state"}
+{"id": 1, "idx": 43, "seq": 142, "state": "ok", "type": "task"}
+{"id": 1, "idx": 44, "seq": 143, "state": "running", "type": "task"}
+{"id": 1, "seq": 144, "state": "running", "type": "state"}
+{"id": 1, "idx": 44, "seq": 145, "state": "ok", "type": "task"}
+{"id": 1, "idx": 45, "seq": 146, "state": "running", "type": "task"}
+{"id": 1, "seq": 147, "state": "running", "type": "state"}
+{"id": 1, "idx": 45, "seq": 148, "state": "ok", "type": "task"}
+{"id": 1, "idx": 46, "seq": 149, "state": "running", "type": "task"}
+{"id": 1, "seq": 150, "state": "running", "type": "state"}
+{"id": 1, "idx": 46, "seq": 151, "state": "ok", "type": "task"}
+{"id": 1, "idx": 47, "seq": 152, "state": "running", "type": "task"}
+{"id": 1, "seq": 153, "state": "running", "type": "state"}
+{"id": 1, "idx": 47, "seq": 154, "state": "ok", "type": "task"}
+{"id": 1, "idx": 48, "seq": 155, "state": "running", "type": "task"}
+{"id": 1, "seq": 156, "state": "running", "type": "state"}
+{"id": 1, "idx": 48, "seq": 157, "state": "ok", "type": "task"}
+{"id": 1, "idx": 49, "seq": 158, "state": "running", "type": "task"}
+{"id": 1, "seq": 159, "state": "running", "type": "state"}
+{"id": 1, "idx": 49, "seq": 160, "state": "ok", "type": "task"}
+{"id": 1, "idx": 50, "seq": 161, "state": "running", "type": "task"}
+{"id": 1, "seq": 162, "state": "running", "type": "state"}
+{"id": 1, "idx": 50, "seq": 163, "state": "ok", "type": "task"}
+{"id": 1, "idx": 51, "seq": 164, "state": "running", "type": "task"}
+{"id": 1, "seq": 165, "state": "running", "type": "state"}
+{"id": 1, "idx": 51, "seq": 166, "state": "ok", "type": "task"}
+{"id": 1, "idx": 52, "seq": 167, "state": "running", "type": "task"}
+{"id": 1, "seq": 168, "state": "running", "type": "state"}
+{"id": 1, "idx": 52, "seq": 169, "state": "ok", "type": "task"}
+{"id": 1, "idx": 53, "seq": 170, "state": "running", "type": "task"}
+{"id": 1, "seq": 171, "state": "running", "type": "state"}
+{"id": 1, "idx": 53, "seq": 172, "state": "ok", "type": "task"}
+{"id": 1, "idx": 54, "seq": 173, "state": "running", "type": "task"}
+{"id": 1, "seq": 174, "state": "running", "type": "state"}
+{"id": 1, "idx": 54, "seq": 175, "state": "ok", "type": "task"}
+{"id": 1, "idx": 55, "seq": 176, "state": "running", "type": "task"}
+{"id": 1, "seq": 177, "state": "running", "type": "state"}
+{"id": 1, "idx": 55, "seq": 178, "state": "ok", "type": "task"}
+{"id": 1, "idx": 56, "seq": 179, "state": "running", "type": "task"}
+{"id": 1, "seq": 180, "state": "running", "type": "state"}
+{"id": 1, "idx": 56, "seq": 181, "state": "ok", "type": "task"}
+{"id": 1, "idx": 57, "seq": 182, "state": "running", "type": "task"}
+{"id": 1, "seq": 183, "state": "running", "type": "state"}
+{"id": 1, "idx": 57, "seq": 184, "state": "ok", "type": "task"}
+{"id": 1, "idx": 58, "seq": 185, "state": "running", "type": "task"}
+{"id": 1, "seq": 186, "state": "running", "type": "state"}
+{"id": 1, "idx": 58, "seq": 187, "state": "ok", "type": "task"}
+{"id": 1, "idx": 59, "seq": 188, "state": "running", "type": "task"}
+{"id": 1, "seq": 189, "state": "running", "type": "state"}
+{"id": 1, "idx": 59, "seq": 190, "state": "ok", "type": "task"}
+{"id": 1, "idx": 60, "seq": 191, "state": "running", "type": "task"}
+{"id": 1, "seq": 192, "state": "running", "type": "state"}
+{"id": 1, "idx": 60, "seq": 193, "state": "ok", "type": "task"}
+{"id": 1, "idx": 61, "seq": 194, "state": "running", "type": "task"}
+{"id": 1, "seq": 195, "state": "running", "type": "state"}
+{"id": 1, "idx": 61, "seq": 196, "state": "ok", "type": "task"}
+{"id": 1, "idx": 62, "seq": 197, "state": "running", "type": "task"}
+{"id": 1, "seq": 198, "state": "running", "type": "state"}
+{"id": 1, "idx": 62, "seq": 199, "state": "ok", "type": "task"}
+{"id": 1, "idx": 63, "seq": 200, "state": "running", "type": "task"}
+{"id": 1, "seq": 201, "state": "running", "type": "state"}
+{"id": 1, "idx": 63, "seq": 202, "state": "ok", "type": "task"}
+{"id": 1, "idx": 64, "seq": 203, "state": "running", "type": "task"}
+{"id": 1, "seq": 204, "state": "running", "type": "state"}
+{"id": 1, "idx": 64, "seq": 205, "state": "ok", "type": "task"}
+{"id": 1, "idx": 65, "seq": 206, "state": "running", "type": "task"}
+{"id": 1, "seq": 207, "state": "running", "type": "state"}
+{"id": 1, "idx": 65, "seq": 208, "state": "ok", "type": "task"}
+{"id": 1, "idx": 66, "seq": 209, "state": "running", "type": "task"}
+{"id": 1, "seq": 210, "state": "running", "type": "state"}
+{"id": 1, "idx": 66, "seq": 211, "state": "ok", "type": "task"}
+{"id": 1, "idx": 67, "seq": 212, "state": "running", "type": "task"}
+{"id": 1, "seq": 213, "state": "running", "type": "state"}
+{"id": 1, "idx": 67, "seq": 214, "state": "ok", "type": "task"}
+{"id": 1, "idx": 68, "seq": 215, "state": "running", "type": "task"}
+{"id": 1, "seq": 216, "state": "running", "type": "state"}
+{"id": 1, "idx": 68, "seq": 217, "state": "ok", "type": "task"}
+{"id": 1, "idx": 69, "seq": 218, "state": "running", "type": "task"}
+{"id": 1, "seq": 219, "state": "running", "type": "state"}
+{"id": 1, "idx": 69, "seq": 220, "state": "ok", "type": "task"}
+{"id": 1, "idx": 70, "seq": 221, "state": "running", "type": "task"}
+{"id": 1, "seq": 222, "state": "running", "type": "state"}
+{"id": 1, "idx": 70, "seq": 223, "state": "ok", "type": "task"}
+{"id": 1, "idx": 71, "seq": 224, "state": "running", "type": "task"}
+{"id": 1, "seq": 225, "state": "running", "type": "state"}
+{"id": 1, "idx": 71, "seq": 226, "state": "ok", "type": "task"}
+{"id": 1, "idx": 72, "seq": 227, "state": "running", "type": "task"}
+{"id": 1, "seq": 228, "state": "running", "type": "state"}
+{"id": 1, "idx": 72, "seq": 229, "state": "ok", "type": "task"}
+{"id": 1, "idx": 73, "seq": 230, "state": "running", "type": "task"}
+{"id": 1, "seq": 231, "state": "running", "type": "state"}
+{"id": 1, "idx": 73, "seq": 232, "state": "ok", "type": "task"}
+{"id": 1, "idx": 74, "seq": 233, "state": "running", "type": "task"}
+{"id": 1, "seq": 234, "state": "running", "type": "state"}
+{"id": 1, "idx": 74, "seq": 235, "state": "ok", "type": "task"}
+{"id": 1, "idx": 75, "seq": 236, "state": "running", "type": "task"}
+{"id": 1, "seq": 237, "state": "running", "type": "state"}
+{"id": 1, "idx": 75, "seq": 238, "state": "ok", "type": "task"}
+{"line": "[v] compare '/d/Work/DINOv3/LosslessAudioOpt/tmp/a4d9a43987afd5b8/tak.p4.tak' => identical, rm '/d/Work/DINOv3/LosslessAudioOpt/tmp/a4d9a43987afd5b8/tak.p4.tak.dec.wav' ok\n", "seq": 239, "type": "log"}
+{"line": "[tmp] session dir '/d/Work/DINOv3/LosslessAudioOpt/tmp/a4d9a43987afd5b8' removed\n", "seq": 240, "type": "log"}
+{"line": "OK   t1.wav: 0.2 MB -> 0.0 MB (94.2%), tak/p4\n      -> replaced in place: tak/p4\n", "seq": 241, "type": "log"}
+{"id": 1, "pct": 94.17207810605288, "seq": 242, "type": "end_file"}
+{"seq": 243, "type": "stopped"}
+{"seq": 244, "type": "resumed"}
+{"id": 0, "seq": 245, "type": "removed"}
