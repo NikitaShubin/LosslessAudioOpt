@@ -10,6 +10,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "contract.h"
 #include "version.h"
 #include "web_assets.h"
 
@@ -62,6 +63,12 @@ nlohmann::json rows_json(const StateMirror& st) {
                        {"label", r.label},
                        {"state", r.state},
                        {"pct", r.pct},
+                       {"mode", dsvc::mode_str(dsvc::parse_mode(r.mode))},
+                       {"target_dir", r.target_dir},
+                       {"out_path", r.out_path},
+                       {"last_error", r.last_error},
+                       {"had_sidecar", r.had_sidecar},
+                       {"has_sidecar", r.has_sidecar},
                        {"tasks", std::move(tasks)},
                        {"task_infos", std::move(infos)},
                        {"excluded", std::move(excl)}});
@@ -183,6 +190,7 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
         };
         out["counters"] = ctx.daemon->counters();
         out["paused"] = ctx.daemon->paused();
+        out["no_auth"] = token.empty();
         out["last_seq"] = ctx.events->last_seq();
         out["rows"] = rows_json(*ctx.state);
         send_json(res, out);
@@ -194,9 +202,10 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
         auto poll = ctx.events->copy_since(since);
         nlohmann::json evs = nlohmann::json::array();
         for (const auto& e : poll.events) {
-            nlohmann::json j = e.args;
+            nlohmann::json j = e.payload;
             j["type"] = e.type;
             j["seq"] = e.seq;
+            if (e.has_id) j["id"] = e.file_id;
             evs.push_back(std::move(j));
         }
         send_json(res, {{"events", std::move(evs)},

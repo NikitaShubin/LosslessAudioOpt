@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "contract.h"
 #include "util.h"
 
 namespace dsvc {
@@ -41,6 +42,20 @@ bool get_bool(const nlohmann::json& args, const char* key, bool dflt) {
     const auto& v = args[key];
     if (!v.is_boolean()) return dflt;
     return v.get<bool>();
+}
+
+// Строковый необязательный аргумент: отсутствует — dflt/true; присутствует,
+// но не строка — false (контракт строгий: bad_args вместо тихого дефолта).
+bool get_str_opt(const nlohmann::json& args, const char* key,
+                 const std::string& dflt, std::string& out) {
+    if (!args.is_object() || !args.contains(key)) {
+        out = dflt;
+        return true;
+    }
+    const auto& v = args[key];
+    if (!v.is_string()) return false;
+    out = v.get<std::string>();
+    return true;
 }
 
 bool get_id_list(const nlohmann::json& args, const char* key,
@@ -119,8 +134,16 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
                 paths.push_back(p.get<std::string>());
             }
         }
-        bool recursive = get_bool(args, "recursive", true);
-        d.add(paths, recursive, result);
+        std::string mode, target_dir;
+        if (!get_str_opt(args, "mode", "optimize", mode))
+            return err("bad_args", "mode must be optimize|restore");
+        if (!get_str_opt(args, "target_dir", "", target_dir))
+            return err("bad_args", "target_dir must be a string");
+        bool mode_ok = false;
+        dsvc::parse_mode(mode, &mode_ok);
+        if (!mode_ok)
+            return err("bad_args", "mode must be optimize|restore");
+        d.add(paths, mode, target_dir, result);
         return ok(result);
     }
 
@@ -179,7 +202,16 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
         return ok({{"restarted", std::move(done)}});
     }
 
-    if (cmd == "cancel-all" || cmd == "pause") {
+    if (cmd == "cancel-all") {
+        // Останавливаем все активные файлы сами (переданные клиентом id не
+        // нужны — состояние вкладки может быть устаревшим) и ставим очередь
+        // на паузу, чтобы остановленные не перезапускались.
+        uint64_t n = d.cancel_all_active();
+        d.set_paused(true);
+        return ok({{"cancelled", n}, {"paused", true}});
+    }
+
+    if (cmd == "pause") {
         d.set_paused(true);
         return ok({{"paused", true}});
     }

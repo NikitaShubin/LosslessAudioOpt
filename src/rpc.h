@@ -26,14 +26,17 @@ struct Daemon {
     // Счётчики {total, done, failed}.
     virtual nlohmann::json counters() const = 0;
 
-    // Остановка всей очереди (cancel-all): не запускать новые задачи.
-    // next add снимает остановку.
+    // Пауза очереди (pause/resume): не запускать новые задачи, активные
+    // продолжают. Следующий add/restart снимает остановку.
     virtual bool paused() const = 0;
     virtual void set_paused(bool paused) = 0;
 
     // Добавить пути (резолвятся на стороне демона). Заполняет result:
     // {"added":[{id,label}], "rejected":[{path,reason}]}.
-    virtual void add(const std::vector<std::string>& paths, bool recursive,
+    // mode: "optimize"|"restore"; target_dir: целевая папка (пусто = замена на месте).
+    // Обход папок всегда рекурсивный (контракт v1).
+    virtual void add(const std::vector<std::string>& paths,
+                     const std::string& mode, const std::string& target_dir,
                      nlohmann::json& result) = 0;
 
     // Снять файл из очереди (cancel-file). true если id существовал.
@@ -55,6 +58,12 @@ struct Daemon {
     // Массовая остановка активных файлов за один вызов (bulk-cancel).
     // Возвращает число реально обработанных (активных) файлов.
     virtual uint64_t bulk_cancel(const std::vector<size_t>& ids) = 0;
+
+    // Остановка ВСЕХ активных файлов очереди (cancel-all): снимает каждый
+    // off-page/могущий устареть id сам, возвращает число остановленных.
+    // Не зависит от переданного клиентом списка (поэтому работает всегда,
+    // даже если вкладка отдала stale-состояние). Паузу ставит отдельно rpc.
+    virtual uint64_t cancel_all_active() = 0;
 
     // Отсортировать очередь по полному пути файла (регистрозависимо).
     // Возвращает число файлов в очереди (или 0 при сбое).

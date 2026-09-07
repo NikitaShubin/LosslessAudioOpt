@@ -3,13 +3,28 @@
 
 namespace dsvc {
 
-void EventBuffer::push(const std::string& type, nlohmann::json args) {
-    if (args.is_null()) args = nlohmann::json::object();
+void EventBuffer::push(const std::string& type, nlohmann::json payload) {
+    if (payload.is_null()) payload = nlohmann::json::object();
     std::lock_guard<std::mutex> lk(m_);
     Event ev;
     ev.seq = next_seq_++;
     ev.type = type;
-    ev.args = std::move(args);
+    ev.payload = std::move(payload);
+    buf_.push_back(std::move(ev));
+    last_seq_ = ev.seq;
+    while (buf_.size() > kCapacity) buf_.pop_front();
+}
+
+void EventBuffer::push_for(size_t file_id, const std::string& type,
+                           nlohmann::json payload) {
+    if (payload.is_null()) payload = nlohmann::json::object();
+    std::lock_guard<std::mutex> lk(m_);
+    Event ev;
+    ev.seq = next_seq_++;
+    ev.type = type;
+    ev.has_id = true;
+    ev.file_id = file_id;
+    ev.payload = std::move(payload);
     buf_.push_back(std::move(ev));
     last_seq_ = ev.seq;
     while (buf_.size() > kCapacity) buf_.pop_front();
@@ -50,6 +65,14 @@ void StateMirror::set_label(size_t id, const std::string& label) {
     rows_[id].label = label;
     rows_[id].id = id;
     touch_locked(id);
+}
+
+void StateMirror::set_path(size_t id, const std::string& path) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    r.path = path;
 }
 
 void StateMirror::set_state(size_t id, const std::string& st) {
@@ -116,11 +139,55 @@ void StateMirror::set_excluded(size_t id, const std::vector<std::string>& fmts) 
     r.excluded_fmts = fmts;
 }
 
+void StateMirror::set_meta(size_t id, const std::string& mode,
+                           const std::string& target_dir) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.mode = mode;
+    r.target_dir = target_dir;
+}
+
+void StateMirror::set_out(size_t id, const std::string& path) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.out_path = path;
+}
+
+void StateMirror::set_last_error(size_t id, const std::string& msg) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.last_error = msg;
+}
+
+void StateMirror::set_sidecar_flags(size_t id, bool had_sidecar, bool has_sidecar) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.had_sidecar = had_sidecar;
+    r.has_sidecar = has_sidecar;
+}
+
 void StateMirror::remove(size_t id) {
     std::lock_guard<std::mutex> lk(m_);
     rows_.erase(id);
     order_.erase(std::remove(order_.begin(), order_.end(), id), order_.end());
     removed_.insert(id);
+}
+
+bool StateMirror::alive(size_t id) const {
+    std::lock_guard<std::mutex> lk(m_);
+    return removed_.count(id) == 0;
 }
 
 bool StateMirror::reorder(const std::vector<size_t>& order) {
