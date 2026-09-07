@@ -184,6 +184,13 @@ def main():
         if row and row[0]["state"] == "ok":
             leftovers = [f for f in os.listdir(sc_dir) if ".llao-tmp" in f]
             check(not leftovers, f"нет .llao-tmp.* артефактов: {leftovers}")
+            # Live-зеркало обязано совпадать с реальностью на диске: sidecar
+            # доставлен внешним файлом — has_sidecar=true, встроен в контейнер —
+            # false (см. DaemonSink::out_file, тот же диск-тест, что в persist).
+            live_has = row[0].get("has_sidecar")
+            disk_has = os.path.exists(sc_zip)
+            check(live_has == disk_has,
+                  f"live has_sidecar ({live_has}) совпадает с диском ({disk_has})")
             # Отрисовка может встроить теги (тогда sidecar удаляется) или оставить
             # внешние (тогда sidecar переписан кандидатом). Проверяем транзакцию:
             # sidecar либо отсутствует, либо валидный v2 без потери title.
