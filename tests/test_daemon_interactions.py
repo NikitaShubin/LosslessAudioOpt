@@ -200,11 +200,16 @@ def main():
         r = d3.rpc("add", {"paths": [p8]})
         ids8 = [x["id"] for x in r["result"]["added"]]
         check(len(ids8) == 1, "add 1 file")
-        time.sleep(3)
+        # Пауза сразу после add: при jobs=2.0 короткий wav может обработаться
+        # и замениться in-place раньше, чем тест успеет сделать cancel-file
+        # (тогда исходник исчезает и re-add отклонится «path not found»).
+        # Пауза фиксирует задание в queued — сценарий воспроизводится без гонки.
+        d3.rpc("pause", {})
+        time.sleep(0.5)
         # отменяем через cancel-file (без remove — added_paths_ НЕ очищается)
         d3.rpc("cancel-file", {"id": ids8[0]})
-        time.sleep(2)
-        # повторно добавляем тот же путь
+        time.sleep(1)
+        # повторно добавляем тот же путь (add снимает паузу)
         r = d3.rpc("add", {"paths": [p8]})
         added8 = r["result"]["added"]
         rejected8 = r["result"]["rejected"]
