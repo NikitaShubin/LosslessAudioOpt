@@ -2,12 +2,18 @@
 
 namespace dsvc {
 
-void DaemonSink::init_session(size_t total) {
-    ev_->push("session", {{"total", (size_t)total}});
+void DaemonSink::emit(size_t id, const std::string& type,
+                      nlohmann::json payload) {
+    // Публикация под мьютексом зеркала одной транзакцией с tombstone:
+    // воркер, дорабатывающий снятую строку, не может вклиниться между
+    // проверкой живости и push — событие не уйдёт после removed.
+    st_->publish_if_alive(id, [&](size_t /*oid*/) {
+        ev_->push_for(id, type, std::move(payload));
+    });
 }
 
 void DaemonSink::begin_file(size_t id, const std::string& label) {
-    ev_->push("begin_file", {{"id", id}, {"label", label}});
+    emit(id, "begin_file", {{"label", label}});
     Row r;
     r.id = id;
     r.label = label;
@@ -16,26 +22,27 @@ void DaemonSink::begin_file(size_t id, const std::string& label) {
 }
 
 void DaemonSink::prep(size_t id) {
-    ev_->push("prep", {{"id", id}});
+    emit(id, "prep");
     st_->set_state(id, "prep");
+    if (on_change_) on_change_();
 }
 
 void DaemonSink::set_tasks(size_t id, size_t total) {
-    ev_->push("set_tasks", {{"id", id}, {"total", (size_t)total}});
+    emit(id, "set_tasks", {{"total", total}});
     st_->set_tasks(id, std::vector<std::string>(total, "pend"));
 }
 
 void DaemonSink::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     nlohmann::json jinfos = nlohmann::json::array();
     for (auto& ti : infos) jinfos.push_back({{"fmt", ti.fmt_id}, {"variant", ti.variant_id}, {"params", ti.params}, {"note", ti.note}});
-    ev_->push("set_tasks", {{"id", id}, {"total", infos.size()}, {"task_infos", jinfos}});
+    emit(id, "set_tasks", {{"total", infos.size()}, {"task_infos", jinfos}});
     st_->set_tasks(id, infos);
 }
 
 void DaemonSink::set_excluded(size_t id, const std::vector<std::string>& fmts) {
     nlohmann::json jf = nlohmann::json::array();
     for (auto& f : fmts) jf.push_back(f);
-    ev_->push("set_excluded", {{"id", id}, {"excluded", jf}});
+    emit(id, "set_excluded", {{"excluded", jf}});
     st_->set_excluded(id, fmts);
 }
 
@@ -43,32 +50,41 @@ void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
     const char* s = st == obs::TaskState::Running ? "running"
                     : st == obs::TaskState::Ok     ? "ok"
                                                    : "failed";
-    ev_->push("task", {{"id", id}, {"idx", idx}, {"state", s}});
+    emit(id, "task", {{"idx", idx}, {"state", s}});
     st_->set_task(id, idx, s);
     // Старт варианта делает файл «в работе»: prep может быть долгим, и строка
     // должна перейти в running по первому реально запущенному варианту
     // (а держаться в prep до этого). Состояние же строки выставлять в ok/failed
-    // тут нельзя — это прерогатива end_file/mark_stopped/mark_error.
+    // тут нельзя — это прерогатива end_file/mark_stopped/error_file.
     if (st == obs::TaskState::Running) {
-        ev_->push("state", {{"id", id}, {"state", "running"}});
+        emit(id, "state", {{"state", "running"}});
         st_->set_state(id, "running");
     }
 }
 
 void DaemonSink::end_file(size_t id, double pct) {
-    ev_->push("end_file", {{"id", id}, {"pct", pct}});
+    emit(id, "end_file", {{"pct", pct}});
     st_->set_state(id, "ok");
     st_->set_pct(id, pct);
+    if (on_change_) on_change_();
 }
 
 void DaemonSink::mark_stopped(size_t id) {
-    ev_->push("stopped", {{"id", id}});
+    emit(id, "stopped");
     st_->set_state(id, "stopped");
+    if (on_change_) on_change_();
+}
+
+void DaemonSink::error_file(size_t id, const std::string& reason) {
+    emit(id, "error_file", {{"reason", reason}});
+    st_->set_state(id, "error");
+    st_->set_last_error(id, reason);
+    if (on_change_) on_change_();
 }
 
 void DaemonSink::mark_error(size_t id) {
-    ev_->push("error", {{"id", id}, {"line", ""}});
     st_->set_state(id, "error");
+    if (on_change_) on_change_();
 }
 
 void DaemonSink::log(const std::string& line) {
@@ -76,13 +92,24 @@ void DaemonSink::log(const std::string& line) {
 }
 
 void DaemonSink::error(const std::string& line) {
-    ev_->push("error", {{"id", nlohmann::json(nullptr)}, {"line", line}});
+    ev_->push("error", {{"line", line}});
 }
 
 void DaemonSink::files_added(const std::vector<size_t>& ids,
                              const std::vector<std::string>& labels) {
     for (size_t k = 0; k < ids.size(); k++)
-        ev_->push("added", {{"id", ids[k]}, {"label", labels[k]}});
+        emit(ids[k], "added", {{"label", labels[k]}});
+}
+
+void DaemonSink::job_meta(size_t id, const std::string& mode,
+                          const std::string& target_dir) {
+    emit(id, "job_meta", {{"mode", mode}, {"target_dir", target_dir}});
+    st_->set_meta(id, mode, target_dir);
+}
+
+void DaemonSink::out_file(size_t id, const std::string& path) {
+    emit(id, "out_file", {{"path", path}});
+    st_->set_out(id, path);
 }
 
 }  // namespace dsvc
