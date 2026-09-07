@@ -1,13 +1,36 @@
 #!/bin/sh
-# llao.sh: обёртка для запуска llao.exe под Wine.
-# Решает проблемы Wine:
-#   1) GetConsoleScreenBufferInfo падает → g_width=80 вместо реальной ширины.
+# llao: обёртка для запуска llao.exe под Wine на Linux.
+# Обеспечивает условия, которых Wine из коробки не даёт (llao.exe остаётся
+# чисто Windows-приложением):
+#
+#   1) Синглтон демона (именованный мьютекс Local\llao-singleton) в Wine
+#      существует в рамках одного wineserver, то есть одного WINEPREFIX.
+#      Чтобы вторая копия llao.exe отвергалась, как в Windows, ВСЕ запуски
+#      должны идти в один и тот же префикс. Задаём стабильный дефолт и
+#      разрешаем переопределить через LLAO_WINEPREFIX или WINEPREFIX.
+#   2) Свежий префикс инициализируем через wineboot (как в CI), иначе
+#      консольные вызовы и именованные объекты ведут себя нестабильно.
+#   3) GetConsoleScreenBufferInfo падает → g_width=80 вместо реальной ширины.
 #      Решение: определяем размер через stty, передаём через LLAO_STATUS_SIZE.
-#   2) Wine пишет err:ntlm, err:winediag в stderr, ломая визуализацию.
+#   4) Wine пишет err:ntlm, err:winediag в stderr, ломая визуализацию.
 #      Решение: WINEDEBUG=-all подавляет все err-сообщения Wine.
 : "${WINEDEBUG:=-all}"
 export WINEDEBUG
 DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+# Первый запуск — фиксируем префикс, чтобы синглтон-мьютекс был общим
+# для всех копий llao.exe независимо от окружения.
+PREFIX="${LLAO_WINEPREFIX:-${WINEPREFIX:-$HOME/.llao-wine}}"
+export WINEPREFIX="$PREFIX"
+
+LOGFILE="${LLAO_LOG:-/tmp/llao-wine.log}"
+
+# Свежий префикс: инициализируем, как это делает CI (wineboot -u).
+if [ ! -f "$PREFIX/system.reg" ]; then
+    : "${WINEARCH:=win64}"
+    export WINEARCH
+    wineboot -u 2>>"$LOGFILE"
+fi
 
 # Определяем размер терминала (Wine не умеет GetConsoleScreenBufferInfo).
 SIZE=""
@@ -26,5 +49,4 @@ if [ -n "$SIZE" ]; then
     export LLAO_STATUS_FORCE=1
 fi
 
-LOGFILE="${LLAO_LOG:-/tmp/llao-wine.log}"
-exec wine "$DIR/llao.exe" "$@" 2>"$LOGFILE"
+exec wine "$DIR/llao.exe" "$@" 2>>"$LOGFILE"

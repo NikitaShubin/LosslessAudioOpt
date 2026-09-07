@@ -135,4 +135,18 @@ test-daemon-persist: $(DAEMON_TEST_BIN)
 src/web_assets_data.cpp: web/index.html web/app.js web/style.css tools/embed_assets.py
 	python3 tools/embed_assets.py
 
-.PHONY: all clean test-unit test-daemon-core test-daemon test-daemon-queue test-daemon-interactions test-daemon-restore test-daemon-persist
+# Dev-контейнер (Dockerfile): сборка llao.exe под llvm-mingw и прогон wine-тестов
+# без установки зависимостей на хост. Проект монтируется в /work.
+docker-image:
+	docker build -t llao-dev .
+
+# Сборка обоих таргетов внутри контейнера (llao.exe + llao-linux).
+docker-build: docker-image
+	docker run --rm -v "$(CURDIR):/work" -w /work llao-dev sh -c \
+		'make -j"$(shell nproc)" && make -j"$(shell nproc)" TARGET=linux all'
+
+# Интерактивная оболочка в контейнере (рабочая копия — /work).
+docker-shell: docker-image
+	docker run --rm -it -v "$(CURDIR):/work" -w /work llao-dev sh
+
+.PHONY: all clean test-unit test-daemon-core test-daemon test-daemon-queue test-daemon-interactions test-daemon-restore test-daemon-persist docker-image docker-build docker-shell
