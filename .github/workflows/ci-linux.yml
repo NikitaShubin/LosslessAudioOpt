@@ -1,0 +1,49 @@
+name: ci-linux
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-24.04
+    env:
+      WINEDEBUG: -all
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Зависимости (ffmpeg, p7zip, wine)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg p7zip-full wine
+          wine --version
+
+      - name: Инициализация wine prefix
+        run: wineboot -u 2>/dev/null || true
+
+      - name: Кэш кодеков (bin/)
+        uses: actions/cache@v4
+        with:
+          path: bin
+          key: codecs-linux-${{ hashFiles('formats/*.json') }}
+
+      - name: Сборка linux-бинэрников
+        run: make -j"$(nproc)" TARGET=linux all
+
+      - name: Проверка конфигурации форматов
+        run: ./llao-linux check-formats
+
+      - name: Установка кодеков (нативный монолит)
+        run: ./llao-linux tools
+
+      - name: Юнит-тесты и ядро демона
+        run: |
+          make test-unit test-daemon-core
+          ./test-unit
+          ./test-daemon-core
+
+      - name: Интеграционные тесты демона (restore/interactions/queue/persist)
+        run: |
+          make test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist
