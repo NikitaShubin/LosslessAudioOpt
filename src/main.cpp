@@ -17,11 +17,12 @@
 
 #include "config.h"
 #include "i18n.h"
+#include "linear_sink.h"
 #include "optimize.h"
 #include "out.h"
 #include "proc.h"
+#include "serve.h"
 #include "stats.h"
-#include "status_sink.h"
 #include "tool.h"
 #include "util.h"
 
@@ -86,6 +87,7 @@ void usage() {
 #else
     const char* prog = "llao";
 #endif
+    out::print("  %s serve [опции]                       headless-движок с HTTP-API и веб-UI\n", prog);
     out::print("  %s check-formats                       validate the formats/*.json schema\n", prog);
     out::print("  %s variants [fmt_id ...]               compression variants from formats/*.json\n", prog);
     out::print("  %s tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n", prog);
@@ -94,7 +96,7 @@ void usage() {
     out::print("  %s optimize <file|folder> [...]        main enumeration\n", prog);
     out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
-    out::print("             [--no-status] [--verify=all|winner|none] [--ignore-errors] [--tmp=<path>]\n");
+    out::print("             [--verify=all|winner|none] [--ignore-errors] [--tmp=<path>]\n");
     out::print("  %s restore <file|folder> [...]         decode + re-encode to the target format\n", prog);
     out::print("             [--jobs=N|M.F] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
@@ -103,6 +105,7 @@ void usage() {
     out::print("  optimize --verify: all = check every candidate (default); winner = check only the\n");
     out::print("    best by size; none = no verification at all. Any file error aborts the run unless\n");
     out::print("    --ignore-errors is given (then such files are skipped and the run continues).\n");
+    out::print("  For server options see: %s serve --help\n", prog);
 }
 
 int cmd_check_formats() {
@@ -246,8 +249,6 @@ int cmd_optimize(const std::vector<std::string>& args) {
             opts.debug = true;
         } else if (!no_more_opts && a == "--no-stats") {
             opts.no_stats = true;
-        } else if (!no_more_opts && a == "--no-status") {
-            opts.no_status = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
             std::string jv = a.substr(7);
             opts.jobs = std::stod(jv);
@@ -307,8 +308,6 @@ int cmd_restore(const std::vector<std::string>& args) {
             opts.no_download = true;
         } else if (!no_more_opts && a == "--allow-lossy") {
             opts.allow_lossy = true;
-        } else if (!no_more_opts && a == "--no-status") {
-            opts.no_status = true;
         } else if (!no_more_opts && a.rfind("--jobs=", 0) == 0) {
             std::string jv = a.substr(7);
             opts.jobs = std::stod(jv);
@@ -332,7 +331,7 @@ int cmd_restore(const std::vector<std::string>& args) {
     }
     if (opts.inputs.empty()) {
         out::error("ERROR: restore <file|folder> [...] [--jobs=N|M.F] [--to=flac] [--variant=<id>] "
-                   "[--no-download] [--no-status]\n");
+                   "[--no-download] [--allow-lossy]\n");
         return 2;
     }
     g_atexit_tmp_dir.clear();
@@ -345,17 +344,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
-    SetConsoleCtrlHandler(ctrl_handler, TRUE);
-#else
-    struct sigaction sa{};
-    sa.sa_handler = sigint_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, nullptr);
 #endif
 
     try {
-        install_status_sink();  // движок эмитит события через obs::sink() -> статусбар
         std::vector<std::string> args;
 #ifdef _WIN32
         args = wide_argv();
@@ -384,8 +375,24 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
             return 1;
         }
         std::string cmd = args[1];
-        std::vector<std::string> rest(args.begin() + 2, args.end());
 
+        // Сервер: свои сигналы, DaemonSink и сингелтон-мьютекс — всё в run_daemon,
+        // поэтому не ставим здесь CLI-обработчики, статус-бар и atexit-очистку.
+        if (cmd == "serve") return dsvc::run_daemon(args);
+
+#ifdef _WIN32
+        SetConsoleCtrlHandler(ctrl_handler, TRUE);
+#else
+        struct sigaction sa{};
+        sa.sa_handler = sigint_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGINT, &sa, nullptr);
+#endif
+
+        install_linear_sink();  // движок эмитит события через obs::sink() -> линейный вывод
+
+        std::vector<std::string> rest(args.begin() + 2, args.end());
         atexit(atexit_cleanup);
 
         if (cmd == "check-formats") return cmd_check_formats();
