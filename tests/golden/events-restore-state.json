@@ -1,0 +1,50 @@
+{
+ "counters": {
+  "done": 1,
+  "failed": 0,
+  "ok": 1,
+  "stopped": 0,
+  "total": 1
+ },
+ "last_seq": 12,
+ "paused": false,
+ "rows": [
+  {
+   "excluded": [],
+   "id": 0,
+   "label": "src.wav",
+   "mode": "restore",
+   "out_path": "/d/Work/DINOv3/LosslessAudioOpt/tests/golden/_dump-work/out/src.flac",
+   "pct": 87.27660104942258,
+   "state": "ok",
+   "target_dir": "/d/Work/DINOv3/LosslessAudioOpt/tests/golden/_dump-work/out",
+   "task_infos": [
+    {
+     "fmt": "flac",
+     "note": "LPC 24 + точный поиск (не-Subset)",
+     "params": [
+      "-8",
+      "--lax",
+      "-l",
+      "24",
+      "-p"
+     ],
+     "variant": "8_l24_p"
+    }
+   ],
+   "tasks": [
+    "ok"
+   ]
+  }
+ ],
+ "session": {
+  "options": {
+   "dry_run": false,
+   "ignore_errors": true,
+   "jobs": 2.0,
+   "jobs_float": false,
+   "verify": "winner"
+  }
+ },
+ "version": "2.0.0-dev"
+}
