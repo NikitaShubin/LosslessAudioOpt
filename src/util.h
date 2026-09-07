@@ -27,6 +27,7 @@ bool dir_exists(const std::string& p);
 bool mkdirs(const std::string& p);
 bool remove_file(const std::string& p);
 uint64_t file_size(const std::string& p);
+int64_t file_mtime_ns(const std::string& p);  // mtime в наносекундах (0 при ошибке)
 
 std::vector<uint8_t> read_file(const std::string& p);   // пусто при ошибке
 bool write_file(const std::string& p, const std::vector<uint8_t>& data);

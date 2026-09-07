@@ -13,6 +13,7 @@
 #endif
 
 #include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
@@ -286,6 +287,14 @@ uint64_t file_size(const std::string& p) {
     std::error_code ec;
     auto sz = fs::file_size(fs::u8path(p), ec);
     return ec ? 0 : (uint64_t)sz;
+}
+
+int64_t file_mtime_ns(const std::string& p) {
+    std::error_code ec;
+    auto ft = fs::last_write_time(fs::u8path(p), ec);
+    if (ec) return 0;
+    using namespace std::chrono;
+    return duration_cast<nanoseconds>(ft.time_since_epoch()).count();
 }
 
 #ifdef _WIN32

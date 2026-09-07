@@ -300,11 +300,34 @@ void cli_check(const config::Format& fmt, const std::string& binary, std::string
     }
 }
 
+// Ключ кэша cli_check: результат проверки зависит только от конфигурации
+// (cmd/expect из formats/*.json) и самого бинарника (размер + mtime).
+// Любое изменение инвалидирует кэш; окружение (wine/PATH) роли не играет.
+std::string cli_check_key(const config::Format& fmt, const std::string& binary) {
+    std::string raw;
+    raw += binary;
+    raw += "\ncmd:";
+    for (const auto& s : fmt.cli_check.cmd) raw += s + " ";
+    raw += "\nexpect:";
+    for (const auto& s : fmt.cli_check.expect) raw += s + " ";
+    raw += "\nsize:" + std::to_string(util::file_size(binary));
+    raw += "\nmtime:" + std::to_string(util::file_mtime_ns(binary));
+    auto data = std::vector<uint8_t>(raw.begin(), raw.end());
+    return sha256::hex(data);
+}
+
+std::string cli_check_cache_path(const config::Format& fmt) {
+    return util::join_path(cache_dir(fmt), ".cli-check");
+}
+
 }  // namespace
 
 // Проверка готовности утилиты формата: находит бинарник (кэш bin/<id>/.binary
 // или PATH) и прогоняет cli_check.expect. Возвращает список проблем (пустой —
 // утилита готова). Не скачивает и не изменяет state: только чтение.
+// Результат проверки кэшируется в bin/<id>/.cli-check (ключ = sha256 от
+// cmd/expect + размер/mtime бинарника) — повторный старт не гоняет утилиту
+// (на Linux это запуск .exe через wine, дорого).
 std::string check_config(const config::Format& fmt, const std::atomic<bool>* kill) {
     if (!fmt.cli_check.present) return {};
     std::string binary = cached_binary(fmt);
@@ -312,8 +335,12 @@ std::string check_config(const config::Format& fmt, const std::atomic<bool>* kil
     if (binary.empty()) {
         return i18n::str("utility not found (run `llao tools` or install it into bin/<id>/)");
     }
+    std::string cache_path = cli_check_cache_path(fmt);
+    std::string key = cli_check_key(fmt, binary);
+    if (util::trim(util::read_text(cache_path)) == key) return {};
     std::string message;
     cli_check(fmt, binary, &message, kill);
+    if (message.empty()) util::write_text(cache_path, key);
     return message;
 }
 
