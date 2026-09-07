@@ -1,5 +1,5 @@
 {
-  "comment": "Обратные таблицы ключей нативных тегов для чтения контейнеров, чьи ключи не совпадают с канонической схемой: ID3v2 (frame id), MP4 ilst (4CC), WAV LIST INFO. Ключи формата -> канонический ключ. Data-driven: не хардкодятся в C++.",
+  "comment": "Обратные таблицы ключей нативных тегов для чтения контейнеров, чьи ключи не совпадают с канонической схемой: ID3v2 (frame id), MP4 ilst (4CC), WAV LIST INFO. Ключи формата -> канонический ключ. canonical_aliases — синонимы внутри самой канонической схемы (нормализованное имя -> канонический ключ). Data-driven: не хардкодятся в C++.",
   "id3": {
     "TIT2": "title",
     "TPE1": "artist",
@@ -39,5 +39,32 @@
     "IGNR": "genre",
     "ICOP": "copyright",
     "ISFT": "encoder"
+  },
+  "canonical_aliases": {
+    "title": "title",
+    "artist": "artist",
+    "album": "album",
+    "albumartist": "album_artist",
+    "composer": "composer",
+    "genre": "genre",
+    "date": "date",
+    "year": "date",
+    "originaldate": "date",
+    "track": "track",
+    "tracknumber": "track",
+    "disc": "disc",
+    "discnumber": "disc",
+    "comment": "comment",
+    "isrc": "isrc",
+    "encoder": "encoder",
+    "lyrics": "lyrics",
+    "unsyncedlyrics": "lyrics",
+    "copyright": "copyright",
+    "copyrightmessage": "copyright",
+    "cuesheet": "cue_sheet",
+    "replaygain_track_gain": "replaygain_track_gain",
+    "replaygain_track_peak": "replaygain_track_peak",
+    "replaygain_album_gain": "replaygain_album_gain",
+    "replaygain_album_peak": "replaygain_album_peak"
   }
 }
