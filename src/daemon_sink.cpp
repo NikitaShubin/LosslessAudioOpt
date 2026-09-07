@@ -1,5 +1,8 @@
 #include "daemon_sink.h"
 
+#include "persist.h"
+#include "util.h"
+
 namespace dsvc {
 
 void DaemonSink::emit(size_t id, const std::string& type,
@@ -110,6 +113,11 @@ void DaemonSink::job_meta(size_t id, const std::string& mode,
 void DaemonSink::out_file(size_t id, const std::string& path) {
     emit(id, "out_file", {{"path", path}});
     st_->set_out(id, path);
+    // Флаг has_sidecar живёт по диску (тот же счёт, что в persist::snapshot):
+    // рядом с итогом мог лежать доставленный sidecar <base>.tags.zip, и это
+    // настолько же верно и для замены на месте (out_path — новый файл в том
+    // же каталоге), и для целевой папки. had_sidecar не трогаем.
+    st_->set_has_sidecar(id, util::file_exists(persist::sidecar_path_for(path)));
 }
 
 }  // namespace dsvc

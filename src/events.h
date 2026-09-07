@@ -116,6 +116,9 @@ public:
     void set_last_error(size_t id, const std::string& msg);
     // Флаги sidecar: на входе (had_sidecar) / после результата (has_sidecar).
     void set_sidecar_flags(size_t id, bool had_sidecar, bool has_sidecar);
+    // Обновить только has_sidecar (например, при out_file: рядом с итогом факт
+    // sidecar известен по диску, не трогая had_sidecar).
+    void set_has_sidecar(size_t id, bool has_sidecar);
     void remove(size_t id);
     // Жива ли строка (не удалена). Для подавления запоздалых событий воркера
     // по снятой строке: зеркало уже защищено tombstone, а буфер событий — нет.

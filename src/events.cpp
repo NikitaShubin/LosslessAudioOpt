@@ -178,6 +178,15 @@ void StateMirror::set_sidecar_flags(size_t id, bool had_sidecar, bool has_sideca
     r.has_sidecar = has_sidecar;
 }
 
+void StateMirror::set_has_sidecar(size_t id, bool has_sidecar) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.has_sidecar = has_sidecar;
+}
+
 void StateMirror::remove(size_t id) {
     std::lock_guard<std::mutex> lk(m_);
     rows_.erase(id);
