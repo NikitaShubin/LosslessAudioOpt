@@ -23,7 +23,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 
 import _daemon_harness as H
 
@@ -74,15 +73,11 @@ def main():
 
         # 3. remove running-файла: призраков нет, замены нет
         check(d.rpc("remove", {"id": 2})["result"]["removed"] is True, "remove 2")
-        deadline = time.time() + 24
-        while time.time() < deadline:
-            time.sleep(1)
-            st = d.get("/api/state")
-            ids = [x["id"] for x in st["rows"]]
-            check(2 not in ids, f"no ghost row 2, got {ids}")
-            check(len(ids) == len(set(ids)), f"no dupes: {ids}")
-            if 2 not in ids:
-                break
+        st = H.wait_state(d, lambda s: 2 not in [x["id"] for x in s["rows"]],
+                          timeout=24)
+        ids = [x["id"] for x in st["rows"]]
+        check(2 not in ids, f"no ghost row 2, got {ids}")
+        check(len(ids) == len(set(ids)), f"no dupes: {ids}")
         check(not os.path.exists(files[2] + ".tak")
               and not os.path.exists(os.path.splitext(files[2])[0] + ".tak"),
               "removed file not replaced")
@@ -118,13 +113,12 @@ def main():
         new_id = r["result"]["added"][0]["id"]
         d.rpc("cancel-file", {"id": new_id})
         # ждём, пока строка перестанет быть активной (cancel завершил транзакцию)
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            rows = d.get("/api/state")["rows"]
-            row = next((x for x in rows if x["id"] == new_id), None)
-            if row is None or row["state"] not in ("queued", "prep", "running"):
-                break
-            time.sleep(0.5)
+        H.wait_until(
+            lambda: (lambda row: row is None
+                     or row["state"] not in ("queued", "prep", "running"))(
+                next((x for x in d.get("/api/state")["rows"]
+                      if x["id"] == new_id), None)),
+            timeout=20, interval=0.5)
         r = d.rpc("restart", {"ids": [new_id]})
         check(r["ok"] and r["result"]["restarted"] == [new_id],
               f"restart after cancel {new_id}: {r}")
@@ -211,7 +205,10 @@ def main():
         bid = r["result"]["added"][0]["id"]
         r = d.rpc("bulk-cancel", {"ids": [bid]})
         check(r["ok"] and r["result"]["cancelled"] == 1, f"bulk-cancel: {r}")
-        st = d.get("/api/state")
+        # cancel асинхронный: подтверждение приходит раньше финального stopped.
+        st = H.wait_state(d, lambda s: any(
+            x["id"] == bid and x["state"] == "stopped" for x in s["rows"]),
+            timeout=30, interval=1)
         row = [x for x in st["rows"] if x["id"] == bid]
         check(row and row[0]["state"] == "stopped",
               f"bulk-cancel -> stopped: {st['rows']}")
@@ -266,13 +263,13 @@ def main():
         check(pos_z == 1, f"pos_z на позиции 1: {pos_z}")
         for cycle in range(3):
             d.rpc("cancel-file", {"id": zid})
-            deadline = time.time() + 20
-            while time.time() < deadline:
-                rows = d.get("/api/state")["rows"]
-                row = next((x for x in rows if x["id"] == zid), None)
-                if row is None or row["state"] not in ("queued", "prep", "running"):
-                    break
-                time.sleep(0.5)
+            # ждём, пока cancel-транзакция завершится (строка уходит из активных)
+            H.wait_until(
+                lambda: (lambda row: row is None
+                         or row["state"] not in ("queued", "prep", "running"))(
+                    next((x for x in d.get("/api/state")["rows"]
+                          if x["id"] == zid), None)),
+                timeout=20, interval=0.5)
             r = d.rpc("restart", {"ids": [zid]})
             check(r["ok"] and r["result"]["restarted"] == [zid],
                   f"restart (цикл {cycle}): {r}")
