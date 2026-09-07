@@ -235,6 +235,8 @@ struct FileJob {
     uint64_t ref_size = 0;
     uint64_t wav_est = 0;
     uint64_t peak_file = 0;
+    uint64_t prep_wall_ms = 0;    // wall-clock подготовки файла (probe+decode)
+    uint64_t decode_wall_ms = 0;  // wall-clock декодирования эталонного WAV
     bool deferred = false;
     std::chrono::steady_clock::time_point defer_until{};
     int bits = 16;
