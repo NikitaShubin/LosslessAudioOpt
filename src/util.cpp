@@ -459,7 +459,7 @@ bool write_text(const std::string& p, const std::string& s) {
 }
 
 ReplaceResult replace_file(const std::string& original, const std::string& tmp,
-                           const std::string& backup, const std::string& final_name) {
+                           const std::string& final_name) {
     ReplaceResult res;
     auto rename_retry = [](const std::string& from, const std::string& to) -> std::string {
         std::error_code ec;
@@ -477,37 +477,56 @@ ReplaceResult replace_file(const std::string& original, const std::string& tmp,
         }
         return ec_text(ec);
     };
+    auto remove_retry = [](const std::string& p) -> std::string {
+        std::error_code ec;
+        for (int attempt = 0; attempt < 15; attempt++) {
+            ec.clear();
+            fs::remove(fs::u8path(p), ec);
+            if (!ec) return {};
+            if (ec == std::errc::no_such_file_or_directory) return {};
+            if (attempt < 8)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
+            else
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        }
+        return ec_text(ec);
+    };
 
-    // Зачищаем свой же backup от прерванного предыдущего запуска.
-    std::error_code ec;
-    fs::remove(fs::u8path(backup), ec);
-
+    // НОВАЯ схема (согласована с персистентностью очереди): старый файл
+    // удаляется, затем кандидат переименовывается на место. Резервной копии
+    // нет: обрыв между remove и rename оставляет tmp-кандидата на месте, а
+    // persist-строка в prep/running при перезапуске помечается как подозрительная.
+    //   * final==original (или пуст): удаляем цель (=оригинал), rename на место.
+    //   * final!=original: удаляем и старый файл, и будущее место результата
+    //     (артефакт прерванного запуска), затем rename tmp -> final.
     const std::string target = final_name.empty() ? original : final_name;
 
-    std::string err = rename_retry(original, backup);
-    if (!err.empty()) {
-        res.error = "could not move the original to " + base_name(backup) + ": " + err;
-        return res;
+    if (target != original) {
+        std::string e1 = remove_retry(target);
+        std::string e2 = remove_retry(original);
+        if (!e1.empty() || !e2.empty()) {
+            res.error = "could not remove the file: " +
+                        (e1.empty() ? e2 : e1);
+            return res;
+        }
+    } else {
+        std::string err = remove_retry(original);
+        if (!err.empty()) {
+            res.error = "could not remove the file: " + err;
+            return res;
+        }
     }
 
-    err = rename_retry(tmp, target);
+    std::string err = rename_retry(tmp, target);
     if (!err.empty()) {
-        std::string rb = rename_retry(backup, original);
-        if (!rb.empty()) {
-            res.original_lost = true;
-            res.backup = backup;
-            res.error = "could not move the candidate in place (" + err +
-                        ") AND the rollback failed (" + rb + "); the original is saved as " +
-                        backup;
-        } else {
-            res.error = "could not move the candidate in place (" + err +
-                        "); the original was restored";
-        }
+        res.original_lost = true;  // оригинал уже удалён
+        res.backup = tmp;          // кандидат остался (не переименован)
+        res.error = "could not move the candidate in place (" + err +
+                    "); the temp candidate remains at " + tmp;
         return res;
     }
 
     res.ok = true;
-    fs::remove(fs::u8path(backup), ec);  // неудача удаления некритична
     return res;
 }
 
