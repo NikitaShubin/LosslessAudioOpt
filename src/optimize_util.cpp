@@ -1,6 +1,7 @@
 #include "optimize_internal.h"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <set>
 #include <thread>
@@ -9,6 +10,16 @@
 #include "util.h"
 
 namespace optimize {
+
+namespace {
+std::atomic<uint64_t> g_session_counter{0};
+}  // namespace
+
+std::string session_cookie() {
+    return util::process_id() + "-" + std::to_string(g_session_counter.fetch_add(1));
+}
+
+void reset_session_counter() { g_session_counter.store(0); }
 
 std::string norm_path(const std::string& p) {
     std::string s = p;
@@ -112,6 +123,7 @@ void clear_tmp_base(const std::string& custom) {
     std::error_code ec;
     fs::remove_all(fs::u8path(d), ec);
     util::mkdirs(d);
+    reset_session_counter();
 }
 
 uint64_t estimated_wav_bytes(const media::Probe& probe, int bits) {

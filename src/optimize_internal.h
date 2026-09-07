@@ -64,6 +64,8 @@ std::string base_tmp_dir(const std::string& custom);
 std::string tmp_dir();
 std::string base_no_ext(const std::string& path);
 std::string tmp_token(const std::string& path);
+std::string session_cookie();
+void reset_session_counter();
 std::string session_tmp_dir(const std::string& custom);
 void clear_session_tmp_dir_impl(const std::string& custom);
 void clear_tmp_base(const std::string& custom);

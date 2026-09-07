@@ -19,8 +19,7 @@ namespace optimize {
 
 FileSession::FileSession(const std::string& original_path, const std::string& tmp_base)
     : path_(original_path) {
-    std::string tok = tmp_token(path_);
-    dir_ = util::join_path(tmp_base, tok);
+    dir_ = util::join_path(tmp_base, session_cookie());
     util::mkdirs(dir_);
 }
 
