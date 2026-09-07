@@ -352,6 +352,8 @@ static TagTables read_tag_tables() {
                     if (v.is_string()) t.mp4[normalize_4cc(k)] = v.get<std::string>();
         }
         if (data.contains("wav")) fill(t.wav, data.at("wav"));
+        if (data.contains("canonical_aliases"))
+            fill(t.canonical_aliases, data.at("canonical_aliases"));
     }
     return t;
 }

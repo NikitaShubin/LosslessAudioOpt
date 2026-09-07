@@ -5,6 +5,7 @@
 #include <cstring>
 #include <set>
 
+#include "config.h"
 #include "i18n.h"
 #include "media.h"
 #include "util.h"
@@ -21,35 +22,12 @@ std::string canonical_key(const std::string& key) {
         if (ch == ' ' || ch == '_' || ch == '-') continue;
         c.push_back((char)::tolower((unsigned char)ch));
     }
-    static const std::map<std::string, std::string> m = {
-        {"title", "title"},
-        {"artist", "artist"},
-        {"album", "album"},
-        {"albumartist", "album_artist"},
-        {"composer", "composer"},
-        {"genre", "genre"},
-        {"date", "date"},
-        {"year", "date"},
-        {"originaldate", "date"},
-        {"track", "track"},
-        {"tracknumber", "track"},
-        {"disc", "disc"},
-        {"discnumber", "disc"},
-        {"comment", "comment"},
-        {"isrc", "isrc"},
-        {"encoder", "encoder"},
-        {"lyrics", "lyrics"},
-        {"unsyncedlyrics", "lyrics"},
-        {"copyright", "copyright"},
-        {"copyrightmessage", "copyright"},
-        {"cuesheet", "cue_sheet"},
-        {"replaygain_track_gain", "replaygain_track_gain"},
-        {"replaygain_track_peak", "replaygain_track_peak"},
-        {"replaygain_album_gain", "replaygain_album_gain"},
-        {"replaygain_album_peak", "replaygain_album_peak"},
-    };
-    auto it = m.find(c);
-    if (it != m.end()) return it->second;
+    // Синонимы канонических ключей — data-driven (formats/tag_tables.json,
+    // секция canonical_aliases): нормализованное имя -> канонический ключ.
+    // Кеш load_tag_tables() безопасен (конфиги не меняются на лету).
+    const auto& aliases = config::load_tag_tables().canonical_aliases;
+    auto it = aliases.find(c);
+    if (it != aliases.end()) return it->second;
     return key;  // произвольный ключ — как в источнике
 }
 

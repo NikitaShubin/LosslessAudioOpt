@@ -95,6 +95,10 @@ struct TagTables {
     std::map<std::string, std::string> id3;   // TIT2 -> title
     std::map<std::string, std::string> mp4;   // \xa9nam -> title
     std::map<std::string, std::string> wav;   // IART -> artist
+    // Синонимы канонических ключей: нормализованное имя (lowercase, без
+    // '_'/' '/'-') -> канонический ключ (canonical_key). Глобальная схема,
+    // не per-формат (хранится отдельно от key_map каждого формата).
+    std::map<std::string, std::string> canonical_aliases;
 };
 
 // Каталог formats/ рядом с exe.
