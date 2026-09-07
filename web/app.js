@@ -2,7 +2,6 @@
 const LS_TOKEN = "llao_token";
 let token = localStorage.getItem(LS_TOKEN) || "";
 let pollTimer = null;
-let lastSeq = 0;
 let currentRows = [];
 let isPaused = false;
 let selectedIds = new Set();
@@ -15,8 +14,9 @@ const el = (id) => document.getElementById(id);
 const loginDiv = el("login"), appDiv = el("app");
 const tokenInput = el("token-input"), loginForm = el("login-form"), loginError = el("login-error");
 const versionEl = el("version"), cTotal = el("c-total"), cDone = el("c-done"), cFailed = el("c-failed");
-const addForm = el("add-form"), addPath = el("add-path"), addRecursive = el("add-recursive"), addMsg = el("add-msg");
-const queueBody = el("queue-body"), connStatus = el("conn-status"), lastSeqEl = el("last-seq");
+const addForm = el("add-form"), addPath = el("add-path"), addTarget = el("add-target");
+const addRestore = el("add-restore"), addMsg = el("add-msg");
+const queueBody = el("queue-body"), connStatus = el("conn-status");
 const opMsgEl = el("op-msg");
 function opmsg(text, cls) {
   if (!opMsgEl) return;
@@ -87,12 +87,6 @@ async function rpc(cmd, args) {
 function setConn(ok, text) {
   connStatus.textContent = text;
   connStatus.className = "conn " + (ok ? "ok" : "err");
-}
-function chipState(s) {
-  const m = {queued:"queued", prep:"prep", running:"running", ok:"ok", stopped:"stopped", error:"error"};
-  const icons = {queued:"⏳", prep:"⚙️", running:"⚙️", ok:"✓", stopped:"‖", error:"✗"};
-  const cls = m[s] || "queued";
-  return `<span class="chip chip-${cls}" title="${s}">${icons[s] || "?"}</span>`;
 }
 function taskDot(st, idx, info) {
   const c = st==="ok" ? "ok" : st==="running" ? "running" : st==="failed" ? "failed" : "pend";
@@ -197,12 +191,32 @@ function progressBar(r){
   }
   if (r.state==="ok") {
     const save = (r.pct!==undefined && r.pct!==null) ? r.pct.toFixed(1) : "0.0";
-    return `<span class="pct-val prog-ok">${save}%</span>`;
+    // Оптимизация — процент выигрыша (зелёный), восстановление — размер может
+    // вырасти (серый/нейтральный: это норма режима, а не ошибка).
+    const cls = r.mode==="restore" ? "pct-val prog-restore" : "pct-val prog-ok";
+    return `<span class="${cls}">${save}%</span>`;
   }
   const done = tasks.filter(t=>t==="ok"||t==="failed").length;
   const total = tasks.length;
   const pct = total ? (done/total*100) : 0;
   return `<span class="pct-val prog-run">${pct.toFixed(0)}%</span>`;
+}
+
+// Путь, показываемый в столбце «Файл». Когда результат лежит в целевой папке —
+// выводим его относительно target_dir (без длинного префикса), иначе полный
+// путь/метка строки. Граница сегмента проверяется, чтобы префикс-совпадение
+// (напр. /d/tmp/2 → /d/tmp/22) не давало ложного «относительного» пути.
+function displayPath(r){
+  let p = (r.out_path && r.out_path!=="") ? r.out_path : r.label;
+  const t = r.target_dir || "";
+  if (t && p.startsWith(t) && p.length > t.length) {
+    const ch = p.charAt(t.length);
+    if (ch === "/" || ch === "\\") {
+      const rel = p.slice(t.length + 1);
+      if (rel) p = rel;
+    }
+  }
+  return p;
 }
 
 function updateSelectionUI(){
@@ -249,7 +263,7 @@ function renderQueue(rows){
   currentRows = rows || [];
   for (let id of [...selectedIds]) if (!currentRows.find(r=>r.id===id)) selectedIds.delete(id);
   if (!rows || rows.length===0) {
-    queueBody.innerHTML = `<tr><td colspan="8" class="empty">Очередь пуста</td></tr>`;
+    queueBody.innerHTML = `<tr><td colspan="7" class="empty">Очередь пуста</td></tr>`;
     updateSelectionUI();
     return;
   }
@@ -278,7 +292,13 @@ function renderQueue(rows){
     const handle = `<span class="drag-handle" draggable="true" data-drag="${r.id}" title="Перетащите">≡</span>`;
     const chk = `<input type="checkbox" data-chk="${r.id}" ${selectedIds.has(r.id)?"checked":""}>`;
     const selClass = selectedIds.has(r.id) ? "selected" : "";
-    html += `<tr data-id="${r.id}" class="${selClass}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td>${esc(r.label)}</td><td class="td-center">${chipState(r.state)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
+    // Статус строки задаётся фоном через класс tr.st-<state>; отдельного
+    // столбца нет. clear-done и кнопки перезапуска остаются по оси действий.
+    const badge = r.mode==="restore" ? `<span class="badge badge-restore" title="Восстановление">restore</span>` : "";
+    const shown = displayPath(r);
+    const exitErr = (r.last_error && (r.state==="stopped"||r.state==="error"))
+      ? `<span class="warn" title="${esc(r.last_error)}">⚠</span> ` : "";
+    html += `<tr data-id="${r.id}" class="${selClass} st-${r.state}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td>${badge}${exitErr}${esc(shown)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
   }
   queueBody.innerHTML = html;
   updateSelectionUI();
@@ -438,10 +458,12 @@ async function pollState(){
     btnClearCompleted.title = okCount > 0
       ? `Удалить только успешно завершённые (ok) — ${okCount}`
       : "Удалить только успешно завершённые (ok)";
-    lastSeqEl.textContent = "seq "+(j.last_seq||0);
     renderQueue(j.rows);
     maybeAutoScroll();
     setConn(true, isPaused ? "Пауза" : "Подключено");
+    // Демон без авторизации (--no-auth): «Выйти» не нужен — токена нет.
+    const btnLogout = el("btn-logout");
+    if (btnLogout) btnLogout.classList.toggle("hidden", !!j.no_auth);
   } catch(e){
     if (String(e.message)==="401") return;
     setConn(false, "Ошибка: "+e.message);
@@ -485,6 +507,28 @@ if (tableWrap) {
     setAutoScroll(false);
   });
 }
+// Изменение размеров окна/контейнера: желаемое положение (центр массы активных
+// строк) не изменилось, но scrollTop, удерживающий его в кадре, зависит от
+// видимой высоты — пересчитываем цель и без дедупа досрочиваем к ней.
+let autoScrollResizeTimer = 0;
+function onAutoScrollResize(){
+  if (!autoScrollOn) return;
+  if (autoScrollResizeTimer) return;  // уже запланирована доводка
+  autoScrollResizeTimer = setTimeout(()=>{
+    autoScrollResizeTimer = 0;
+    autoScrollBoost = true;
+    maybeAutoScroll();
+  }, 100);
+}
+if (tableWrap) {
+  // ResizeObserver отслеживает видимую высоту списка (меняется при ресайзе окна
+  // и при развороте на весь экран); scrollHeight от добавления строк не влияет.
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(()=>onAutoScrollResize()).observe(tableWrap);
+  } else {
+    window.addEventListener("resize", onAutoScrollResize);
+  }
+}
 (function initAutoScroll(){
   if (!btnAutoscroll) return;
   let v = "0";
@@ -510,22 +554,33 @@ addForm.addEventListener("submit", async (e)=>{
   e.preventDefault();
   const p = addPath.value.trim();
   if (!p) { addMsg.textContent="Введите путь"; addMsg.className="msg err"; return; }
+  const t = addTarget.value.trim();
+  const isRestore = !!addRestore.checked;
   addMsg.textContent="Отправка..."; addMsg.className="msg";
   try {
-    const res = await rpc("add", {paths:[p], recursive: !!addRecursive.checked});
+    const args = {paths:[p], mode: isRestore ? "restore" : "optimize"};
+    if (t) args.target_dir = t;
+    const res = await rpc("add", args);
     const added = (res.added||[]).length, rej = (res.rejected||[]).length;
     let msg = `Добавлено: ${added}`; if(rej) msg+=`, отклонено: ${rej} (${(res.rejected[0]||{}).reason||""})`;
-    addMsg.textContent=msg; addMsg.className="msg ok"; addPath.value="";
+    addMsg.textContent=msg; addMsg.className="msg ok";
+    if (added) { addPath.value=""; closeAddModal(); }
   } catch(err){ addMsg.textContent=err.message; addMsg.className="msg err"; }
 });
 btnStop.addEventListener("click", async ()=>{
-  const ids = currentRows.filter(r=>r.state==="queued"||r.state==="prep"||r.state==="running").map(r=>r.id);
-  if (!ids.length) { try{ await rpc("pause", {}); }catch(e){} return; }
-  if (!confirm(`Остановить ${ids.length} активных файлов? Их процессы будут прерваны, файлы перейдут в состояние «остановлен».`)) return;
-  let n=0;
-  try { const res = await rpc("bulk-cancel", {ids}); n = res.cancelled || 0; } catch(e){ opmsg(e.message, "err"); }
-  try{ await rpc("pause", {}); }catch(e){}
-  opmsg("Остановлено активных: "+n, "ok");
+  const hasRunning = currentRows.some(r=>r.state==="queued"||r.state==="prep"||r.state==="running");
+  if (!hasRunning) {
+    try{ await rpc("pause", {}); }catch(e){ return opmsg(e.message, "err"); }
+    opmsg("Нет активных файлов — очередь на паузе", "ok");
+    return;
+  }
+  if (!confirm("Остановить все активные файлы? Их процессы будут прерваны, файлы перейдут в состояние «остановлен».")) return;
+  // cancel-all останавливает все активные файлы на стороне демона (список id
+  // не передаём: состояние вкладки может отставать от очереди) и ставит паузу.
+  try {
+    const res = await rpc("cancel-all", {});
+    opmsg("Остановлено активных: "+(res.cancelled||0)+". Очередь на паузе.", "ok");
+  } catch(e){ opmsg(e.message, "err"); }
 });
 btnResume.addEventListener("click", async ()=>{
   const ids = currentRows.filter(r=>r.state==="stopped"||r.state==="error").map(r=>r.id);
@@ -604,18 +659,19 @@ chkAll && chkAll.addEventListener("change", ()=>{
   });
   updateSelectionUI();
 });
-const btnExpand = el("btn-expand"), queuePanel = el("queue-panel");
-function setExpanded(on) {
-  if (!queuePanel || !btnExpand) return;
-  queuePanel.classList.toggle("expanded", on);
-  btnExpand.title = on ? "Свернуть" : "Развернуть на весь экран";
+const addModal = el("add-modal"), addCancel = el("add-cancel"), btnAdd = el("btn-add");
+function openAddModal(){
+  addMsg.textContent=""; addMsg.className="msg";
+  addModal.classList.remove("hidden");
+  addPath.focus();
 }
-btnExpand && btnExpand.addEventListener("click", ()=>{
-  setExpanded(queuePanel ? !queuePanel.classList.contains("expanded") : false);
-});
+function closeAddModal(){ if (addModal) addModal.classList.add("hidden"); }
+btnAdd && btnAdd.addEventListener("click", openAddModal);
+addCancel && addCancel.addEventListener("click", closeAddModal);
+addModal && addModal.addEventListener("click", (e)=>{ if (e.target === addModal) closeAddModal(); });
 document.addEventListener("keydown", (e)=>{
-  if (e.key === "Escape" && queuePanel && queuePanel.classList.contains("expanded"))
-    setExpanded(false);
+  if (e.key === "Escape" && addModal && !addModal.classList.contains("hidden"))
+    closeAddModal();
 });
 el("btn-shutdown").addEventListener("click", async ()=>{
   if(!confirm("Выключить демон? Обработка активных файлов завершится, затем демон остановится.")) return;

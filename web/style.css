@@ -14,11 +14,13 @@
 .counters{display:flex;gap:12px;color:#9aa3b2}
 .counters b{color:#e6e8eb}
 .top-actions button{padding:6px 10px;border:1px solid #2a2f3a;background:#0f1115;color:#e6e8eb;border-radius:6px;cursor:pointer}
-.panel{margin:16px;background:#1a1d24;border:1px solid #2a2f3a;border-radius:10px;padding:16px}
-.panel h2{margin:0 0 12px;font-size:15px;color:#9aa3b2}
+/* Список очереди занимает почти всю страницу: без панели/рамки, между верхней
+   панелью и заголовком «Очередь» — только линия topbar (border-bottom). */
+.queue{flex:1;display:flex;flex-direction:column;min-height:0;position:relative}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .row input[type=text]{flex:1;min-width:280px;padding:8px 10px;border:1px solid #2a2f3a;border-radius:8px;background:#0f1115;color:#e6e8eb}
-.chk{color:#9aa3b2;display:flex;gap:6px;align-items:center}
+#add-target{flex:1;min-width:200px;max-width:340px}
+.chk{color:#9aa3b2;display:flex;gap:6px;align-items:center;white-space:nowrap}
 button{padding:8px 12px;border:1px solid #2a2f3a;border-radius:8px;background:#2a2f3a;color:#e6e8eb;cursor:pointer}
 button:hover{border-color:#3b82f6}
 button.danger{color:#f87171}
@@ -32,27 +34,40 @@ table{width:100%;border-collapse:collapse}
 th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #2a2f3a}
 th{color:#9aa3b2;font-weight:600;font-size:12px;text-transform:uppercase}
 td.empty{color:#6b7280;text-align:center;padding:24px}
-.chip{display:inline-block;font-size:14px;line-height:1}
-td.td-center{text-align:center}
-th.th-center{text-align:center}
+/* Статус больше не колонка: строка раскрашивается по состоянию файла. */
+tr.st-queued{background:transparent}
+tr.st-prep,tr.st-running{background:rgba(6,182,212,.10)}
+tr.st-ok{background:rgba(34,197,94,.10)}
+tr.st-stopped{background:rgba(107,114,128,.10)}
+tr.st-error{background:rgba(239,68,68,.12)}
 td.prog{white-space:nowrap;text-align:center}
 .pct-val{display:inline-block;min-width:5.5em;text-align:center;font-variant-numeric:tabular-nums;vertical-align:middle}
 .pct-val.prog-run{color:#06b6d4}
 .pct-val.prog-ok{color:#22c55e}
+/* Восстановление: проценты обычно отрицательные (не про экономию) — показываем
+   нейтрально, серый не сигнализирует об ошибке (в отличие от красного). */
+.pct-val.prog-restore{color:#c8d0da}
+.badge{font-size:10px;font-weight:600;padding:1px 6px;border-radius:10px;vertical-align:1px}
+.badge-restore{background:#263349;color:#9fd0ff;margin-right:6px}
+.warn{color:#eab308;margin-right:6px;cursor:help}
 .tasks{display:flex;gap:4px;flex-wrap:wrap}
 .task-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
 .task-ok{background:#22c55e}.task-running{background:#06b6d4;animation:pulse 1s infinite}
 .task-failed{background:#ef4444}.task-pend{background:#374151}
 .task-excluded{background:#eab308}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-#app{display:flex;flex-direction:column;min-height:100vh}
+#app{display:flex;flex-direction:column;height:100vh}
 .topbar{position:sticky;top:0;z-index:5}
-.panel.queue{display:flex;flex-direction:column;min-height:0}
-.table-wrap{overflow:auto;max-height:52vh;border:1px solid #2a2f3a;border-radius:8px}
+.table-wrap{flex:1;overflow:auto;min-height:0}
+/* Тёмный «слайдер» (полоса прокрутки) в стиле интерфейса. */
+.table-wrap{scrollbar-width:auto;scrollbar-color:#374151 #0f1115}
+.table-wrap::-webkit-scrollbar{width:10px;height:10px}
+.table-wrap::-webkit-scrollbar-track{background:#0f1115}
+.table-wrap::-webkit-scrollbar-thumb{background:#374151;border-radius:5px;border:2px solid #0f1115}
+.table-wrap::-webkit-scrollbar-thumb:hover{background:#4b5563}
 #queue-table thead th{position:sticky;top:0;background:#1a1d24;z-index:2}
 body{padding-bottom:0}
 .conn.ok{color:#4ade80}.conn.err{color:#f87171}
-.seq{color:#6b7280}
 .muted{color:#6b7280}
 .saving{color:#86efac;font-size:12px}
 .drag-handle{cursor:grab;padding:4px 8px;color:#9aa3b2;user-select:none}
@@ -68,17 +83,30 @@ tr.drop-after{box-shadow:inset 0 -2px 0 #3b82f6}
 .action-btns{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
 .action-btns button{padding:4px 8px;font-size:13px;border-radius:6px}
 .drag-ghost{position:fixed;pointer-events:none;opacity:.92;background:#1a1d24;border:1px solid #3b82f6;padding:8px 12px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);z-index:1000;transform:rotate(2deg);font-size:13px;color:#e6e8eb}
-.queue-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-.queue-head h2{margin:0}
-.queue-head__actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.queue-head{display:flex;align-items:center;gap:12px;padding:12px 16px}
+.queue-title-row{flex:1;display:flex;align-items:center;gap:10px}
+/* Кнопка слежения — точно в центре строки заголовка «Очередь». */
+.queue-head__center{flex:1;display:flex;justify-content:center}
+.queue-head__actions{flex:1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 #app button.icon-btn{width:28px;height:28px;padding:0;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;border-radius:6px}
 button.icon-btn.on{box-shadow:inset 0 0 0 2px #3b82f6;border-color:#3b82f6;color:#93c5fd}
+/* Кнопка «+» рядом с заголовком Очередь — открывает модал добавления. */
+#btn-add.add-btn{width:30px;height:30px;font-size:18px;font-weight:600;background:#3b82f6;border-color:#3b82f6;color:#fff}
+#btn-add.add-btn:hover{background:#2563eb;border-color:#2563eb}
 button.queue-title{background:none;border:none;cursor:pointer;margin:0;font-size:15px;color:#9aa3b2;font-weight:600;padding:0;border-radius:6px}
 button.queue-title:hover{color:#e6e8eb}
-.panel.queue.expanded{position:fixed;inset:12px;z-index:20;margin:0;overflow:hidden}
-.panel.queue.expanded .table-wrap{max-height:none;flex:1;min-height:0}
 button:disabled{opacity:.45;cursor:default}
 button:disabled:hover{border-color:#2a2f3a}
+/* Модал добавления файлов: оверлей поверх всего, тёмный бокс в стиле login. */
+.modal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);z-index:40}
+.modal-box{background:#1a1d24;padding:24px;border-radius:12px;max-width:560px;width:92%;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.modal-box h2{margin:0 0 14px;font-size:17px;color:#e6e8eb}
+#add-form{display:flex;flex-direction:column;gap:12px}
+.add-field{display:flex;flex-direction:column;gap:6px;color:#9aa3b2;font-size:13px}
+.add-field input[type=text]{width:100%;padding:9px 11px;border:1px solid #2a2f3a;border-radius:8px;background:#0f1115;color:#e6e8eb;font-size:14px}
+.modal-btns{display:flex;gap:10px;margin-top:4px}
+.modal-btns button[type=submit]{padding:9px 14px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+.modal-btns button[type=submit]:hover{background:#2563eb}
 #btn-stop{background:#7f1d1d;border-color:#991b1b;color:#fca5a5}
 #btn-stop:hover:not(:disabled){background:#991b1b}
 #btn-resume{background:#14532d;border-color:#166534;color:#86efac}
