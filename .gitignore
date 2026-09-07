@@ -30,6 +30,10 @@ llao.exe
 llao-linux
 llao-daemon.exe
 llao-daemon-linux
+llao-*-asan
+
+# Рабочий каталог снятия golden-дампов событий
+tests/golden/_dump-work/
 
 # Тестовые артефакты
 scratch_err/
@@ -39,3 +43,6 @@ tests/wine_*
 
 # FUSE transient files (killed daemons holding open binaries)
 .fuse_hidden*
+
+# Persist-артефакт демона, оставленный тестом при запуске из корня
+queue.json

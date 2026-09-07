@@ -1,8 +1,11 @@
 # REFACTOR_TODO: разделение LLAO на демон и клиент
 
-Статус: план утверждён, работа не начата.
+Статус: демон (Фаза 1) реализован и работает (см. TODO.md → v2.0);
+проведён рефакторинг событийного слоя (Фазы A–C: каноническая модель событий,
+единая модель ошибки, тестовый харнесс, разделение Makefile, CI linux —
+детали ниже в §Фаза 1 «Статус»). Пункты ниже актуальны для клиента `llao-cli`.
 Документ адресован агенту/разработчику, который будет реализовывать рефакторинг.
-Номера строк актуальны на момент составления плана и могут сместиться —
+Номера строк в §3 устарели (актуальны на момент составления плана) —
 ориентироваться на имена функций и структур.
 
 ---
@@ -425,6 +428,30 @@ shutdown{}
 - Второй `add` во время активной обработки принимается и обрабатывается
   (ключевое требование R2) — повторяемый стресс-подтест.
 - Запрос без/с неверным токеном → 401.
+
+### Статус Фазы 1 (реализовано)
+
+`llao-daemon` реализован целиком (`src/serve.cpp`, `src/rpc.cpp`,
+`src/http_api.cpp`, `src/daemon_sink.cpp`, `src/events.cpp`, веб-UI вшит).
+Список рефакторингов и тестов, сделанных после реализации:
+
+- **Фаза A** — `src/contract.h` (mode/verify/normalize_path), строгие
+  `mode`/`target_dir`/`--restore-to`, `recursive` удалён, веб и README
+  приведены к «без рекурсивно».
+- **Фаза B — события**: `dsvc::Event {seq,type,has_id,file_id,payload}` +
+  `EventBuffer::push_for()`; единая модель ошибки `error_file(id, reason)`
+  (вместо паразитных `error(line)+mark_error(id)`); единый `TaskState`;
+  `init_session` удалён; гонки порядка (`begin_file/job_meta/added` раньше
+  `prep/task`; `set_tasks` раньше `task(Running)`) закрыты эмиссией под
+  qm-lock до `cv.notify_all()`. Эталоны: `tests/golden/events-*.{jsonl,types}`,
+  `tests/golden/web-client-contract.md`, `tests/dump_events.py`.
+- **Фаза C — инфраструктура**: `tests/_daemon_harness.py` (общий подъём
+  демона/RPC/поллинг), Makefile split (`COMMON_SRCS`/`DAEMON_SRCS` — монолит
+  не линкует событийный слой и веб-ассеты), цель `make test-daemon`,
+  CI `.github/workflows/ci-linux.yml` (нативные linux-сборка + codecs через
+  `llao-linux tools` + wine для .exe-кодеков + интеграционные тесты, кэш `bin/`).
+- Монолит `llao.exe` не менялся по поведению (проверяется прогоном
+  `tests/test_tags.py`, `tests/test_errors.py` и ручным TUI на каждом релизе).
 
 ---
 
