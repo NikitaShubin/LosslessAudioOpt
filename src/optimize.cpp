@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <unordered_set>
@@ -22,7 +23,6 @@
 #include "report.h"
 #include "out.h"
 #include "stats.h"
-#include "status.h"
 #include "tags.h"
 #include "tool.h"
 #include "util.h"
@@ -590,6 +590,48 @@ static std::string fmt_ext(const std::string& id, const std::vector<config::Form
     return id;
 }
 
+// Доставка sidecar рядом с доставленным файлом <dir>/<base_ne>.<ext>.
+// Единая транзакция, согласованная с персистентностью очереди (см. util.cpp
+// replace_file): кандидат копируется в .llao-tmp.tags.zip рядом, старый
+// sidecar удаляется, новый переименовывается. Если sidecar не нужен
+// (need=false), а старый <base_ne>.tags.zip лежит на диске — удаляем его:
+// теги уже встроены в файл, лишний архив оставался бы устаревшим.
+// Возвращает true если весь процесс прошёл штатно; *note пополняется
+// предупреждением при сбое.
+static bool deliver_sidecar(const std::string& sc_src, bool need,
+                            const std::string& dir, const std::string& base_ne,
+                            std::string* note) {
+    const std::string dst = util::join_path(dir, base_ne + ".tags.zip");
+    const std::string tmp = util::join_path(dir, "." + base_ne + ".llao-tmp.tags.zip");
+    util::remove_file(tmp);  // зачистка артефакта прерванного запуска
+    if (!need) {
+        if (util::file_exists(dst)) {
+            if (!util::remove_file(dst)) {
+                *note += i18n::str(
+                    "      ! could not remove the stale sidecar (tags) next to the file\n");
+                return false;
+            }
+        }
+        return true;
+    }
+    if (!util::copy_file(sc_src, tmp)) {
+        *note += i18n::str("      ! could not copy the sidecar (tags) next to the file\n");
+        return false;
+    }
+    util::ReplaceResult rr = util::replace_file(dst, tmp, dst);
+    if (!rr.ok) {
+        if (rr.original_lost)
+            *note += i18n::fmt(
+                "      ! could not put the sidecar in place (remains at %s: %s)\n",
+                rr.backup.c_str(), rr.error.c_str());
+        else
+            *note += i18n::str(
+                "      ! could not replace the sidecar (tags) next to the file\n");
+        return false;
+    }
+    return true;
+}
+
 // Текстовое имя режима верификации (для stats.json).
 static const char* verify_name(Verify v) {
     switch (v) {
@@ -638,6 +680,11 @@ struct FileJob {
     std::string dir;
     std::string tok;
 
+    // Режим задачи (демон): обычная оптимизация или восстановление в один формат.
+    JobMode mode = JobMode::Optimize;
+    std::string target_dir;  // пусто = замена на месте; иначе — корень вывода
+    std::string restore_to;  // для Restore: id целевого формата (пусто = по умолчанию)
+
     // --- RAII-сессия tmp-файлов (создаётся в prep_file) ---
     std::unique_ptr<FileSession> session;
 
@@ -652,6 +699,11 @@ struct FileJob {
     // Мгновенная остановка связанных процессов (remove/shutdown): проверяется
     // в цикле опроса proc::run (200 мс). Адрес стабилен (jobs — unique_ptr).
     std::atomic<bool> kill_requested{false};
+    // Файл вошёл в фазу финализации (finalize_file выполняется на воркере).
+    // Ставится до начала любых долгих операций (валидация победителя/доставка).
+    // Позволяет remove_file доставить kill_requested строке, у которой done уже
+    // истинно, но финализация ещё идёт (иначе она была бы «неостановимой»).
+    std::atomic<bool> finalizing{false};
 
     // --- подготовка (один поток prep, до выпуска задач) ---
     bool prep_ok = false;
@@ -682,6 +734,13 @@ struct FileJob {
     int tool_errors = 0;      // утилиты форматов недоступны
     bool error_counted = false;  // под m: ошибка файла уже учтена в failed (без двойного счёта)
     report::FileSummary summary;
+    // Задача в режиме Restore, вход уже в целевом формате: prep пометил файл ok
+    // и не строил задач — finalize не должен выбирать победителя/менять файл.
+    bool early_ok = false;
+    std::string out_path;  // фактический путь результата (после записи в цель/на место)
+    // Ошибка файла уже доложена через obs::sink()->error_file (единая модель):
+    // finalize не должен эмитить второе событие для того же файла.
+    bool error_reported = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -818,14 +877,10 @@ struct Runner {
         j.m = std::make_unique<std::mutex>();
     }
 
-    // Добавляет файлы в очередь на лету (демон). Вызывается вне qm, берёт
-    // лок сам. Инвариант: только целые файлы (не задачи). Эмитит begin_file
-    // для новых строк и будит воркеры.
-    // Добавляет файлы в хвост очереди. Возвращает стабильные idx новых
-    // заданий (FileJob::idx монотонны, позиции в векторе могут меняться
-    // при reorder — клиент должен использовать возвращённые idx, а не
-    // вычислять их из размера очереди).
-    std::vector<size_t> append_files(const std::vector<FileItem>& items) {
+    // Добавляет файлы в очередь на лету (демон). Режим и целевая папка пачки
+    // фиксируются при добавлении и хранятся в FileJob (см. AddOptions).
+    std::vector<size_t> append_files(const std::vector<FileItem>& items,
+                                     const AddOptions& ao = {}) {
         std::vector<size_t> idx;
         std::vector<std::string> labels;
         {
@@ -841,13 +896,28 @@ for (const auto& it : items) {
                 size_t i = jobs.size();
                 jobs.emplace_back(std::make_unique<FileJob>());
                 make_job(*jobs[i], i, it);
+                jobs[i]->mode = ao.mode;
+                jobs[i]->target_dir = ao.target_dir;
+                jobs[i]->restore_to = ao.to;
                 idx.push_back(i);
                 labels.push_back(it.rel);
             }
+            // begin_file/job_meta/added эмитятся ПОД qm, до cv.notify_all():
+            // воркер, проснувшийся по уведомлению, может сразу выпустить
+            // task(Running)/prep — но ещё не может приобрести qm, поэтому
+            // строки всегда создаются в зеркале РАНЬШЕ любых событий по файлу.
+            // Иначе на llao+WSL наблюдалась гонка: task(Running) до begin_file.
+            for (size_t k = 0; k < idx.size(); k++) {
+                const FileJob& j = *jobs[idx[k]];
+                obs::sink()->begin_file(idx[k], labels[k]);
+                // Режим и целевая папка пачки — метаданные строки (бейдж в вебе).
+                obs::sink()->job_meta(idx[k],
+                                      j.mode == JobMode::Restore ? "restore" : "optimize",
+                                      j.target_dir);
+            }
+            if (idx.size() > 1) obs::sink()->files_added(idx, labels);
             cv.notify_all();
         }
-        for (size_t k = 0; k < idx.size(); k++) obs::sink()->begin_file(idx[k], labels[k]);
-        if (idx.size() > 1) obs::sink()->files_added(idx, labels);
         return idx;
     }
 
@@ -885,7 +955,15 @@ for (const auto& it : items) {
         // Удаление из очереди (любого состояния) снимает «запрет на повторное
         // добавление»: после remove/cancel/clear-done файл можно добавить снова.
         seen_paths_.erase(norm_path(j.path));
-        if (j.done) return;
+        if (j.done) {
+            // Файл уже помечен завершённым, но если он ещё в финализации
+            // (валидация победителя/доставка с долгими процессами) — доводим
+            // kill_requested, чтобы finalize штатно развернулся в stopped и
+            // почистил tmp. Уже полностью завершённые строки не трогаем.
+            if (j.finalizing.load(std::memory_order_relaxed))
+                j.kill_requested.store(true, std::memory_order_relaxed);
+            return;
+        }
         if (!j.prep_done && !j.prep_running && j.released == 0) {
             // pending: снимаем сразу.
             j.cancelled = true;
@@ -1171,7 +1249,8 @@ for (const auto& it : items) {
                                    {"status", "error"},
                                    {"reason", probe.error}});
                 }
-                obs::sink()->error("ERROR " + j.path + " — " + probe.error + "\n");
+                obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + probe.error + "\n");
+                    j.error_reported = true;
                     release_deferred_budget();
                     return;
             }
@@ -1226,6 +1305,23 @@ for (const auto& it : items) {
         int bits = probe.bits_per_sample;
         if (bits <= 0) bits = 16;
         j.bits = bits;
+
+        // Восстановление: вход уже в целевом формате — пережимать нечего, файл
+        // завершается сразу (ok без замены). Проверка по расширению файла, как
+        // в монолитном restore (эталон клиентского поведения).
+        if (j.mode == JobMode::Restore && !j.restore_to.empty()) {
+            const config::Format* tf = nullptr;
+            for (const auto& f : fmts)
+                if (f.id == j.restore_to) { tf = &f; break; }
+            if (tf && lower_ext(j.path) == tf->extension) {
+                release_deferred_budget();
+                j.early_ok = true;
+                j.summary.path = j.path;
+                j.summary.status = "ok";
+                j.summary.detail = i18n::fmt("already %s — nothing to do", tf->id.c_str());
+                return;  // итоговое сообщение/событие/stats сформирует finalize_file
+            }
+        }
 
         // Файловый бюджет: оценка WAV + пиковый след. Если не влезает —
         // помечаем deferred и выходим (без error). При повторном вызове (deferred retry)
@@ -1285,7 +1381,8 @@ for (const auto& it : items) {
                                {"status", "error"},
                                {"reason", j.summary.detail}});
             }
-            obs::sink()->error("ERROR " + j.path + " — " + j.summary.detail + "\n");
+            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + j.summary.detail + "\n");
+            j.error_reported = true;
             return;
         }
         j.ref_size = util::file_size(ref_wav);
@@ -1301,6 +1398,10 @@ for (const auto& it : items) {
             if (!f.enabled) continue;
             if (!opts.formats.empty() &&
                 std::find(opts.formats.begin(), opts.formats.end(), f.id) == opts.formats.end())
+                continue;
+            // Восстановление: фильтруем по единственному целевому формату.
+            if (j.mode == JobMode::Restore && !j.restore_to.empty() &&
+                f.id != j.restore_to)
                 continue;
 
             // caps
@@ -1346,8 +1447,12 @@ for (const auto& it : items) {
             j.envs[f.id] = env;
 
             for (size_t vi = 0; vi < f.variants.size(); vi++) {
+                // Восстановление берёт максимальное сжатие (последний вариант).
+                if (j.mode == JobMode::Restore && vi + 1 < f.variants.size()) continue;
                 j.tasks.push_back({fi, vi});
             }
+            // Восстановление: вариантов/форматов больше не требуется.
+            if (j.mode == JobMode::Restore && !j.restore_to.empty()) break;
         }
         j.prep_ok = true;
     }
@@ -1535,11 +1640,28 @@ for (const auto& it : items) {
         // он общий для формата и может ещё понадобиться другим вариантам.
         {
             std::lock_guard<std::mutex> lk(*j.m);
-            if (cand.cost >= j.probe.size) {
-                util::remove_file(candidate);
+            if (j.mode == JobMode::Restore) {
+                // Восстановление не про экономию: победителем становится
+                // единственный кандидат, даже если он больше исходника.
+                if (j.best_valid) util::remove_file(j.best.path);
+                j.best = cand;
+                j.best_order = cand.order;
+                j.best_valid = true;
                 j.any_passed = true;
                 j.stat_records.push_back(std::move(rec));
                 return VariantOutcome::Ok;
+            }
+            if (cand.cost >= j.probe.size) {
+                // Доставка в целевую папку (optimize+target_dir): кандидат не
+                // обязан быть меньше исходника — лучший сохраняется и будет
+                // скопирован в цель (полная конвертация пачки).
+                bool keep_for_target = !j.target_dir.empty();
+                if (!keep_for_target) {
+                    util::remove_file(candidate);
+                    j.any_passed = true;
+                    j.stat_records.push_back(std::move(rec));
+                    return VariantOutcome::Ok;
+                }
             }
             bool promote = false;
             if (!j.best_valid) promote = true;
@@ -1563,8 +1685,12 @@ for (const auto& it : items) {
     // Вызывается ровно один раз (потоком, завершившим последнюю задачу).
     void finalize_file(FileJob& j) {
         const Options& opts = *this->opts;
+        // Показываем, что строка вошла в финализацию: remove_file (см.) сможет
+        // доставить kill_requested даже при done==true. Погасить флаг не нужно —
+        // файл после финализации остаётся done.
+        j.finalizing.store(true, std::memory_order_relaxed);
 
-        std::lock_guard<std::mutex> lk(*j.m);
+        std::unique_lock<std::mutex> lk(*j.m);
         std::vector<json::json> records = std::move(j.stat_records);
         if (j.cancelled) {
             // Файл снят из очереди во время обработки (remove/cancel-file):
@@ -1585,11 +1711,29 @@ for (const auto& it : items) {
         j.summary.path = j.path;
         j.summary.exclusions = j.exclusions;
 
+        // Restore, вход уже в целевом формате: prep пометил файл ok и не строил
+        // задач — победителей нет, доставлять нечего, но ветка выполняется для
+        // итогового статуса/сообщения так же, как обычный прогон.
+
         std::string msg;
         char buf[512];
 
         if (j.summary.status == "error") {
             // ошибка уже зафиксирована (ffprobe/ffmpeg, probe, декод, исключение)
+        } else if (j.early_ok) {
+            j.summary.original = j.probe.size;
+            j.summary.best = j.probe.size;
+            j.summary.savings_pct = 0.0;
+            j.summary.detail = i18n::str("already in the target format");
+            msg = i18n::fmt("OK   %s: already %s — nothing to do\n", j.base.c_str(),
+                            j.restore_to.c_str());
+            if (!opts.no_stats) stats::append_all(records);
+            if (logger) {
+                logger->event({{"type", "file_done"},
+                               {"file", j.path},
+                               {"status", "ok"},
+                               {"reason", "already in the target format"}});
+            }
         } else if (!j.best_valid) {
             // Победителя нет: либо ни один вариант не прошёл валидацию, либо все
             // прошедшие были не меньше исходного файла (и удалены при отборе).
@@ -1602,7 +1746,8 @@ for (const auto& it : items) {
             if (hard) {
                 j.summary.status = "error";
                 j.summary.detail = reason;
-                obs::sink()->error("ERROR " + j.path + " — " + reason + "\n");
+                obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+                j.error_reported = true;
                 if (!opts.no_stats) stats::append_all(records);
                 if (logger) {
                     logger->event({{"type", "file_done"},
@@ -1638,7 +1783,8 @@ for (const auto& it : items) {
                 j.failures.empty() ? i18n::str("variant failed") : j.failures[0];
             j.summary.status = "error";
             j.summary.detail = reason;
-            obs::sink()->error("ERROR " + j.path + " — " + reason + "\n");
+            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+            j.error_reported = true;
             if (!opts.no_stats) stats::append_all(records);
             if (logger) {
                 logger->event({{"type", "file_done"},
@@ -1655,10 +1801,35 @@ for (const auto& it : items) {
             // не заменяется, разбор причин обязателен.
             std::string winner_fail;
             if (opts.verify == Verify::Winner) {
+                // Валидация победителя — долгая операция (полный декод в WAV и
+                // побайтовое сравнение с референсом). Не удерживаем j.m на её
+                // время: иначе snapshot (RPC демона: cancel/stop/restart/counters)
+                // блокировался бы на всё время decode+compare. Копия Env снимается
+                // под локом, сама проверка исполняется вне критической секции и
+                // прерываема через kill_requested (per-file стоп). Если по ходу
+                // пришла отмена — финализация сворачивается в stopped ниже.
                 auto eit = j.envs.find(best.format);
-                std::string werr =
-                    eit == j.envs.end() ? "internal: no Env for " + best.format
-                                        : validate_candidate(j.session->ref_wav_path(), best.path, eit->second);
+                std::optional<Env> env_copy;
+                if (eit != j.envs.end()) env_copy = eit->second;
+                std::string wav_path = j.session->ref_wav_path();
+                lk.unlock();
+                std::string werr;
+                if (!env_copy) {
+                    werr = "internal: no Env for " + best.format;
+                } else {
+                    werr = validate_candidate(wav_path, best.path, *env_copy,
+                                              &j.kill_requested);
+                }
+                lk.lock();
+                if (j.kill_requested.load(std::memory_order_relaxed) ||
+                    proc::cancelled() || proc::aborted()) {
+                    j.summary.path = j.path;
+                    j.summary.status = "stopped";
+                    j.summary.detail = i18n::str("removed from queue");
+                    discard_job_tmp(j);
+                    obs::sink()->mark_stopped(j.idx);
+                    return;
+                }
                 if (!werr.empty()) {
                     winner_fail = i18n::fmt("winner %s/%s failed verification: %s",
                                             best.format.c_str(), best.variant.c_str(),
@@ -1674,7 +1845,8 @@ for (const auto& it : items) {
                 if (!opts.no_stats) stats::append_all(records);
                 j.summary.status = "error";
                 j.summary.detail = winner_fail;
-                obs::sink()->error("ERROR " + j.path + " — " + winner_fail + "\n");
+                obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + winner_fail + "\n");
+                j.error_reported = true;
                 if (logger) {
                     logger->event({{"type", "file_done"},
                                    {"file", j.path},
@@ -1687,15 +1859,28 @@ for (const auto& it : items) {
                 }
             } else {
                 double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
+                // Доставка в цель при оптимизации может быть не меньше исходника
+                // (полная конвертация пачки) — такие файлы показываются как 0.0%.
+                // Восстановление при этом не трогаем: пересжатие в FLAC обычно
+                // Увеличивает размер, и честный (отрицательный) процент — норма
+                // режима, UI рисует его нейтральным серым.
+                if (savings < 0.0 && j.mode != JobMode::Restore) savings = 0.0;
                 for (auto& r : records) {
                     if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
                 }
                 if (!opts.no_stats) stats::append_all(records);
 
-                snprintf(buf, sizeof(buf), "%s",
-                         i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", j.base.c_str(),
-                                   j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
-                                   best.format.c_str(), best.variant.c_str()).c_str());
+                if (j.mode == JobMode::Restore) {
+                    snprintf(buf, sizeof(buf), "%s",
+                             i18n::fmt("OK   %s: restore to %s/%s (%.1f MB -> %.1f MB, %.1f%%)\n",
+                                       j.base.c_str(), best.format.c_str(), best.variant.c_str(),
+                                       j.probe.size / 1048576.0, best_cost / 1048576.0, savings).c_str());
+                } else {
+                    snprintf(buf, sizeof(buf), "%s",
+                             i18n::fmt("OK   %s: %.1f MB -> %.1f MB (%.1f%%), %s/%s\n", j.base.c_str(),
+                                       j.probe.size / 1048576.0, best_cost / 1048576.0, savings,
+                                       best.format.c_str(), best.variant.c_str()).c_str());
+                }
                 msg = buf;
 
                 j.summary.status = "ok";
@@ -1706,20 +1891,184 @@ for (const auto& it : items) {
                 j.summary.best_variant = best.variant;
 
                 // Замена на месте: исходник трогаем только здесь.
-                if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
+                if (j.mode == JobMode::Restore) {
+                    // Восстановление: единственный кандидат переносится в место
+                    // назначения (целевая папка либо на место исходника). Отсечки
+                    // по размеру нет — restore не про экономию, а про формат.
+                    std::string ext = fmt_ext(best.format, *fmts);
+                    bool delivered = false;
+                    if (opts.dry_run) {
+                        j.summary.detail = i18n::str("dry-run — no write");
+                        delivered = true;
+                    } else if (!j.target_dir.empty()) {
+                        // Целевая папка: структура повторяет rel-подкаталог пачки,
+                        // исходник остаётся на месте.
+                        std::string rel_dir = util::dir_name(j.rel);
+                        std::string dst_dir =
+                            rel_dir.empty() ? j.target_dir
+                                            : util::join_path(j.target_dir, rel_dir);
+                        util::mkdirs(dst_dir);
+                        std::string dst = util::join_path(dst_dir, j.base_ne + "." + ext);
+                        std::error_code ec;
+                        // Путь кандидата sidecar (в tmp-сессии) фиксируем ДО переноса
+                        // самого кандидата: fallback best.path+".tags.zip" перестанет
+                        // существовать после rename best.path -> dst.
+                        auto pit = j.fmt_plans.find(best.format);
+                        std::string sc_src =
+                            pit != j.fmt_plans.end()
+                                ? pit->second.sidecar_path
+                                : best.path + ".tags.zip";
+                        // Перенос на том же томе (rename), иначе копия + удаление.
+                        // Не удерживаем j.m: файл готов (best.path), перенос/копия
+                        // на одном диске не должна блокировать snapshot (RPC).
+                        lk.unlock();
+                        fs::rename(fs::u8path(best.path), fs::u8path(dst), ec);
+                        if (ec) {
+                            if (util::copy_file(best.path, dst)) {
+                                util::remove_file(best.path);
+                                ec.clear();
+                            }
+                        }
+                        if (!ec && best.sidecar > 0) {
+                            // Транзакционная доставка sidecar в целевую папку.
+                            deliver_sidecar(sc_src, true, dst_dir, j.base_ne, &msg);
+                        }
+                        lk.lock();
+                        if (!ec) {
+                            j.out_path = dst;
+                            j.summary.detail = i18n::str("restored: ") + dst;
+                            delivered = true;
+                        } else {
+                            j.summary.status = "error";
+                            j.summary.replacement_error = ec.message();
+                            j.summary.detail =
+                                i18n::str("restore failed, could not write to ") + dst_dir;
+                            msg += i18n::fmt(
+                                "      ! could not write the restored file to %s (%s)\n",
+                                dst.c_str(), ec.message().c_str());
+                        }
+                    } else if (j.ts.complete) {
+                        // Замена на месте (схема, согласованная с персистентностью):
+                        // кандидат копируется в .llao-tmp.<ext>, старый файл
+                        // удаляется, кандидат переименовывается на место; sidecar
+                        // доставляется той же транзакцией (см. deliver_sidecar).
+                        std::string new_path = util::join_path(j.dir, j.base_ne + "." + ext);
+                        std::string tmp_name =
+                            util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
+                        util::remove_file(tmp_name);
+                        if (util::copy_file(best.path, tmp_name)) {
+                            util::ReplaceResult rr =
+                                util::replace_file(j.path, tmp_name, new_path);
+                            if (!rr.ok) {
+                                j.summary.status = "error";
+                                if (!util::remove_file(tmp_name)) {
+                                    msg += i18n::fmt(
+                                        "      ! could not remove the temporary candidate "
+                                        "(%s); it was left in place\n",
+                                        tmp_name.c_str());
+                                }
+                                msg += rr.original_lost
+                                    ? i18n::fmt("      ! COULD NOT REPLACE the file; original "
+                                                "removed and the candidate remains at %s (%s)\n",
+                                                rr.backup.c_str(), rr.error.c_str())
+                                    : i18n::fmt("      ! could not replace the file (%s)\n",
+                                                rr.error.c_str());
+                                j.summary.detail = i18n::str("could not replace the file");
+                                j.summary.replacement_error = rr.error;
+                            } else {
+                                auto pit = j.fmt_plans.find(best.format);
+                                std::string sc_src =
+                                    pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                             : best.path + ".tags.zip";
+                                deliver_sidecar(sc_src, best.sidecar > 0, j.dir, j.base_ne,
+                                                &msg);
+                                j.out_path = new_path;
+                                j.summary.replaced = true;
+                                j.summary.detail =
+                                    i18n::str("replaced in place: ") + best.format + "/" + best.variant;
+                                delivered = true;
+                            }
+                        } else {
+                            j.summary.status = "error";
+                            msg += i18n::str(
+                                "      ! could not copy the candidate into the file folder\n");
+                            j.summary.detail =
+                                i18n::str("could not copy the candidate into the file folder");
+                        }
+                    } else {
+                        msg += i18n::str(
+                            "      ! not replaced: the container tags cannot be fully preserved\n");
+                        j.summary.detail =
+                            i18n::str("container tags cannot be fully preserved — no replacement");
+                    }
+                    if (delivered && j.summary.status != "error") {
+                        msg += i18n::str("      -> restored");
+                        if (!j.target_dir.empty() && !j.out_path.empty())
+                            msg += " to " + j.out_path;
+                        msg += "\n";
+                    }
+} else if (!opts.dry_run && j.mode == JobMode::Optimize && !j.target_dir.empty()) {
+                    // Целевая папка: копируем лучшего кандидата в target_dir/<rel-подкаталог>,
+                    // оригинал остаётся на месте. При доставке в цель кандидат не обязан
+                    // быть меньше исходника (полная конвертация пачки).
+                    std::string ext = fmt_ext(best.format, *fmts);
+                    std::string rel_dir = util::dir_name(j.rel);
+                    std::string dst_dir =
+                        rel_dir.empty() ? j.target_dir
+                                        : util::join_path(j.target_dir, rel_dir);
+                    util::mkdirs(dst_dir);
+                    std::string dst = util::join_path(dst_dir, j.base_ne + "." + ext);
+                    std::error_code ec;
+                    // Путь кандидата sidecar фиксируем ДО переноса самого кандидата.
+                    auto pit = j.fmt_plans.find(best.format);
+                    std::string sc_src =
+                        pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                 : best.path + ".tags.zip";
+                    // Не удерживаем j.m на переносе/копии в цель: файл готов,
+                    // доставка на одном диске не должна блокировать snapshot (RPC).
+                    lk.unlock();
+                    fs::rename(fs::u8path(best.path), fs::u8path(dst), ec);
+                    if (ec) {
+                        // Чужая файловая система: копия + удаление tmp-кандидата.
+                        if (util::copy_file(best.path, dst)) {
+                            util::remove_file(best.path);
+                            ec.clear();
+                        }
+                    }
+                    if (!ec && best.sidecar > 0) {
+                        // Транзакционная доставка sidecar в целевую папку.
+                        deliver_sidecar(sc_src, true, dst_dir, j.base_ne, &msg);
+                    }
+                    lk.lock();
+                    if (!ec) {
+                        j.out_path = dst;
+                        j.summary.detail = i18n::str("optimized to: ") + dst;
+                        msg += i18n::fmt("      -> optimized to %s\n", dst.c_str());
+                    } else {
+                        j.summary.status = "error";
+                        j.summary.replacement_error = ec.message();
+                        j.summary.detail = i18n::str("could not write to ") + dst_dir;
+                        msg += i18n::fmt(
+                            "      ! could not write the optimized file to %s (%s)\n",
+                            dst.c_str(), ec.message().c_str());
+                    }
+                } else if (!opts.dry_run && best_cost < j.probe.size && j.ts.complete) {
                     std::string ext = fmt_ext(best.format, *fmts);
                     std::string new_path =
                         util::join_path(j.dir, j.base_ne + "." + ext);
                     std::string tmp_name =
                         util::join_path(j.dir, "." + j.base_ne + ".llao-tmp." + ext);
-                    std::string bak_name =
-                        util::join_path(j.dir, "." + j.base_ne + ".llao-bak." + ext);
-                    if (util::copy_file(best.path, tmp_name)) {
-                        // Безопасная замена: оригинал переносится в .bak, кандидат — на место
-                        // оригинала (с новым расширением формата); при сбое — rollback.
-                        // Перезапись исходника через copy исключена.
-                        util::ReplaceResult rr =
-                            util::replace_file(j.path, tmp_name, bak_name, new_path);
+                    util::remove_file(tmp_name);
+                    // Физическая замена не удерживает j.m: копия кандидата в папку
+                    // файла и rename могут быть заметными по времени, snapshot (RPC)
+                    // не должен ждать их завершения.
+                    lk.unlock();
+                    bool copied = util::copy_file(best.path, tmp_name);
+                    util::ReplaceResult rr;
+                    if (copied)
+                        rr = util::replace_file(j.path, tmp_name, new_path);
+                    lk.lock();
+                    if (copied) {
                         if (!rr.ok) {
                             // Замена сорвалась — это ошибка файла: считается в failed
                             // и останавливает прогон (см. ниже, блок по status == "error").
@@ -1732,8 +2081,8 @@ for (const auto& it : items) {
                             }
                             if (rr.original_lost) {
                                 msg += i18n::fmt(
-                                    "      ! COULD NOT REPLACE the file; the original was NOT "
-                                    "restored in place and is saved as %s (%s)\n",
+                                    "      ! COULD NOT REPLACE the file; original removed and "
+                                    "the candidate remains at %s (%s)\n",
                                     rr.backup.c_str(), rr.error.c_str());
                                 j.summary.detail = i18n::str("could not replace the file");
                                 j.summary.replacement_error = rr.error;
@@ -1744,19 +2093,14 @@ for (const auto& it : items) {
                                 j.summary.replacement_error = rr.error;
                             }
                         } else {
-                            if (best.sidecar > 0) {
-                                auto pit = j.fmt_plans.find(best.format);
-                                std::string sc_src =
-                                    pit != j.fmt_plans.end() ? pit->second.sidecar_path
-                                                             : best.path + ".tags.zip";
-                                std::string sc_dst =
-                                    util::join_path(j.dir, j.base_ne + ".tags.zip");
-                                if (!util::copy_file(sc_src, sc_dst))
-                                    msg += i18n::str(
-                                        "      ! could not copy the sidecar (tags) next to the file\n");
-                            }
+                            auto pit = j.fmt_plans.find(best.format);
+                            std::string sc_src =
+                                pit != j.fmt_plans.end() ? pit->second.sidecar_path
+                                                         : best.path + ".tags.zip";
+                            deliver_sidecar(sc_src, best.sidecar > 0, j.dir, j.base_ne, &msg);
                             msg += i18n::str("      -> replaced in place: ") + best.format + "/" +
                                    best.variant + "\n";
+                            j.out_path = new_path;
                             j.summary.replaced = true;
                             j.summary.detail =
                                 i18n::str("replaced in place: ") + best.format + "/" + best.variant;
@@ -1808,9 +2152,23 @@ for (const auto& it : items) {
         }
 
         if (!msg.empty()) obs::sink()->log(msg);
-        if (j.summary.status == "error") obs::sink()->mark_error(j.idx);
-        else if (j.summary.status == "stopped") obs::sink()->mark_stopped(j.idx);
-        else obs::sink()->end_file(j.idx, j.summary.savings_pct);
+        // Единая модель ошибки: событие уже эмитил error_file на месте сбоя.
+        // Если путь ошибки не доложил причину (редкий fallback) — доложим по
+        // summary.detail; двойного события error_file быть не должно.
+        if (j.summary.status == "error") {
+            if (!j.error_reported) {
+                std::string reason = j.summary.detail.empty()
+                                         ? i18n::str("error ignored")
+                                         : j.summary.detail;
+                obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+                j.error_reported = true;
+            }
+        } else if (j.summary.status == "stopped") obs::sink()->mark_stopped(j.idx);
+        else {
+            obs::sink()->end_file(j.idx, j.summary.savings_pct);
+            // Итоговый путь (целевая папка / новое расширение) — для label UI.
+            if (!j.out_path.empty()) obs::sink()->out_file(j.idx, j.out_path);
+        }
         if (j.summary.status == "error") {
             if (opts.ignore_errors || opts.mode == SessionMode::Daemon) {
                 // Реальная ошибка файла в демон-режиме не прерывает очередь:
@@ -1865,10 +2223,12 @@ for (const auto& it : items) {
                     j.summary.path = j.path;
                     j.summary.status = "error";
                     j.summary.detail = perr;
-                            obs::sink()->error("ERROR [" + j.path + "]: " + perr + "\n");
+                            obs::sink()->error_file(w.idx,
+                                                     "ERROR [" + j.path + "]: " + perr + "\n");
+                            j.error_reported = true;
                 }
                 bool finish_now = false;
-                bool prep_retry = false;
+                std::vector<obs::TaskInfo> infos;  // метаданные задач (для set_tasks)
                 {
                     std::lock_guard<std::mutex> lk(qm);
                     FileJob& j = *w.job;
@@ -1878,7 +2238,6 @@ for (const auto& it : items) {
                         j.prep_done = false;
                         j.prep_running = false;
                         if (prep_active > 0) prep_active--;
-                        prep_retry = true;
                         cv.notify_all();
                     } else {
                         j.prep_done = true;
@@ -1888,22 +2247,25 @@ for (const auto& it : items) {
                             j.done = true;
                             total_done++;
                             finish_now = true;
+                        } else {
+                            // Контракт порядка событий: set_tasks/set_excluded
+                            // обязаны дойти до зеркала РАНЬШЕ любого task(Running)
+                            // по этому файлу. Эмитим их под qm, до cv.notify_all():
+                            // воркер варианта не может выпустить задачу, пока мы
+                            // держим блокировку (иначе на многопоточности на LLaO
+                            // было видно task(Running) ДО set_tasks — см. golden).
+                            infos.reserve(j.tasks.size());
+                            for (auto& td : j.tasks) {
+                                const auto& f = (*fmts)[td.fmt_idx];
+                                const auto& v = f.variants[td.variant_idx];
+                                infos.push_back({f.id, v.id, v.args, v.note});
+                            }
+                            obs::sink()->set_tasks(w.idx, infos);
+                            if (!j.excluded_fmts.empty())
+                                obs::sink()->set_excluded(w.idx, j.excluded_fmts);
                         }
                     }
                     cv.notify_all();
-                }
-                if (!finish_now && !prep_retry) {
-                    FileJob& job = *w.job;
-                    std::vector<obs::TaskInfo> infos;
-                    infos.reserve(job.tasks.size());
-                    for (auto& td : job.tasks) {
-                        const auto& f = (*fmts)[td.fmt_idx];
-                        const auto& v = f.variants[td.variant_idx];
-                        infos.push_back({f.id, v.id, v.args, v.note});
-                    }
-                    obs::sink()->set_tasks(w.idx, infos);
-                    if (!job.excluded_fmts.empty())
-                        obs::sink()->set_excluded(w.idx, job.excluded_fmts);
                 }
                 if (finish_now && !proc::cancelled() && !proc::aborted()) finalize_file(*w.job);
             } else {
@@ -1935,7 +2297,9 @@ for (const auto& it : items) {
                         std::lock_guard<std::mutex> jl(*j.m);
                         j.failures.push_back("variant: " + verr);
                         j.variant_errors++;
-                                    obs::sink()->error("ERROR [" + j.path + "]: " + verr + "\n");
+                                        obs::sink()->error_file(j.idx,
+                                                                "ERROR [" + j.path + "]: " + verr + "\n");
+                        j.error_reported = true;
                     }
                     j.completed++;
                     // Резерв этой задачи возвращается всегда и ровно один раз
@@ -2087,8 +2451,14 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
         r.make_job(*r.jobs[idx], idx, it);
         r.seen_paths_.insert(norm_path(it.path));
     }
-    for (size_t k = 0; k < r.jobs.size(); k++)
+    for (size_t k = 0; k < r.jobs.size(); k++) {
         obs::sink()->begin_file(r.jobs[k]->idx, r.jobs[k]->rel);
+        // Симметрия с append_files(демон): у каждой строки есть job_meta.
+        // Здесь это всегда первичная пачка одноразового прогона (mode=optimize,
+        // без целевой папки); демон стартует с пустым initial_inputs и никогда
+        // не проходит этот путь.
+        obs::sink()->job_meta(r.jobs[k]->idx, "optimize", std::string());
+    }
     if (r.jobs.size() > 1) {
         std::vector<size_t> idx(r.jobs.size());
         std::vector<std::string> labels;
@@ -2104,13 +2474,14 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
     return 0;
 }
 
-std::vector<size_t> Engine::add(const std::vector<std::string>& inputs) {
+std::vector<size_t> Engine::add(const std::vector<std::string>& inputs,
+                                const AddOptions& ao) {
     Impl& i = *impl_;
     if (!i.started) return {};
     std::vector<FileItem> items;
     i.collect(inputs, items, nullptr);
     if (items.empty()) return {};
-    return i.r.append_files(items);
+    return i.r.append_files(items, ao);
 }
 
 bool Engine::remove(size_t idx) {
@@ -2148,6 +2519,9 @@ std::vector<EngineFile> Engine::snapshot() {
         e.idx = j.idx;
         e.path = j.path;
         e.rel = j.rel;
+        e.mode = j.mode == JobMode::Restore ? "restore" : "optimize";
+        e.target_dir = j.target_dir;
+        e.out_path = j.out_path;
         e.completed = j.completed;
         e.total_tasks = j.tasks.size();
         if (j.m) {
@@ -2289,11 +2663,6 @@ int run(const Options& opts) {
 
     int jobs = resolve_jobs(opts.jobs, opts.jobs_float);
 
-    // Статусбар входит в альтернативный буфер: всё, что печатается после init(),
-    // в интерактивном режиме попадает на экран статусбара, поэтому init вызываем
-    // до вывода диагностики, а сами диагностические строки — только в линейном режиме.
-    status::init(files.size(), opts.no_status);
-
     // Изолированный каталог tmp/<pid>: чужие прогоны не пересекаются. Остатки
     // своей подпапки (обрыв прошлого запуска с тем же PID) убираем заранее.
     clear_session_tmp_dir(opts.tmp_dir);
@@ -2304,14 +2673,13 @@ int run(const Options& opts) {
                                      : std::string());
     if (opts.debug) {
         if (logger.ok()) {
-            if (!status::interactive()) out::print("Log: %s\n", logger.path().c_str());
+            out::print("Log: %s\n", logger.path().c_str());
         } else {
             out::error("WARNING: could not open the JSONL log (runs/)\n");
         }
     }
 
-    if (!status::interactive())
-        out::print("Files: %zu, threads: %d\n", files.size(), jobs);
+    out::print("Files: %zu, threads: %d\n", files.size(), jobs);
 
     if (logger.ok()) {
         logger.event({{"type", "run_start"},
@@ -2344,15 +2712,12 @@ int run(const Options& opts) {
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);
     for (auto& t : threads) t.join();
 
-    status::shutdown();
-
     if (proc::cancelled()) {
         out::print("%s", i18n::str("Interrupted by user\n").c_str());
     }
 
-    // Сводка по файлам, которые не удалось заменить. Печатается после shutdown(),
-    // когда альтернативный буфер уже восстановлен — иначе текст пропадёт при
-    // прерывании/изменении размера окна.
+    // Сводка по файлам, которые не удалось заменить. Печатается после остановки
+    // всех воркеров, когда их вывод уже завершился, чтобы текст не перемешался.
     {
         bool any = false;
         for (auto& _j : r.jobs) { auto& j = *_j;
@@ -2416,8 +2781,7 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     std::string ffprobe = media::find_ffprobe();
     std::string ffmpeg = media::find_ffmpeg();
     if (ffprobe.empty() || ffmpeg.empty()) {
-        obs::sink()->error(i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
-        obs::sink()->mark_error(idx);
+        obs::sink()->error_file(idx, i18n::str("ERROR: ffprobe/ffmpeg unavailable (bin/ffmpeg/ or PATH)\n"));
         return 1;
     }
 
@@ -2455,8 +2819,7 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
         }
         if (!probe.ok) {
             session.cleanup();
-            obs::sink()->error("ERROR " + path + " — " + probe.error + "\n");
-            obs::sink()->mark_error(idx);
+            obs::sink()->error_file(idx, "ERROR " + path + " — " + probe.error + "\n");
             return 1;
         }
     }
@@ -2508,17 +2871,15 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     if (!decoded) decoded = media::decode_to_wav(path, src_wav, ffmpeg, bits, &dec_err);
     if (!decoded) {
         session.cleanup();
-        obs::sink()->error("ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
-        obs::sink()->mark_error(idx);
+        obs::sink()->error_file(idx, "ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");
         return 1;
     }
 
     tool::Status st = tool::ensure(target, !no_download, "[" + target.id + "] ");
     if (st.path.empty()) {
         session.cleanup();
-        obs::sink()->error(i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
+        obs::sink()->error_file(idx, i18n::fmt("ERROR %s — utility %s unavailable (%s)\n", path.c_str(),
                                 target.id.c_str(), st.status.c_str()));
-        obs::sink()->mark_error(idx);
         return 1;
     }
 
@@ -2539,17 +2900,15 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     if (verr.empty()) verr = validate_candidate(src_wav, candidate, env);
     if (!verr.empty()) {
         obs::sink()->task(idx, 0, obs::TaskState::Failed);
-        obs::sink()->mark_error(idx);
         session.cleanup();
-        obs::sink()->error("ERROR " + path + " — " + verr + "\n");
+        obs::sink()->error_file(idx, "ERROR " + path + " — " + verr + "\n");
         return 1;
     }
     uint64_t size = util::file_size(candidate);
     if (size == 0) {
         obs::sink()->task(idx, 0, obs::TaskState::Failed);
-        obs::sink()->mark_error(idx);
         session.cleanup();
-        obs::sink()->error("ERROR " + path + " — " + i18n::str("empty file") + "\n");
+        obs::sink()->error_file(idx, "ERROR " + path + " — " + i18n::str("empty file") + "\n");
         return 1;
     }
 
@@ -2575,16 +2934,14 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     }
     if (!terr.empty()) {
         session.cleanup();
-        obs::sink()->error("ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
-        obs::sink()->mark_error(idx);
+        obs::sink()->error_file(idx, "ERROR " + path + " — " + i18n::str("tags: ") + terr + "\n");
         return 1;
     }
     if (has_tags && ts.present) {
         std::string v2 = tags::validate_groups(candidate, target, plan.embed, ffprobe);
         if (!v2.empty()) {
             session.cleanup();
-            obs::sink()->error("ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
-            obs::sink()->mark_error(idx);
+            obs::sink()->error_file(idx, "ERROR " + path + " — " + i18n::str("tag validation: ") + v2 + "\n");
             return 1;
         }
     }
@@ -2592,8 +2949,7 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     std::string new_path = util::join_path(dir, base_ne + "." + target.extension);
     if (!util::copy_file(candidate, new_path)) {
         session.cleanup();
-        obs::sink()->error(i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
-        obs::sink()->mark_error(idx);
+        obs::sink()->error_file(idx, i18n::fmt("ERROR %s — could not copy the candidate into the folder\n", path.c_str()));
         return 1;
     }
     if (!util::remove_file(path)) {
@@ -2674,14 +3030,8 @@ int restore_run(const RestoreOptions& opts) {
 
     clear_session_tmp_dir(std::string());
 
-    status::init(items.size(), opts.no_status);
-    if (status::interactive()) {
-        for (size_t i = 0; i < items.size(); i++)
-            obs::sink()->begin_file(i, items[i].rel);
-    } else {
-        out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
-                    variant->id.c_str(), items.size(), jobs);
-    }
+    out::print("Restoring to %s (variant %s): %zu files, threads: %d\n", target->id.c_str(),
+               variant->id.c_str(), items.size(), jobs);
 
     std::atomic<int> failed{0};
     std::atomic<size_t> next{0};
@@ -2702,8 +3052,7 @@ int restore_run(const RestoreOptions& opts) {
                                 opts.allow_lossy, fmts) != 0)
                     failed++;
             } catch (const std::exception& exc) {
-                obs::sink()->error("ERROR [" + items[idx].path + "]: " + exc.what() + "\n");
-                obs::sink()->mark_error(idx);
+                obs::sink()->error_file(idx, "ERROR [" + items[idx].path + "]: " + exc.what() + "\n");
                 failed++;
             }
             {
@@ -2715,11 +3064,9 @@ int restore_run(const RestoreOptions& opts) {
     for (int i = 0; i < jobs; i++) threads.emplace_back(worker);
     for (auto& t : threads) t.join();
 
-    status::shutdown();
     clear_session_tmp_dir(std::string());
 
-    if (!status::interactive())
-        out::print("Done: %zu files restored, errors: %d\n", done, failed.load());
+    out::print("Done: %zu files restored, errors: %d\n", done, failed.load());
     return failed.load() > 0 ? 1 : 0;
 }
 

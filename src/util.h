@@ -36,23 +36,23 @@ bool copy_file(const std::string& src, const std::string& dst);
 
 // Безопасная замена файла на месте.
 struct ReplaceResult {
-    bool ok = false;               // файл успешно заменён (original теперь = tmp)
-    bool original_lost = false;    // оригинал НЕ восстановлен, лежит в backup
-    std::string backup;            // путь, где лежит оригинал (при original_lost)
+    bool ok = false;               // файл успешно заменён (target теперь = tmp)
+    bool original_lost = false;    // оригинал не восстановлен (см. backup)
+    std::string backup;            // где остался кандидат (tmp) при сбое rename
     std::string error;             // описание причины (при !ok)
 };
 
-// Заменяет original на tmp, никогда не перезаписывая содержимое существующих
-// файлов через копирование: original переносится в backup, затем tmp переносится
-// на место original (fs::rename с повторами — антивирус/индексатор могут
-// короткое время держать файл). При сбое второго шага выполняется rollback
-// (backup возвращается в original). original и tmp должны лежать на одном томе.
-// Если final_name задан (не пуст), tmp переносится под этим именем — это смена
-// имени/расширения файла (например src.flac -> src.tta); имя final_name не должно
-// совпадать с существующим файлом. При final_name == original поведение —
-// замена содержимого на месте.
+// Заменяет original на tmp на месте. Новая схема (согласована с
+// персистентностью очереди демона): старый файл удаляется (remove с ретраями
+// на антивирус), затем tmp переименовывается на место (rename с повторами).
+// Резервной копии нет: обрыв между remove и rename оставляет кандидата в tmp
+// (res.backup=tmp), persist-строки в prep/running распознают такие обрывы при
+// перезапуске. original и tmp должны лежать на одном томе.
+// Если final_name задан (не пуст) — это смена имени/расширения
+// (например src.flac -> src.tta); имя final_name не должно совпадать с
+// существующим файлом, кроме случая final_name == original (замена содержимого
+// на месте).
 ReplaceResult replace_file(const std::string& original, const std::string& tmp,
-                           const std::string& backup,
                            const std::string& final_name = std::string());
 
 // Свободное место на диске, содержащем путь (байты; 0 при ошибке).

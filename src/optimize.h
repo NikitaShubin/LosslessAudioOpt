@@ -23,6 +23,19 @@ enum class SessionMode {
               // (эквивалентно вечному --ignore-errors)
 };
 
+// Режим задачи в очереди демона.
+enum class JobMode {
+    Optimize,  // перебор форматов, победитель — меньший файл с полным набором тегов
+    Restore,   // пережатие в один целевой формат (по умолчанию FLAC), без отсечки по размеру
+};
+
+// Параметры добавления файлов/папок в очередь демона (на файл или пачку).
+struct AddOptions {
+    JobMode mode = JobMode::Optimize;
+    std::string target_dir;   // пусто = замена на месте; иначе — корень структуры вывода
+    std::string to;           // для Restore: целевой формат (id из formats/*.json)
+};
+
 struct Options {
     std::vector<std::string> inputs;   // файлы/папки
     double jobs = 2.0;                 // число потоков: целое — как есть, вещественное — множитель ядер
@@ -33,7 +46,6 @@ struct Options {
     bool allow_lossy = false;          // обрабатывать lossy-входы (mp3, aac, …)
     bool debug = false;                // писать журнал runs/*.jsonl
     bool no_stats = false;             // не накапливать stats.json
-    bool no_status = false;            // без интерактивного статусбара
     std::string report_path;           // путь к итоговому отчёту (пусто = не писать)
     Verify verify = Verify::All;       // режим верификации кандидатов
     bool ignore_errors = false;        // ошибки файлов помечать error, прогон не прерывать
@@ -73,14 +85,17 @@ struct EngineFile {
     size_t idx = 0;
     std::string path;
     std::string rel;
-    std::string state;   // queued | prep | running | ok | stopped | error | removed
+    std::string mode;      // "optimize" | "restore" (режим задачи)
+    std::string target_dir;// целевая папка (пусто = замена на месте)
+    std::string state;     // queued | prep | running | ok | stopped | error | removed
     size_t completed = 0;  // выполнено задач (вариантов)
-    size_t total_tasks = 0;  // всего задач файла (0 до prep)
-    double pct = 0.0;     // выигрыш в сжатии (после ok)
+    size_t total_tasks = 0;// всего задач файла (0 до prep)
+    double pct = 0.0;      // выигрыш в сжатии (после ok), обычно минус при restore
     uint64_t original = 0;
     uint64_t best = 0;
     std::string best_format;
-    std::string detail;  // текст ошибки/исключения при stopped/error
+    std::string out_path;  // фактический путь результата (для UI: label после ок)
+    std::string detail;    // текст ошибки/исключения при stopped/error
 };
 
 // Движок оптимизации: держит Runner + пул воркеров, принимает файлы на лету,
@@ -101,7 +116,8 @@ public:
 
     // Добавить файлы/папки в очередь на лету. Возвращает стабильные idx
     // новых заданий (для ответа add без эвристик по размеру очереди).
-    std::vector<size_t> add(const std::vector<std::string>& inputs);
+    std::vector<size_t> add(const std::vector<std::string>& inputs,
+                            const AddOptions& ao = {});
 
     // Снять файл из очереди (pending — сразу, running — дорабатывает).
     bool remove(size_t idx);
@@ -140,7 +156,6 @@ struct RestoreOptions {
     std::string variant;               // пусто = последний вариант (максимальное сжатие)
     bool no_download = false;
     bool allow_lossy = false;          // восстанавливать и lossy-входы
-    bool no_status = false;            // без интерактивного статусбара
 };
 
 // Восстановление: декод оптимизированного файла -> пережатие в целевой формат

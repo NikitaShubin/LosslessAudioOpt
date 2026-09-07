@@ -26,9 +26,6 @@ struct TaskInfo {
 struct Sink {
     virtual ~Sink() = default;
 
-    // Начало обработки: total — общее число файлов (может расти в демоне).
-    virtual void init_session(size_t) {}
-
     // Строка создаётся на файл; label — имя (обычно путь относительно корня).
     virtual void begin_file(size_t, const std::string&) {}
 
@@ -52,6 +49,10 @@ struct Sink {
     // Файл завершился ошибкой.
     virtual void mark_error(size_t) {}
 
+    // Файл завершился ошибкой с причиной (единая модель ошибки: реализация
+    // получает и id, и текст причины и может сформировать одно событие).
+    virtual void error_file(size_t, const std::string&) {}
+
     // Файл остановлен/не подходит (пользователь остановил, или ранний отсев).
     virtual void mark_stopped(size_t) {}
 
@@ -63,6 +64,14 @@ struct Sink {
 
     // Файлы добавлены в очередь на лету (для демона); label/label каждого.
     virtual void files_added(const std::vector<size_t>&, const std::vector<std::string>&) {}
+
+    // Метаданные задачи строки (демон): режим ("optimize"/"restore") и целевая
+    // папка (пусто = замена на месте). Вызывается при добавлении строки.
+    virtual void job_meta(size_t, const std::string&, const std::string&) {}
+
+    // Итоговый путь результата (демон): вызывается после успешного завершения
+    // файла, когда фактический путь отличается от исходного (restore в цель).
+    virtual void out_file(size_t, const std::string&) {}
 };
 
 // Глобальный приёмник событий. Устанавливается один раз до старта воркеров.

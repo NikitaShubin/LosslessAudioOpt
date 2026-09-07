@@ -18,4 +18,9 @@ struct Status {
 Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix = "",
               const std::atomic<bool>* kill = nullptr);
 
+// Проверка готовности утилиты формата (кэш/PATH + cli_check.expect из
+// formats/*.json). Возвращает список проблем; пустой результат — готово.
+// Не скачивает и не изменяет состояние (полезно для стартового гейта сервера).
+std::string check_config(const config::Format& fmt, const std::atomic<bool>* kill = nullptr);
+
 }  // namespace tool

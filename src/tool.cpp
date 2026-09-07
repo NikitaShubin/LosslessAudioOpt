@@ -11,7 +11,6 @@
 #include "obs.h"
 #include "out.h"
 #include "proc.h"
-#include "status.h"
 #include "sha256.h"
 #include "util.h"
 
@@ -303,6 +302,21 @@ void cli_check(const config::Format& fmt, const std::string& binary, std::string
 
 }  // namespace
 
+// Проверка готовности утилиты формата: находит бинарник (кэш bin/<id>/.binary
+// или PATH) и прогоняет cli_check.expect. Возвращает список проблем (пустой —
+// утилита готова). Не скачивает и не изменяет state: только чтение.
+std::string check_config(const config::Format& fmt, const std::atomic<bool>* kill) {
+    if (!fmt.cli_check.present) return {};
+    std::string binary = cached_binary(fmt);
+    if (binary.empty()) binary = in_path(fmt);
+    if (binary.empty()) {
+        return i18n::str("utility not found (run `llao tools` or install it into bin/<id>/)");
+    }
+    std::string message;
+    cli_check(fmt, binary, &message, kill);
+    return message;
+}
+
 Status ensure(const config::Format& fmt, bool download, const std::string& log_prefix,
               const std::atomic<bool>* kill) {
     Status st;
@@ -312,14 +326,12 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
         if (!cached.empty()) {
             st.path = cached;
             st.status = "cache";
-            cli_check(fmt, cached, &st.message, kill);
             return true;
         }
         std::string inpath = in_path(fmt);
         if (!inpath.empty()) {
             st.path = inpath;
             st.status = "path";
-            cli_check(fmt, inpath, &st.message, kill);
             return true;
         }
         return false;
@@ -345,7 +357,6 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
                 st.path = path;
                 st.status = "downloaded";
                 st.message = message;
-                cli_check(fmt, path, &st.message, kill);
                 return st;
             }
             if (!message.empty()) {
