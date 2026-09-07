@@ -2,6 +2,31 @@
 
 ## 0. Сделано
 
+### Аудит архитектуры: устранение хардкода и декомпозиция монолитов
+
+Полный результат — `docs/architecture-audit.md`.
+
+- **Устранён хардкод форматов и тегов в C++ (форматно-зависимые таблицы
+  вынесены в JSON):**
+  - lossless-кодеки: поле `lossless` + `ffprobe_codec` в каждом `formats/*.json`
+    (monkeys_audio→ape, mpeg4_als→als, optimfrog→optimfrog); `media.cpp`
+    строит `lossless_codec_set()` из конфига;
+  - расширения входов (`wav`/`aiff`/`ogg`): `formats/inputs.json` (kind lossless),
+    `supported_extensions()` без хардкода;
+  - ключи/4CC тегов: `formats/tag_tables.json` (секции id3/mp4/wav),
+    `config::load_tag_tables()` (кеш, `const&`, `normalize_4cc`); парсеры
+    ID3/WAV/MP4 и `canonical_key` читают ключи из конфига.
+- **Декомпозиция serve.cpp** (удалён) → `serve_session.cpp`, `serve_queue.cpp`,
+  `serve_persist.cpp`, `serve_entry.cpp` + `serve_internal.h`.
+- **Декомпозиция optimize.cpp** (3128 строк) → `optimize_internal.h`,
+  `optimize_util.cpp`, `optimize_codec.cpp`, `optimize_runner.cpp`;
+  `optimize.cpp` сведён к оркестрации (802 строки).
+- **Декомпозиция tags.cpp** (1845 строк, удалён) → `tags_internal.h` +
+  `tags_core.cpp`, `tags_vorbis.cpp`, `tags_apev2.cpp`, `tags_id3.cpp`,
+  `tags_mp4.cpp`, `tags_wav.cpp`, `tags_sidecar.cpp`, `tags_write.cpp`.
+- Makefile: `COMMON_SRCS`/`SERVER_SRCS` переведены на новые модули; сборка
+  `make TARGET=linux` чистая (0 ошибок, 0 предупреждений `-Wall -Wextra`).
+
 ### Единый бинарник `llao` (serveCmd; демон и CLI в одном exe)
 
 - **`llao serve` вместо отдельного `llao-daemon`**: головные подкоманды
