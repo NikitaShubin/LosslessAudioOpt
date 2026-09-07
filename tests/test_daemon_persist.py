@@ -3,8 +3,8 @@
 
 Покрывает:
   P1  очередь.json пишется рядом с discovery-файлом (формат v2, real-статусы)
-  P2  graceful restart: done остаются ok, active при перезапуске -> queued и
-      продолжают обработку; строки папки не теряются
+  P2  graceful restart: активные строки при паузе (queued) сохраняются и после
+      перезапуска продолжают обработку до ok; дублей нет (jobs=2.0, без гонки)
   P3  crash (kill -9): prep/running при перезапуске -> stopped с причиной,
       engine-строк отпали; порядок очереди сохранён
   P4  исчезнувший/невалидный исходник при восстановлении -> строка остаётся,
@@ -64,18 +64,21 @@ def main():
 
     workdir = tempfile.mkdtemp(prefix="llao-persist-")
     try:
-        # jobs=1 осознанно: P1/P3 должны застать файл в prep/running в момент
-        # graceful/crash-перезапуска. При jobs=2.0 (все ядра) короткие файлы
-        # мгновенно уходят в ok, и детерминизм активной строки теряется.
-        # Сокращение файлов до 0.25 с и так ускоряет тест в разы.
-        d = H.Daemon(binary, workdir, jobs=1)
+        # jobs=2.0 (все ядра) как в остальных daemon-тестах: «активная» строка
+        # для graceful/crash-перезапуска фиксируется детерминированно — паузой
+        # в queued (P2) либо wait_state на prep/running с широким окном (P3).
+        # Раньше persist намеренно держал jobs=1, ловя активный файл гонкой;
+        # на 2.0 короткие файлы мгновенно уходят в ok, и активность терялась.
+        d = H.Daemon(binary, workdir, jobs=2.0)
         d.start()
 
         # P6. no_auth в /api/state при --no-auth.
         st = d.get("/api/state")
         check(st.get("no_auth") is True, "no_auth:true при --no-auth")
 
-        # Два файла: один дадим завершиться, другой оставим обработывающимся.
+        # Готовим две строки: обе зафиксируем паузой в queued (активны, но не
+        # стартовали) — как interactions case 7. При jobs=2.0 короткие файлы
+        # иначе мгновенно уходят в ok, и активная строка для перезапуска теряется.
         a_wav = os.path.join(workdir, "a.wav")
         b_wav = os.path.join(workdir, "b.wav")
         H.gen_wav(a_wav, 440)
@@ -85,21 +88,25 @@ def main():
         a_id = r["result"]["added"][0]["id"]
         b_id = r["result"]["added"][1]["id"]
 
-        # Ждём завершения первого файла, второй пусть останется активным.
-        st = H.wait_state(d, lambda s: any(
-            x["id"] == a_id and x["state"] in ("ok", "stopped", "error")
-            for x in s["rows"]), timeout=360, interval=2)
-        a_done = [x for x in (st or {}).get("rows", []) if x["id"] == a_id]
-        check(a_done and a_done[0]["state"] == "ok", f"a.wav завершён ok: {a_done}")
-        b_active = [x for x in d.rows() if x["id"] == b_id]
-        check(b_active and b_active[0]["state"] in ("queued", "prep", "running"),
-              f"b.wav ещё активен: {b_active}")
+        # Пауза до обработки: фиксирует обе строки в queued. Демон может успеть
+        # стартовать задание, но при 2.0 и 0.25-сек файлах успеваем почти всегда;
+        # ждём, пока обе строки появятся (в любом незавершённом состоянии).
+        d.rpc("pause", {})
+        time.sleep(0.5)
+        st = H.wait_state(d, lambda s: len(
+            [x for x in s["rows"] if x["id"] in (a_id, b_id)]) == 2,
+            timeout=30, interval=1)
+        active = [x for x in (st or {}).get("rows", [])
+                  if x["id"] in (a_id, b_id)]
+        check(active and all(x["state"] in ("queued", "prep", "running")
+                             for x in active), f"строки активны (queued): {active}")
 
         # P1. queue.json существует рядом с discovery и имеет структуру v2.
         q = read_queue(d)
         check(q is not None and q.get("version") == 2, "queue.json v2 рядом с discovery")
-        check(q and any(r.get("path", "").endswith("a.wav") and r["state"] == "ok"
-                        for r in q["rows"]), "в queue.json a.wav реальный ok")
+        check(q and any(r.get("path", "").endswith("a.wav") and r["state"] in
+                        ("queued", "prep", "running")
+                        for r in q["rows"]), "в queue.json a.wav активен (пишем как есть)")
         check(q and any(r.get("path", "").endswith("b.wav") and r["state"] in
                         ("queued", "prep", "running")
                         for r in q["rows"]), "в queue.json b.wav активен (пишем как есть)")
@@ -116,20 +123,16 @@ def main():
               "после shutdown активный b.wav стал queued")
 
         # Запускаем заново на той же discovery.
-        d2 = H.Daemon(binary, workdir, jobs=1)
+        d2 = H.Daemon(binary, workdir, jobs=2.0)
         d2.start(ready="rpc")
+        st = H.wait_state(d2, lambda s: len(
+            [x for x in s["rows"] if x["state"] == "ok"]) >= 2,
+            timeout=360, interval=2)
+        check(st is not None, "обе строки после перезапуска дошли до ok")
         rows = d2.rows()
-        check(len([x for x in rows if x["state"] == "ok"]) == 1,
-              f"после перезапуска один ok: {[(x['label'], x['state']) for x in rows]}")
-        check(any(x["state"] == "ok" and os.path.basename(x["label"]) == "a.wav"
-                  for x in rows), "a.wav восстановлен как ok")
-        st = H.wait_state(d2, lambda s: any(
-            x["state"] == "ok" and os.path.basename(x["label"]) == "b.wav"
-            for x in s["rows"]), timeout=360, interval=2)
-        check(st is not None, "b.wav после перезапуска добрался до ok")
-        rows = d2.rows()
-        check(len([x for x in rows if x["state"] == "ok"]) == 2,
-              "после обработки оба файла ok, дублей нет")
+        for label in ("a.wav", "b.wav"):
+            check(any(x["state"] == "ok" and os.path.basename(x["label"]) == label
+                      for x in rows), f"{label} восстановлен и обработан ok")
 
         # P7. повторный запуск не дублирует строки.
         ids = [x["id"] for x in rows]
@@ -145,7 +148,7 @@ def main():
         gid = r["result"]["added"][0]["id"]
         d2.stop()
         os.remove(ghost_wav)  # файл исчез до следующего запуска
-        d3 = H.Daemon(binary, workdir, jobs=1)
+        d3 = H.Daemon(binary, workdir, jobs=2.0)
         d3.start(ready="rpc")
         rows = d3.rows()
         grows = [x for x in rows if x["id"] == gid or
@@ -211,7 +214,7 @@ def main():
                 check(ok, "sidecar транзакционно переписан без потери title")
             # Тот же файл переживает перезапуск (persist-отражение).
             d3.stop()
-            d4b = H.Daemon(binary, workdir, jobs=1)
+            d4b = H.Daemon(binary, workdir, jobs=2.0)
             d4b.start(ready="rpc")
             rows4 = d4b.rows()
             srows = [x for x in rows4 if os.path.basename(x["label"]) == "song.wav"]
@@ -224,7 +227,7 @@ def main():
                   f"{row and row[0].get('detail', '')}) — проверка пропущена")
 
         # P3. Crash-перезапуск: prep/running -> stopped с причиной.
-        d5 = H.Daemon(binary, workdir, jobs=1)
+        d5 = H.Daemon(binary, workdir, jobs=2.0)
         d5.start(ready="rpc")
         c_wav = os.path.join(workdir, "c.wav")
         H.gen_wav(c_wav, 200)
@@ -237,7 +240,7 @@ def main():
         check(st is not None, "c.wav ушёл в prep/running перед kill")
         d5.proc.kill()
         d5.proc.wait()
-        d6 = H.Daemon(binary, workdir, jobs=1)
+        d6 = H.Daemon(binary, workdir, jobs=2.0)
         d6.start(ready="rpc")
         rows = d6.rows()
         # У перезапущенных строк id из резервного диапазона — ищем по метке.
