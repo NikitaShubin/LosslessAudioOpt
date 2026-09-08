@@ -247,6 +247,21 @@
   04ae6ff). Сервер в dev-режиме отдаёт `web/` с диска, поэтому правки
   применяются обновлением страницы без рестарта демона.
 
+### v2.0 — CI: интеграционные тесты демона на linux
+
+- `ci-linux` приведён к зелёному состоянию:
+  - дистрибутивный `wine 9.0` (Ubuntu) не загружал `syswow64/ntdll.dll` —
+    32-битные кодеки (takc.exe) не запускались, гейт кодеков отказывал в старте
+    демона («expected options not found…»). Вместо него ставится `winehq-stable`
+    с 32-битной поддержкой (как в release): `dpkg --add-architecture i386` +
+    `winehq-noble.sources` + `winehq-stable ffmpeg p7zip-full`;
+  - `test-daemon-core` линковал `daemon_sink.cpp`, использующий `persist::sidecar_`
+    — добавлен `src/persist.cpp` в цель;
+  - `tools` на Linux не находил записи `os: windows` в `downloads` (все кодеки —
+    .exe под wine) — `entries_for_os()` принимает windows-записи на не-Windows;
+  - `tests/_daemon_harness.py` печатает `daemon.log` при раннем выходе демона
+    (диагностика без удаления workdir).
+
 ### v1.10.0
 
 - **Псевдографика (TUI) для ресторера**: `restore_run()` теперь использует
