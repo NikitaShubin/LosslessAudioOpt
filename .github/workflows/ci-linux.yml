@@ -53,4 +53,8 @@ jobs:
 
       - name: Интеграционные тесты демона (restore/interactions/queue/persist)
         run: |
-          make test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist
+          make test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist \
+            || { echo "=== daemon.log (последние 120 строк каждого префикса) ==="; \
+                 for f in /tmp/llao-*-test-*/daemon.log /tmp/llao-restest-*/daemon.log /tmp/llao-int-*/daemon.log /tmp/llao-queue-*/daemon.log /tmp/llao-persist-*/daemon.log; do \
+                   [ -f "$f" ] && { echo "--- $f ---"; tail -n 120 "$f"; }; \
+                 done; exit 1; }
