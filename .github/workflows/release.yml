@@ -104,6 +104,8 @@ jobs:
               if not fname.endswith('.json'): continue
               with open(os.path.join('formats', fname), encoding='utf-8') as f:
                   fmt = json.load(f)
+              # Служебные файлы (inputs.json, tag_tables.json) — не форматы кодеков.
+              if not isinstance(fmt, dict) or 'id' not in fmt: continue
               is_ffmpeg = fmt.get('engine', {}).get('kind') == 'ffmpeg'
               bin_id = 'ffmpeg' if is_ffmpeg else fmt['id']
               if bin_id not in allowed: allowed[bin_id] = set()
