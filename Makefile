@@ -100,7 +100,7 @@ clean:
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
 
-test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp
+test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp src/persist.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
 
 # Живые интеграционные тесты сервера (нужен собранный llao-linux и ffmpeg;
