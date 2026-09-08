@@ -157,19 +157,43 @@ function clampTarget(v, max){ return Math.max(0, Math.min(v, max)); }
 // Глобальная доля выполненных «задач» по всей очереди. Задача — один вариант
 // кодирования (optimize) или восстановление (restore); плюс у каждой строки
 // перед кодированием идёт распаковка в WAV — она тоже отдельная задача в доле.
-// План известен только после подготовки файла (prep): строки до него в общий
-// объём не входят (динамика, как договорились).
+// У строк с построенным планом точное число задач (tasks.length). У строк до
+// плана (queued/prep) — предварительная оценка: максимум вариантов сессии из
+// formats/*.json (через /api/formats, `variants`), для restore — всегда 1.
+// Оценка не засчитывает выполненные задачи: в done идёт только реально
+// сделанное (ok/failed + уже прошедшая в этой фазе распаковка при известном
+// плане). После построения плана строка переходит на точный подсчёт.
+let formatsMaxTasks = 0;   // сумма encode.variants по включённым форматам (по JSON)
+let formatsLoaded = false;
+async function loadFormats(){
+  try {
+    const r = await api("/api/formats");
+    const j = await r.json();
+    const fmts = j.formats || [];
+    formatsMaxTasks = fmts.reduce((s,f)=> s + (Number.isFinite(f.variants) ? f.variants : 0), 0);
+  } catch(e){ /* 401 или сеть — оставим 0, строки без плана не в счёте */ }
+  updateStatusbar(currentRows);
+}
 function updateStatusbar(rows){
   if (!btnStatusbar) return;
   let total = 0, done = 0;
   for (const r of rows || []) {
     const tasks = r.tasks || [];
-    if (!tasks.length) continue;  // план ещё не построен — в объём не входит
-    total += tasks.length + 1;    // +1: распаковка в WAV (и для оптимизации, и restore)
-    done  += tasks.filter(t=>t==="ok"||t==="failed").length + 1;  // распаковка уже прошла
+    if (tasks.length) {
+      // План построен — точный счёт: варианты + уже прошедшая распаковка.
+      total += tasks.length + 1;
+      done  += tasks.filter(t=>t==="ok"||t==="failed").length + 1;
+    } else {
+      // План ещё не построен — строка в объёме по оценке (максимум вариантов
+      // сессии из formats/*.json; restore — всегда один целевой формат), в
+      // done ничего не засчитываем — ни задачи, ни распаковка не сделаны.
+      const est = r.mode === "restore" ? 1 : formatsMaxTasks;
+      if (est > 0) total += est + 1;
+    }
   }
   if (total === 0) {
-    // Плана задач нет (очередь пуста / всё в подготовке) — статусбар бесполезен.
+    // Объём задач неизвестен (пустая очередь / формат не загружен) —
+    // статусбар бесполезен.
     btnStatusbar.classList.add("hidden");
     return;
   }
@@ -490,6 +514,9 @@ async function pollState(){
       : "Удалить только успешно завершённые (ok)";
     renderQueue(j.rows);
     maybeAutoScroll();
+    // Оценка максимума задач для строк без плана грузится один раз из
+    // /api/formats (числа вариантов берутся из formats/*.json, не из кода).
+    if (!formatsLoaded) { formatsLoaded = true; loadFormats(); }
     setConn(true, isPaused ? "Пауза" : "Подключено");
     // Демон без авторизации (--no-auth): «Выйти» не нужен — токена нет.
     const btnLogout = el("btn-logout");
