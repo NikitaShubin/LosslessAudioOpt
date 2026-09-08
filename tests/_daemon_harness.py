@@ -164,6 +164,12 @@ class Daemon:
                 return self
             except Exception:
                 if self.proc.poll() is not None:
+                    log = ""
+                    try:
+                        log = open(self.log).read()
+                    except OSError:
+                        pass
+                    sys.stderr.write("=== daemon.log (%s) ===\n%s\n" % (self.log, log))
                     raise RuntimeError("daemon exited early, see " + self.log)
                 time.sleep(0.2)
         raise RuntimeError("daemon did not start, see " + self.log)
