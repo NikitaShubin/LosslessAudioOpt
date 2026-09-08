@@ -35,6 +35,13 @@ jobs:
       - name: Проверка конфигурации форматов
         run: ./llao-linux check-formats
 
+      - name: Предзагрузка Monkey's Audio (bin/monkeys_audio/x64.exe — сайт нестабилен)
+        run: |
+          mkdir -p bin/monkeys_audio
+          curl -sL --retry 5 --retry-all-errors --retry-delay 15 --max-time 3600 \
+            -o bin/monkeys_audio/x64.exe https://www.monkeysaudio.com/files/MAC_1325_x64.exe
+          echo "4b93ec94c7229e3340be3259bbaa14a76185e8a33dad1394e708535bee476d1f  bin/monkeys_audio/x64.exe" | sha256sum -c -
+
       - name: Установка кодеков (нативный монолит)
         run: ./llao-linux tools
 

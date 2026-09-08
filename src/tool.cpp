@@ -57,9 +57,18 @@ std::string in_path(const config::Format& fmt) {
 
 std::vector<config::DownloadEntry> entries_for_os(const config::Format& fmt) {
     std::vector<config::DownloadEntry> out;
-    std::string os = util::current_os();
+    const std::string os = util::current_os();
+    auto want = [&](const std::string& eos) {
+        if (eos == "any" || eos == os) return true;
+        // Нативные .exe-кодеки (os=windows) на Linux запускаются под wine,
+        // поэтому Windows-записи для не-Windows сборки тоже валидны.
+#ifndef _WIN32
+        if (eos == "windows") return true;
+#endif
+        return false;
+    };
     for (const auto& e : fmt.downloads) {
-        if (e.os == "any" || e.os == os) out.push_back(e);
+        if (want(e.os)) out.push_back(e);
     }
     if (out.empty()) {
         for (const auto& e : fmt.downloads) {
