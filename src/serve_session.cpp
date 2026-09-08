@@ -39,7 +39,10 @@ int DaemonSession::start(std::string* err) {
             enabled.push_back(f);
             formats_cache_.push_back(
                 {{"id", f.id},
-                 {"extensions", nlohmann::json::array({f.extension})}});
+                 {"extensions", nlohmann::json::array({f.extension})},
+                 // Число вариантов кодирования из encode.variants в formats/*.json
+                 // (не хардкод): максимум задач для optimize-строки сессии.
+                 {"variants", f.variants.size()}});
         }
         if (!restore_to_.empty()) {
             bool known = false;
