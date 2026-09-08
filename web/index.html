@@ -42,7 +42,11 @@
         <button id="btn-add" class="icon-btn add-btn" title="Добавить файлы">+</button>
       </div>
       <div class="queue-head__center">
-        <button id="btn-autoscroll" class="icon-btn" title="Следить за строками оптимизации">◎</button>
+        <button id="btn-statusbar" class="statusbar hidden"
+          title="Следить за активностью списка">
+          <span id="statusbar-fill" class="statusbar__fill"></span>
+          <span id="statusbar-label" class="statusbar__label"></span>
+        </button>
       </div>
       <div class="queue-head__actions">
         <button id="btn-stop" class="icon-btn" title="Остановить активные файлы">⏹</button>

@@ -28,7 +28,8 @@ const btnStop = el("btn-stop"), btnResume = el("btn-resume"), btnClearCompleted 
 const chkAll = el("chk-all");
 const btnBatchStop = el("btn-batch-stop"), btnBatchStart = el("btn-batch-start"), btnBatchDelete = el("btn-batch-delete");
 const btnBatchTop = el("btn-batch-top"), btnBatchUp = el("btn-batch-up"), btnBatchDown = el("btn-batch-down"), btnBatchBottom = el("btn-batch-bottom");
-const btnAutoscroll = el("btn-autoscroll"), tableWrap = el("table-wrap");
+const btnStatusbar = el("btn-statusbar"), statusbarFill = el("statusbar-fill"),
+      statusbarLabel = el("statusbar-label"), tableWrap = el("table-wrap");
 const btnSort = el("btn-sort");
 let autoScrollOn = false;
 let autoScrollBoost = false;
@@ -109,7 +110,7 @@ function taskRunningCount(r){
   return (r.tasks||[]).filter(s=>s==="running").length;
 }
 function maybeAutoScroll(){
-  if (!tableWrap || !btnAutoscroll || !autoScrollOn) return;
+  if (!tableWrap || !btnStatusbar || !autoScrollOn) return;
   // Активность файла — число задач, обрабатываемых прямо сейчас (running).
   // Строки без идущих процессов в центр масс не включаются.
   let act = currentRows.filter(r=>r.state==="prep"||r.state==="running");
@@ -152,10 +153,38 @@ function maybeAutoScroll(){
   }
 }
 function clampTarget(v, max){ return Math.max(0, Math.min(v, max)); }
+
+// Глобальная доля выполненных «задач» по всей очереди. Задача — один вариант
+// кодирования (optimize) или восстановление (restore); плюс у каждой строки
+// перед кодированием идёт распаковка в WAV — она тоже отдельная задача в доле.
+// План известен только после подготовки файла (prep): строки до него в общий
+// объём не входят (динамика, как договорились).
+function updateStatusbar(rows){
+  if (!btnStatusbar) return;
+  let total = 0, done = 0;
+  for (const r of rows || []) {
+    const tasks = r.tasks || [];
+    if (!tasks.length) continue;  // план ещё не построен — в объём не входит
+    total += tasks.length + 1;    // +1: распаковка в WAV (и для оптимизации, и restore)
+    done  += tasks.filter(t=>t==="ok"||t==="failed").length + 1;  // распаковка уже прошла
+  }
+  if (total === 0) {
+    // Плана задач нет (очередь пуста / всё в подготовке) — статусбар бесполезен.
+    btnStatusbar.classList.add("hidden");
+    return;
+  }
+  btnStatusbar.classList.remove("hidden");
+  const pct = Math.round(done/total*100);
+  if (statusbarFill) statusbarFill.style.width = pct + "%";
+  if (statusbarLabel) {
+    statusbarLabel.textContent = `${pct}% (${done}/${total})`;
+    btnStatusbar.title = "Следить за активностью списка";
+  }
+}
 function setAutoScroll(on){
   autoScrollOn = on;
   if (!on) lastAutoGoal = -1;
-  if (btnAutoscroll) btnAutoscroll.classList.toggle("on", on);
+  if (btnStatusbar) btnStatusbar.classList.toggle("on", on);
   try { localStorage.setItem("llao_autoscroll", on ? "1" : "0"); } catch(e){}
   if (on) { autoScrollBoost = true; maybeAutoScroll(); }
 }
@@ -435,6 +464,7 @@ function renderQueue(rows){
     }
   });
   document.addEventListener("contextmenu", e=>{ if (isDragging) e.preventDefault(); });
+  updateStatusbar(currentRows);
   maybeAutoScroll();
 }
 
@@ -479,7 +509,9 @@ function startPoll(){
 }
 function stopPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
 
-btnAutoscroll && btnAutoscroll.addEventListener("click", ()=> setAutoScroll(!autoScrollOn));
+btnStatusbar && btnStatusbar.addEventListener("click", ()=> setAutoScroll(!autoScrollOn));
+// Нижнее уведомление — клик по нему скрывает (оно висит без таймаута).
+opMsgEl && opMsgEl.addEventListener("click", ()=> opmsg(""));
 btnSort && btnSort.addEventListener("click", async ()=>{
   if (!currentRows.length) return;
   if (!confirm(`Сортировать очередь по полному пути (регистрозависимо)?`)) return;
@@ -530,7 +562,7 @@ if (tableWrap) {
   }
 }
 (function initAutoScroll(){
-  if (!btnAutoscroll) return;
+  if (!btnStatusbar) return;
   let v = "0";
   try { v = localStorage.getItem("llao_autoscroll") || "0"; } catch(e){}
   setAutoScroll(v === "1");
