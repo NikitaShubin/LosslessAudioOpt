@@ -45,6 +45,11 @@ jobs:
       - name: Установка кодеков (нативный монолит)
         run: ./llao-linux tools
 
+      - name: Диагностика takc под wine
+        run: |
+          WINEDEBUG=-all wine bin/tak/Takc.exe --help 2>&1 | head -60
+          echo "WINE=$(wine --version)"
+
       - name: Юнит-тесты и ядро демона
         run: |
           make test-unit test-daemon-core
