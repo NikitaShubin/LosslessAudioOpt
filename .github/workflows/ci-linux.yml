@@ -14,10 +14,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Зависимости (ffmpeg, p7zip, wine)
+      - name: Зависимости (ffmpeg, p7zip, wine 10 c i386)
         run: |
+          sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -NP /etc/apt/sources.list.d/ https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
           sudo apt-get update
-          sudo apt-get install -y ffmpeg p7zip-full wine
+          sudo apt-get install -y --install-recommends winehq-stable ffmpeg p7zip-full
           wine --version
 
       - name: Инициализация wine prefix
@@ -44,11 +48,6 @@ jobs:
 
       - name: Установка кодеков (нативный монолит)
         run: ./llao-linux tools
-
-      - name: Диагностика takc под wine
-        run: |
-          WINEDEBUG=-all wine bin/tak/Takc.exe --help 2>&1 | head -60
-          echo "WINE=$(wine --version)"
 
       - name: Юнит-тесты и ядро демона
         run: |
