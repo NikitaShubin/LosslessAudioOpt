@@ -15,11 +15,13 @@ void DaemonSink::emit(size_t id, const std::string& type,
     });
 }
 
-void DaemonSink::begin_file(size_t id, const std::string& label) {
-    emit(id, "begin_file", {{"label", label}});
+void DaemonSink::begin_file(size_t id, const std::string& label,
+                            const std::string& root) {
+    emit(id, "begin_file", {{"label", label}, {"root", root}});
     Row r;
     r.id = id;
     r.label = label;
+    r.root = root;
     r.state = "queued";
     st_->upsert(r);
 }

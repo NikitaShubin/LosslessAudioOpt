@@ -96,11 +96,15 @@ bool write_discovery(const std::string& path, const nlohmann::json& j) {
     util::mkdirs(util::dir_name(path));
     std::string tmp = path + ".tmp";
     if (!util::write_text(tmp, j.dump())) return false;
-    for (int i = 0; i < 5; i++) {
-        if (std::rename(tmp.c_str(), path.c_str()) == 0) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    util::ReplaceResult rr = util::replace_file(path, tmp);
+    if (!rr.ok) {
+        // Неудачная замена: кандидат остался в tmp (резервная копия данных).
+        // Прибираем его только если replace_file сохранил копию не в tmp
+        // (здесь этого не происходит) — иначе висящий tmp удалён бы не был.
+        if (!rr.backup.empty() && rr.backup != tmp) util::remove_file(tmp);
+        return false;
     }
-    return false;
+    return true;
 }
 
 void print_help() {

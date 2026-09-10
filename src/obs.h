@@ -26,8 +26,9 @@ struct TaskInfo {
 struct Sink {
     virtual ~Sink() = default;
 
-    // Строка создаётся на файл; label — имя (обычно путь относительно корня).
-    virtual void begin_file(size_t, const std::string&) {}
+    // Строка создаётся на файл; label — имя (обычно путь относительно корня),
+    // root — корень добавления (абсолют; пусто при отсутствии).
+    virtual void begin_file(size_t, const std::string&, const std::string& = std::string()) {}
 
     // Файл взят в prep — помечается «активным» (за ним следует вьюпорт).
     virtual void prep(size_t) {}

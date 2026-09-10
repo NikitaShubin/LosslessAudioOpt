@@ -198,6 +198,22 @@ std::string base_name(const std::string& p) {
     return p.substr(pos + 1);
 }
 
+std::string abs_path(const std::string& p) {
+    if (p.empty()) return p;
+    std::error_code ec;
+    auto a = fs::absolute(fs::u8path(p), ec);
+    return ec ? p : a.u8string();
+}
+
+bool path_is_absolute(const std::string& p) {
+    if (p.empty()) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+#ifdef _WIN32
+    if (p.size() >= 2 && (isalpha((unsigned char)p[0]) && p[1] == ':')) return true;
+#endif
+    return false;
+}
+
 std::string to_lower(const std::string& s) {
     std::string r = s;
     for (auto& c : r) c = (char)::tolower((unsigned char)c);

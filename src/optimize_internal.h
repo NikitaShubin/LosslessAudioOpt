@@ -37,6 +37,8 @@ namespace fs = std::filesystem;
 struct FileItem {
     std::string path;
     std::string rel;
+    std::string root;  // корень добавления (абсолют): папка, если добавлена
+                       // папка, иначе каталог файла
 };
 
 enum class DecodeStatus { Ok, NeedsCopy, Failed };
@@ -211,6 +213,7 @@ struct FileJob {
     std::string path;
     std::string base;
     std::string rel;
+    std::string root;      // корень добавления (абсолют), см. FileItem::root
     std::string base_ne;
     std::string dir;
     std::string tok;

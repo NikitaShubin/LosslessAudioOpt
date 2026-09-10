@@ -27,7 +27,10 @@ namespace persist {
 
 // Одна строка сохраняемого состояния очереди.
 struct Row {
-    std::string path;         // полный путь исходника (на хосте демона)
+    // path — при непустом root: относительный путь от корня (корень хранится
+    // отдельно); без root (старый формат) — полный/унаследованный путь.
+    std::string path;
+    std::string root;         // корень добавления (абсолют); пусто у старых строк
     std::string mode;         // "optimize" | "restore"
     std::string target_dir;   // целевая папка (пусто = замена на месте)
     std::string state;        // ok | stopped | error | queued | prep | running
@@ -48,8 +51,8 @@ std::string to_json(const std::vector<Row>& rows);
 // или битый JSON) — тогда содержимое игнорируется.
 bool from_json(const std::string& text, std::vector<Row>* rows);
 
-// Атомарная запись: JSON рядом с <path>.tmp, затем rename поверх <path>
-// (ретраи на случай антивируса). false при ошибке.
+// Атомарная запись: JSON рядом с <path>.tmp, затем безопасная замена места
+// (remove + rename с ретраями на случай антивируса). false при ошибке.
 bool write_file(const std::string& path, const std::vector<Row>& rows);
 
 // Чтение (пусто/rows пуст при отсутствии файла или ошибке; флаг вернёт false,

@@ -15,6 +15,11 @@ std::string  w2u(const std::wstring& s);
 std::string join_path(const std::string& a, const std::string& b);
 std::string dir_name(const std::string& p);
 std::string base_name(const std::string& p);
+// Абсолютный локальный путь (fs::absolute; при ошибке — исходная строка).
+// Единственная точка превращения относительного пути в общесистемный.
+std::string abs_path(const std::string& p);
+// true, если путь уже абсолютный (префикс диска на Windows или ведущий /).
+bool path_is_absolute(const std::string& p);
 std::string to_lower(const std::string& s);
 std::string trim(const std::string& s);
 bool ends_with(const std::string& s, const std::string& suffix);

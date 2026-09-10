@@ -77,6 +77,7 @@ private:
 struct Row {
     size_t id = 0;
     std::string label;
+    std::string root;            // корень добавления (абсолют); пусто у старых строк
     std::string path;            // полный путь исходника (для персистентности;
                                  // у строк движка может быть пусто — берётся из
                                  // engine::snapshot; у восстановленных строк
@@ -102,6 +103,7 @@ public:
     void upsert(const Row& r);
     void set_label(size_t id, const std::string& label);
     void set_path(size_t id, const std::string& path);
+    void set_root(size_t id, const std::string& root);
     void set_state(size_t id, const std::string& st);
     void set_tasks(size_t id, std::vector<std::string> tasks);
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos);

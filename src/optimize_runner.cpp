@@ -28,6 +28,7 @@ void Runner::make_job(FileJob& j, size_t idx, const FileItem& it) {
     j.path = it.path;
     j.base = util::base_name(it.path);
     j.rel = it.rel;
+    j.root = it.root;
     j.base_ne = base_no_ext(it.path);
     j.dir = util::dir_name(it.path);
     j.tok = tmp_token(it.path);
@@ -54,7 +55,7 @@ std::vector<size_t> Runner::append_files(const std::vector<FileItem>& items,
         }
         for (size_t k = 0; k < idx.size(); k++) {
             const FileJob& j = *jobs[idx[k]];
-            obs::sink()->begin_file(idx[k], labels[k]);
+            obs::sink()->begin_file(idx[k], labels[k], j.root);
             obs::sink()->job_meta(idx[k],
                                   j.mode == JobMode::Restore ? "restore" : "optimize",
                                   j.target_dir);

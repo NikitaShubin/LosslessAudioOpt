@@ -61,6 +61,8 @@ nlohmann::json rows_json(const StateMirror& st) {
         for (const auto& f : r.excluded_fmts) excl.push_back(f);
         arr.push_back({{"id", r.id},
                        {"label", r.label},
+                       {"path", r.path.empty() ? r.label : r.path},
+                       {"root", r.root},
                        {"state", r.state},
                        {"pct", r.pct},
                        {"mode", dsvc::mode_str(dsvc::parse_mode(r.mode))},

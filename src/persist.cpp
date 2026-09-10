@@ -33,6 +33,7 @@ std::string to_json(const std::vector<Row>& rows) {
                        {"had_sidecar", r.had_sidecar},
                        {"has_sidecar", r.has_sidecar},
                        {"last_error", r.last_error}});
+        if (!r.root.empty()) arr.back()["root"] = r.root;
     }
     util::sanitize_json(arr);
     nlohmann::json doc = {{"version", 2}, {"rows", std::move(arr)}};
@@ -53,6 +54,7 @@ bool from_json(const std::string& text, std::vector<Row>* rows) {
         if (!j.is_object()) return false;
         Row r;
         r.path = j.value("path", "");
+        r.root = j.value("root", "");
         r.mode = j.value("mode", "optimize");
         r.target_dir = j.value("target_dir", "");
         r.state = j.value("state", "stopped");
@@ -72,11 +74,11 @@ bool write_file(const std::string& path, const std::vector<Row>& rows) {
     util::mkdirs(util::dir_name(path));
     std::string tmp = path + ".llao-tmp";
     if (!util::write_text(tmp, to_json(rows))) return false;
-    for (int i = 0; i < 5; i++) {
-        if (std::rename(tmp.c_str(), path.c_str()) == 0) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    util::remove_file(tmp);
+    util::ReplaceResult rr = util::replace_file(path, tmp);
+    if (rr.ok) return true;
+    // Неудачная замена: кандидат остался в tmp/backup — сохраняем его рядом,
+    // чтобы данные не потерялись, и сообщаем об ошибке.
+    if (!rr.backup.empty() && rr.backup != tmp) util::remove_file(tmp);
     return false;
 }
 

@@ -31,11 +31,14 @@ void DaemonSession::add_locked(const std::vector<std::string>& paths,
         return;
     }
     bool have_target = !target_dir.empty();
+    // Общесистемный (абсолютный) целевой каталог: на входе допускается
+    // относительный — он привязан к cwd сессии добавления.
+    std::string abs_target = have_target ? util::abs_path(target_dir) : std::string();
     if (have_target) {
         // Целевая папка: должна существовать на хосте демона заранее. Исходная
         // структура пачки воспроизводится внутри неё, файлы вне её каталогами
         // не нуждаются в предварительном создании (mkdirs при записи).
-        if (!util::dir_exists(target_dir)) {
+        if (!util::dir_exists(abs_target)) {
             result["rejected"].push_back(
                 {{"path", "<target_dir>"}, {"reason", "target folder not found"}});
             return;
@@ -64,6 +67,9 @@ void DaemonSession::add_locked(const std::vector<std::string>& paths,
             result["rejected"].push_back({{"path", raw}, {"reason", "empty path"}});
             continue;
         }
+        // Общесистемный абсолютный путь: очередь хранит пути, не зависящие ни
+        // от cwd запуска демона, ни от места его установки.
+        p = util::abs_path(p);
         bool is_dir = util::dir_exists(p);
         if (!is_dir && !util::file_exists(p)) {
             result["rejected"].push_back(
@@ -94,7 +100,7 @@ void DaemonSession::add_locked(const std::vector<std::string>& paths,
     if (!accepted.empty() && engine_) {
         optimize::AddOptions ao;
         ao.mode = jm;
-        ao.target_dir = target_dir;
+        ao.target_dir = abs_target;
         ao.to = (jm == optimize::JobMode::Restore) ? restore_to_ : std::string();
         new_ids = engine_->add(accepted, ao);
     }
