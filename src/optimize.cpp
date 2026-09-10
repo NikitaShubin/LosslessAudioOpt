@@ -135,7 +135,7 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
         r.seen_paths_.insert(norm_path(it.path));
     }
     for (size_t k = 0; k < r.jobs.size(); k++) {
-        obs::sink()->begin_file(r.jobs[k]->idx, r.jobs[k]->rel);
+        obs::sink()->begin_file(r.jobs[k]->idx, r.jobs[k]->rel, r.jobs[k]->root);
         obs::sink()->job_meta(r.jobs[k]->idx, "optimize", std::string());
     }
     if (r.jobs.size() > 1) {
@@ -198,6 +198,7 @@ std::vector<EngineFile> Engine::snapshot() {
         e.idx = j.idx;
         e.path = j.path;
         e.rel = j.rel;
+        e.root = j.root;
         e.mode = j.mode == JobMode::Restore ? "restore" : "optimize";
         e.target_dir = j.target_dir;
         e.out_path = j.out_path;
@@ -379,7 +380,7 @@ int run(const Options& opts) {
     r.rm.set_max_workers(jobs);
     r.jobs.clear(); r.jobs.reserve(files.size()); for (size_t _i=0;_i<files.size();_i++) r.jobs.emplace_back(std::make_unique<FileJob>());
     for (size_t i = 0; i < files.size(); i++) r.make_job(*r.jobs[i], i, items[i]);
-    for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i]->rel);
+    for (size_t i = 0; i < files.size(); i++) obs::sink()->begin_file(i, r.jobs[i]->rel, r.jobs[i]->root);
 
     std::vector<std::thread> threads;
     for (int i = 0; i < jobs; i++) threads.emplace_back(&Runner::worker, &r);

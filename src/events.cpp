@@ -75,6 +75,14 @@ void StateMirror::set_path(size_t id, const std::string& path) {
     r.path = path;
 }
 
+void StateMirror::set_root(size_t id, const std::string& root) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    rows_[id].root = root;
+    rows_[id].id = id;
+    touch_locked(id);
+}
+
 void StateMirror::set_state(size_t id, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;

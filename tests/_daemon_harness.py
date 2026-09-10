@@ -131,12 +131,15 @@ def wait_state(d, pred, timeout=120, interval=3):
 class Daemon:
     """Живой демон на случайном порту с компактным HTTP/RPC-клиентом."""
 
-    def __init__(self, binary, workdir, jobs=2.0, extra=()):
+    def __init__(self, binary, workdir, jobs=2.0, extra=(), cwd=None):
         """jobs — число воркеров: передаётся в --jobs как есть; дефолт 2.0 —
-        множитель числа ядер (позволяет движку использовать все ядра машины)."""
+        множитель числа ядер (позволяет движку использовать все ядра машины).
+        cwd — рабочая директория процесса демона (по умолчанию ROOT); тесты
+        относительных путей запускают демон из подкаталога workdir."""
         self.binary = binary
         self.workdir = workdir
         self.jobs = jobs
+        self.cwd = cwd if cwd else ROOT
         self.port = free_port()
         self.disc = os.path.join(workdir, "daemon.json")
         self.log = os.path.join(workdir, "daemon.log")
@@ -149,7 +152,7 @@ class Daemon:
         cmd = list(self.cmd) + list(extra)
         with open(self.log, "w") as log:
             self.proc = subprocess.Popen(
-                cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                cmd, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT,
                 env={**os.environ, "LLAO_DISCOVERY": self.disc})
         _ALIVE.append(self)
         # Стартовый гейт кодеков (cli_check через wine на Linux) может занимать

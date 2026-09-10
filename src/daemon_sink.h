@@ -21,7 +21,8 @@ public:
     // потокобезопасна (движок зовёт из воркеров).
     void set_on_change(std::function<void()> cb) { on_change_ = std::move(cb); }
 
-    void begin_file(size_t id, const std::string& label) override;
+    void begin_file(size_t id, const std::string& label,
+                    const std::string& root = std::string()) override;
     void prep(size_t id) override;
     void set_tasks(size_t id, size_t total) override;
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) override;

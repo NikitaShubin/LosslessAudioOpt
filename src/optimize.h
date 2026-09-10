@@ -85,6 +85,7 @@ struct EngineFile {
     size_t idx = 0;
     std::string path;
     std::string rel;
+    std::string root;      // корень добавления (абсолют), см. FileItem::root
     std::string mode;      // "optimize" | "restore" (режим задачи)
     std::string target_dir;// целевая папка (пусто = замена на месте)
     std::string state;     // queued | prep | running | ok | stopped | error | removed

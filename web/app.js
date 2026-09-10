@@ -272,6 +272,14 @@ function displayPath(r){
   return p;
 }
 
+// Полный путь для всплывающей подсказки к строке «Файл»: если показывается
+// результат — это out_path, иначе полный исходный путь (path из /api/state;
+// у старых строк label может сам быть полным путём).
+function fullPathFor(r){
+  if (r.out_path && r.out_path!=="") return r.out_path;
+  return r.path || r.label || "";
+}
+
 function updateSelectionUI(){
   if (!chkAll) return;
   if (!currentRows.length) { chkAll.checked=false; chkAll.indeterminate=false; }
@@ -351,7 +359,7 @@ function renderQueue(rows){
     const shown = displayPath(r);
     const exitErr = (r.last_error && (r.state==="stopped"||r.state==="error"))
       ? `<span class="warn" title="${esc(r.last_error)}">⚠</span> ` : "";
-    html += `<tr data-id="${r.id}" class="${selClass} st-${r.state}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td>${badge}${exitErr}${esc(shown)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
+    html += `<tr data-id="${r.id}" class="${selClass} st-${r.state}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td title="${esc(fullPathFor(r))}">${badge}${exitErr}${esc(shown)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
   }
   queueBody.innerHTML = html;
   updateSelectionUI();

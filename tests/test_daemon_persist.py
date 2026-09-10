@@ -13,6 +13,8 @@
       транзакционных артефактов .llao-tmp.* нет
   P6  /api/state возвращает no_auth:true при --no-auth
   P7  повторный запуск на той же discovery не дублирует строки (дедуп по пути)
+  P8  относительное добавление папки: в queue.json root(абсолютный)+path(rel);
+      перезапуск из другой cwd распознаёт строки по root и доходит до ok
 
 Требует: собранный llao-linux, ffmpeg в PATH. Без ffmpeg — SKIP.
 Демон поднимается свой, на случайном порту (--no-auth), 18180 не трогает.
@@ -253,6 +255,74 @@ def main():
         check(d6.rpc("restart", {"ids": [crows[0]["id"]]})["ok"],
               "crash-stopped строку можно перезапустить")
         d6.stop()
+
+        # P8. Универсальные пути: относительное добавление папки и перезапуск
+        # из другой рабочей директории. Добавляем папку ОТНОСИТЕЛЬНО cwd демона;
+        # в queue.json обязаны лежать root (абсолютный) + path (относительный от
+        # root). После graceful shutdown активные строки переносятся queued, и при
+        # перезапуске УЖЕ из чужой cwd (где 'LA' не существует) обязаны
+        # распознаться по сохранённому root и дойти до ok — а не стать
+        # stopped с «исходный файл не найден» (регрессия 280 строк).
+        launch1 = os.path.join(workdir, "launch1")
+        mus = os.path.join(launch1, "LA")
+        os.makedirs(mus)
+        H.gen_wav(os.path.join(mus, "r1.wav"), 700, duration=1.5)
+        H.gen_wav(os.path.join(mus, "r2.wav"), 710, duration=1.5)
+        d8 = H.Daemon(binary, workdir, jobs=1.0, cwd=launch1)
+        d8.start()
+        r = d8.rpc("add", {"paths": ["LA"], "mode": "optimize"})
+        check(len(r["result"]["added"]) == 2,
+              f"относительное добавление папки LA: {r['result']}")
+        # Пауза фиксирует строки в активном состоянии до обработки (как P2),
+        # чтобы при shutdown они перешли в queued и проверили resume-ветку.
+        # Считаем ТОЛЬКО r1/r2 по label: в discovery могут быть остатки
+        # из прежних сценариев теста (c.wav), их участие в подсчёте сломал бы.
+        d8.rpc("pause", {})
+        st = H.wait_state(d8, lambda s: len(
+            [x for x in s["rows"]
+             if x["label"] in ("r1.wav", "r2.wav") and
+             x["state"] in ("queued", "prep", "running")]) == 2,
+            timeout=30, interval=1)
+        check(st is not None, "обе строки активны до обработки (пауза)")
+        rc = d8.stop()
+        check(rc == 0, f"P8 graceful shutdown exit 0 (got {rc})")
+        q = read_queue(d8)
+        rows8 = [x for x in (q or {}).get("rows", [])
+                 if x.get("path") in ("r1.wav", "r2.wav")]
+        check(len(rows8) == 2, f"обе строки в queue.json: {q and q['rows']}")
+        check(all(r_["state"] in ("queued", "ok", "stopped", "error")
+                  for r_ in rows8), "в queue.json нет prep/running после shutdown")
+        qroot = os.path.normpath(mus)
+        check(all(r_["root"] == qroot for r_ in rows8),
+              f"root в queue.json — абсолютный путь к LA: {rows8}")
+        check(all(not os.path.isabs(r_["path"]) and r_["path"] in
+                  ("r1.wav", "r2.wav") for r_ in rows8),
+              f"path в queue.json — относительный от root: {rows8}")
+        # Перезапуск из ROOT (cwd по умолчанию харнесса) — 'LA' там не лежит.
+        d9 = H.Daemon(binary, workdir, jobs=1.0)
+        d9.start(ready="rpc")
+        st = H.wait_state(d9, lambda s: len(
+            [x for x in s["rows"] if x["state"] == "ok"]) >= 2 and
+            all(x["state"] == "ok" for x in s["rows"]
+                if x["label"] in ("r1.wav", "r2.wav")),
+            timeout=180, interval=1)
+        check(st is not None, "строки после перезапуска из чужой cwd дошли до ok")
+        rows9 = d9.rows()
+        ids9 = [x["id"] for x in rows9]
+        check(len(ids9) == len(set(ids9)) and len([x for x in rows9
+              if x["label"] in ("r1.wav", "r2.wav")]) == 2,
+              "ровно 2 строки без дублей после перезапуска из чужой cwd")
+        for label in ("r1.wav", "r2.wav"):
+            row = [x for x in rows9 if x["label"] == label]
+            check(row and row[0]["state"] == "ok",
+                  f"{label} восстановлен по сохранённому root из чужой cwd")
+            check(row and not row[0].get("last_error"),
+                  f"{label}: нет last_error после перезапуска из чужой cwd")
+            check(row and row[0].get("path") ==
+                  os.path.normpath(os.path.join(mus, label)),
+                  f"{label}: path в /api/state — полный путь (tooltip): "
+                  f"{row and row[0].get('path')}")
+        d9.stop()
 
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

@@ -62,7 +62,8 @@ void collect_files(const std::string& p, std::vector<FileItem>& out, std::string
                    const std::vector<config::Format>& fmts) {
     std::set<std::string> exts = supported_extensions(fmts);
     if (util::file_exists(p)) {
-        if (is_supported_file(p, exts)) out.push_back({p, util::base_name(p)});
+        if (is_supported_file(p, exts))
+            out.push_back({p, util::base_name(p), util::abs_path(util::dir_name(p))});
         return;
     }
     if (!util::dir_exists(p)) {
@@ -77,7 +78,7 @@ void collect_files(const std::string& p, std::vector<FileItem>& out, std::string
             if (is_supported_file(f, exts)) {
                 std::string rel = fs::relative(fs::u8path(f), fs::u8path(p), ec).u8string();
                 if (ec || rel.empty()) rel = util::base_name(f);
-                out.push_back({f, rel});
+                out.push_back({f, rel, util::abs_path(p)});
             }
         }
     }

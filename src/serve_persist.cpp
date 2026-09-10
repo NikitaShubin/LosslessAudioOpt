@@ -18,12 +18,14 @@ namespace dsvc {
 static constexpr size_t kRestoredIdBase = 1ULL << 40;
 
 std::vector<persist::Row> DaemonSession::snapshot_for_persist(bool final) const {
-    // Только зеркало: ни движок, ни qm не трогаем. Строки движка хранят полный
-    // путь в Row::path (выставляется при add), восстановленные — в label.
+    // Только зеркало: ни движок, ни qm не трогаем. При наличии корня строки
+    // хранят относительный от корня путь в label; path — абсолютный полный.
+    // В файл пишется root + rel (label), чтобы очередь была независимой от cwd.
     std::vector<persist::Row> rows;
     for (const auto& r : st_->snapshot()) {
         persist::Row p;
-        p.path = r.path.empty() ? r.label : r.path;
+        p.root = r.root;
+        p.path = r.label.empty() ? r.path : r.label;
         if (p.path.empty()) continue;  // гонка add: строка ещё без пути — пропускаем
         p.mode = dsvc::mode_str(dsvc::parse_mode(r.mode));
         p.target_dir = r.target_dir;
@@ -81,12 +83,13 @@ void DaemonSession::load_persisted(std::string* err) {
     std::vector<size_t> order;  // итоговый порядок строк в зеркале
     order.reserve(rows.size());
 
-    auto restore_to_mirror = [&](const persist::Row& pr, const std::string& st,
-                                 const std::string& why) {
+    auto restore_to_mirror = [&](const persist::Row& pr, const std::string& full,
+                                 const std::string& st, const std::string& why) {
         dsvc::Row r;
         r.id = rid++;
-        r.label = pr.path;
-        r.path = pr.path;
+        r.label = pr.path;      // относительный от корня (или старый полный)
+        r.root = pr.root;
+        r.path = full;          // абсолютный полный путь (для движка/валидации)
         r.state = st;
         r.pct = pr.pct;
         r.mode = dsvc::mode_str(dsvc::parse_mode(pr.mode));
@@ -96,51 +99,68 @@ void DaemonSession::load_persisted(std::string* err) {
         r.had_sidecar = pr.had_sidecar;
         r.has_sidecar = pr.has_sidecar;
         st_->upsert(r);
-        added_paths_.insert(pr.path);
+        added_paths_.insert(full);
         order.push_back(r.id);
+    };
+
+    // Полный путь исходника: при наличии root (новый формат) — join(root, rel);
+    // без root (старый формат) — попытка абсолютизации относительно текущего
+    // cwd; если не существует — исходная строка (строка уйдёт в stopped).
+    auto full_path = [](const persist::Row& pr) -> std::string {
+        if (!pr.root.empty()) return util::join_path(pr.root, pr.path);
+        if (!util::path_is_absolute(pr.path)) {
+            std::string a = util::abs_path(pr.path);
+            if (util::file_exists(a) || util::dir_exists(a)) return a;
+        }
+        return pr.path;
     };
 
     // Валидация путей-источников (для не-ok строк): файл и, при необходимости,
     // его sidecar обязаны существовать на хосте демона.
-    auto source_ok = [](const persist::Row& pr, std::string* why) -> bool {
-        if (!util::dir_exists(pr.path) && !util::file_exists(pr.path)) {
-            *why = "исходный файл не найден при перезапуске: " + pr.path;
+    auto source_ok = [](const std::string& full, bool had_sidecar,
+                        std::string* why) -> bool {
+        if (!util::dir_exists(full) && !util::file_exists(full)) {
+            *why = "исходный файл не найден при перезапуске: " + full;
             return false;
         }
-        if (pr.had_sidecar &&
-            !util::file_exists(persist::sidecar_path_for(pr.path))) {
+        if (had_sidecar &&
+            !util::file_exists(persist::sidecar_path_for(full))) {
             *why = "sidecar (теги) исходника не найден при перезапуске: " +
-                   persist::sidecar_path_for(pr.path);
+                   persist::sidecar_path_for(full);
             return false;
         }
         return true;
     };
 
     for (const auto& pr : rows) {
+        std::string full = full_path(pr);
         if (pr.state == "queued") {
             // Продолжаем только файлы, до которых очередь ещё не дошла; все
             // проверки — как в add_locked. При любой неудаче строка остаётся
             // в зеркале со статусом stopped и причиной, в движок не заносится.
             std::string why;
-            if (!source_ok(pr, &why)) {
-                restore_to_mirror(pr, "stopped", why);
+            if (!source_ok(full, pr.had_sidecar, &why)) {
+                restore_to_mirror(pr, full, "stopped", why);
                 continue;
             }
             nlohmann::json tmp = {{"added", nlohmann::json::array()},
                                   {"rejected", nlohmann::json::array()}};
             std::vector<size_t> nids;
-            add_locked({pr.path}, pr.mode, pr.target_dir, tmp, nids);
+            add_locked({full}, pr.mode, pr.target_dir, tmp, nids);
             if (!nids.empty()) {
                 // Строка попала в движок: движок уже эмитил begin_file/добавил
                 // в зеркало. Позиция в порядке очереди — по persist-порядку.
                 for (size_t nid : nids) order.push_back(nid);
-                // Полный путь (label из движка — только rel) и флаг sidecar,
-                // иначе при следующем persist очередь сохранит относительный путь.
+                // Полный путь (из движка) в зеркало, а отображение/персист —
+                // по сохранённому rel и корню (иначе rel заменился бы на имя
+                // файла после повторного add).
                 for (size_t nid : nids) {
                     auto snap = engine_->snapshot();
                     for (const auto& f : snap)
                         if (f.idx == nid && !f.path.empty()) {
                             st_->set_path(nid, f.path);
+                            st_->set_label(nid, pr.path);
+                            st_->set_root(nid, pr.root);
                             set_had_sidecar(nid, f.path);
                             break;
                         }
@@ -153,7 +173,7 @@ void DaemonSession::load_persisted(std::string* err) {
                 !tmp["rejected"].empty() && tmp["rejected"][0].contains("reason")
                     ? tmp["rejected"][0]["reason"].get<std::string>()
                     : "не удалось восстановить задачу из queue.json";
-            restore_to_mirror(pr, "stopped", reason);
+            restore_to_mirror(pr, full, "stopped", reason);
         } else if (pr.state == "ok") {
             // Итог проверяем по out_path (и по sidecar, если has_sidecar).
             std::string why;
@@ -165,24 +185,24 @@ void DaemonSession::load_persisted(std::string* err) {
                     why = "sidecar результата не найден при перезапуске: " +
                           persist::sidecar_path_for(pr.out_path);
             }
-            restore_to_mirror(pr, "ok", why);
+            restore_to_mirror(pr, full, "ok", why);
             ev_->push("restored", {{"type", "ok"}, {"path", pr.path}});
         } else if (pr.state == "prep" || pr.state == "running") {
             // Прервано во время обработки — подозрительная строка; в движок не
             // заносим, пользователь явно перезапустит через «Запустить».
             std::string why = "остановлено при перезапуске (обработка не завершена)";
-            restore_to_mirror(pr, "stopped", why);
+            restore_to_mirror(pr, full, "stopped", why);
             ev_->push("restored", {{"type", "interrupted"}, {"path", pr.path}});
         } else {
             // stopped | error: сохраняем статус, но исходник + sidecar должны
             // существовать; иначе отмечаем причину (после перезапуска файл мог
             // исчезнуть — «Запустить» всё равно откажет без него).
             std::string why;
-            if (!source_ok(pr, &why)) {
-                restore_to_mirror(pr, pr.state, why);
+            if (!source_ok(full, pr.had_sidecar, &why)) {
+                restore_to_mirror(pr, full, pr.state, why);
                 continue;
             }
-            restore_to_mirror(pr, pr.state, pr.last_error);
+            restore_to_mirror(pr, full, pr.state, pr.last_error);
         }
     }
 
