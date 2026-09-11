@@ -146,6 +146,9 @@ jobs:
           (cd "$DEST" && 7z a -tzip -mx=9 -bso0 -bsp0 "../llao-${VER}-win64.zip" .)
           ls -lh llao-*.zip
 
+      - name: Стабильный ассет llao-latest-win64.zip
+        run: cp "llao-${GITHUB_REF_NAME:-v1.0.0}-win64.zip" "llao-latest-win64.zip"
+
       - name: Публикация релиза
         uses: softprops/action-gh-release@v3
         with:
