@@ -132,7 +132,7 @@ test-daemon-persist: $(DAEMON_TEST_BIN)
 	python3 tests/test_daemon_persist.py
 
 # Генерация встроенных веб-ассетов (zip → C++ массив).
-src/web_assets_data.cpp: web/index.html web/app.js web/style.css tools/embed_assets.py
+src/web_assets_data.cpp: web/index.html web/app.js web/style.css web/favicon.svg tools/embed_assets.py
 	python3 tools/embed_assets.py
 
 # Dev-контейнер (Dockerfile): сборка llao.exe под llvm-mingw и прогон wine-тестов
