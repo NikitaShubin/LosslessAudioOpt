@@ -257,6 +257,21 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
     bool ok = dr.started && !dr.timed_out && dr.exit_code == 0 && util::file_exists(out_wav);
     if (!ok) util::remove_file(out_wav);
 
+    if (ok) {
+        // Нативные декодеры (напр. MAC.exe) могут писать WAV с посторонними
+        // чанками (fact, bext, minf, elm1) либо с fmt не первым — строгие кодеки
+        // (OptimFROG: crash на fact; LA: требует fmt первым) на таком входе
+        // сбоят. Приводим заголовок к каноническому виду (fmt+data), PCM-данные
+        // не изменяются. Если нормализация не удалась — декод считается
+        // неуспешным, чтобы не кормить кодеки неподходящим WAV.
+        std::string cerr;
+        if (!media::canonicalize_wav(out_wav, &cerr)) {
+            obs::sink()->log("[wav] normalize FAIL '" + out_wav + "': " + cerr + "\n");
+            util::remove_file(out_wav);
+            ok = false;
+        }
+    }
+
     if (alias_created) util::remove_file(alias_path);
 
     if (ok) return DecodeStatus::Ok;

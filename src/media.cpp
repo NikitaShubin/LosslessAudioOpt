@@ -281,6 +281,155 @@ static bool wav_data_chunk_stream(WavReader& f, uint64_t* off, uint64_t* sz) {
     }
 }
 
+namespace {
+struct WavChunkView {
+    std::string id;
+    uint64_t off = 0;  // смещение тела чанка
+    uint32_t len = 0;  // длина тела (без выравнивания)
+};
+// Пытается прочитать заголовки всех чанков до data (и сам data). Если data найден,
+// останавливается. Возвращает false при повреждённом заголовке.
+bool scan_wav_chunks(WavReader& f, std::vector<WavChunkView>* out, uint64_t* data_body,
+                     uint32_t* data_len) {
+    char hdr[12];
+    if (!f.seek(0) || f.read(hdr, 12) != 12 || memcmp(hdr, "RIFF", 4) != 0 ||
+        memcmp(hdr + 8, "WAVE", 4) != 0)
+        return false;
+    uint64_t o = 12;
+    *data_body = 0;
+    *data_len = 0;
+    while (true) {
+        char ch[8];
+        if (!f.seek(o) || f.read(ch, 8) != 8) return false;
+        uint32_t chsz = rd32le((uint8_t*)ch + 4);
+        WavChunkView c;
+        c.id.assign(ch, ch + 4);
+        c.off = o + 8;
+        c.len = chsz;
+        out->push_back(c);
+        if (c.id == "data") {
+            *data_body = c.off;
+            *data_len = chsz;
+            return true;
+        }
+        if (chsz == 0) return false;
+        o += 8 + chsz + (chsz & 1);
+    }
+}
+}  // namespace
+
+bool canonicalize_wav(const std::string& path, std::string* err) {
+    WavReader r;
+    if (!r.open(path)) {
+        *err = i18n::str("could not open the WAV to normalize");
+        return false;
+    }
+    std::vector<WavChunkView> ch;
+    uint64_t data_body = 0;
+    uint32_t data_len = 0;
+    if (!scan_wav_chunks(r, &ch, &data_body, &data_len)) {
+        *err = i18n::str("not a valid WAV header");
+        return false;
+    }
+
+    // fmt обязателен; остальные чанки (после fmt и до data) — посторонние.
+    const WavChunkView* fmt = nullptr;
+    for (const auto& c : ch)
+        if (c.id == "fmt " && !fmt) fmt = &c;
+    if (!fmt || fmt->len < 16) {
+        *err = i18n::str("WAV has no valid fmt chunk");
+        return false;
+    }
+    if (!fmt->len || data_len == 0) {
+        *err = i18n::str("WAV has no data chunk");
+        return false;
+    }
+
+    bool fmt_first = ch[0].id == "fmt ";
+    bool has_fact = false;
+    for (const auto& c : ch)
+        if (c.id == "fact") has_fact = true;
+
+    // Уже совместимый заголовок: fmt идёт первым, нет fact. Прочие кодеки
+    // (flac, tak, wavpack...) спокойно переживают чанки LIST и т.п., поэтому
+    // перезапись не нужна — сохраняем файл как есть.
+    if (fmt_first && !has_fact) return true;
+
+    // Читаем PCM-параметры из fmt (первые 16 байт каноничны и для WAVEFORMATEX).
+    char fbuf[16];
+    if (!r.seek(fmt->off) || r.read(fbuf, 16) != 16) {
+        *err = i18n::str("could not read the fmt chunk");
+        return false;
+    }
+    uint16_t fmt_tag = (uint16_t)((uint8_t)fbuf[0] | ((uint8_t)fbuf[1] << 8));
+    uint16_t chans = (uint16_t)((uint8_t)fbuf[2] | ((uint8_t)fbuf[3] << 8));
+    uint32_t rate = rd32le((uint8_t*)fbuf + 4);
+    uint16_t bits = (uint16_t)((uint8_t)fbuf[14] | ((uint8_t)fbuf[15] << 8));
+    if (fmt_tag != 1 || chans == 0 || rate == 0 || bits == 0) {
+        *err = i18n::str("unsupported WAV format for normalization");
+        return false;
+    }
+    // Записываем канонический заголовок во временный файл, затем меняем на месте.
+    std::string tmp = path + ".canon.tmp";
+    util::remove_file(tmp);
+    {
+        std::ofstream w(std::filesystem::u8path(tmp), std::ios::binary);
+        if (!w) {
+            *err = i18n::str("could not create the temporary WAV");
+            return false;
+        }
+        char fh[16];
+        memcpy(fh, fbuf, 16);  // те же параметры PCM
+        uint32_t riff = 4 + (8 + 16) + (8 + data_len);
+        const char* id_fmt = "fmt ";
+        const char* id_data = "data";
+        const char* id_riff = "RIFF";
+        const char* id_wave = "WAVE";
+        w.write(id_riff, 4);
+        w.write((const char*)&riff, 4);
+        w.write(id_wave, 4);
+        w.write(id_fmt, 4);
+        uint32_t fmtsz = 16;
+        w.write((const char*)&fmtsz, 4);
+        w.write(fh, 16);
+        w.write(id_data, 4);
+        w.write((const char*)&data_len, 4);
+
+        // Копируем PCM-данные блоками, без изменений.
+        constexpr size_t kChunk = 1u << 20;
+        std::vector<char> buf(kChunk);
+        uint64_t left = data_len;
+        uint64_t pos = data_body;
+        while (left > 0) {
+            size_t n = left < kChunk ? (size_t)left : kChunk;
+            if (!r.seek(pos) || r.read(buf.data(), n) != n) {
+                w.close();
+                util::remove_file(tmp);
+                *err = i18n::str("WAV data chunk extends beyond the file");
+                return false;
+            }
+            w.write(buf.data(), n);
+            left -= n;
+            pos += n;
+        }
+        w.close();
+        if (!w) {
+            util::remove_file(tmp);
+            *err = i18n::str("could not write the normalized WAV");
+            return false;
+        }
+    }
+
+    util::ReplaceResult rep = util::replace_file(path, tmp, path);
+    if (!rep.ok) {
+        util::remove_file(tmp);
+        *err = i18n::str("could not replace the WAV: ") +
+               (rep.error.empty() ? i18n::str("unknown") : rep.error);
+        return false;
+    }
+    return true;
+}
+
 bool wav_data_compare(const std::string& a, const std::string& b, std::string* err) {
     WavReader fa, fb;
     if (!fa.open(a) || !fb.open(b)) {
