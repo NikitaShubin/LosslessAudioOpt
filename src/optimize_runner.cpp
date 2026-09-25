@@ -323,17 +323,8 @@ void Runner::prep_file(FileJob& j) {
     if (!probe.ok) {
         const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
         if (src_fmt && src_fmt->id != probe.format_name) {
-            DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, 16,
-                                                   &j.kill_requested, &prep_mon);
-            if (ds == DecodeStatus::NeedsCopy) {
-                std::string copy = util::join_path(j.session->dir(), "src_copy." + lower_ext(j.path));
-                if (util::copy_file(j.path, copy)) {
-                    ds = decode_source_native(src_fmt, copy, ref_wav, 16,
-                                              &j.kill_requested, &prep_mon);
-                    util::remove_file(copy);
-                }
-            }
-            if (ds == DecodeStatus::Ok) {
+            if (decode_reference(j.path, ref_wav, src_fmt, ffmpeg, 16, j.session->dir(),
+                                 false, nullptr, &j.kill_requested, &prep_mon)) {
                 probe = media::probe_file(ref_wav, ffprobe, &j.kill_requested);
                 if (proc::aborted() || j.kill_requested.load(std::memory_order_relaxed)) {
                     release_deferred_budget();
@@ -454,24 +445,9 @@ void Runner::prep_file(FileJob& j) {
     auto dec_t0 = std::chrono::steady_clock::now();
     if (!decoded) {
         const config::Format* src_fmt = find_source_fmt(probe, j.path, fmts);
-        if (src_fmt) {
-            DecodeStatus ds = decode_source_native(src_fmt, j.path, ref_wav, bits,
-                                                   &j.kill_requested, &prep_mon);
-            if (ds == DecodeStatus::NeedsCopy) {
-                std::string copy = util::join_path(j.session->dir(),
-                                                   "src_copy." + lower_ext(j.path));
-                if (util::copy_file(j.path, copy)) {
-                    ds = decode_source_native(src_fmt, copy, ref_wav, bits,
-                                              &j.kill_requested, &prep_mon);
-                    util::remove_file(copy);
-                }
-            }
-            decoded = (ds == DecodeStatus::Ok);
-        }
+        decoded = decode_reference(j.path, ref_wav, src_fmt, ffmpeg, bits, j.session->dir(),
+                                  true, &derr, &j.kill_requested, &prep_mon);
     }
-    if (!decoded)
-        decoded = media::decode_to_wav(j.path, ref_wav, ffmpeg, bits, &derr,
-                                       &j.kill_requested, &prep_mon);
     j.decode_wall_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - dec_t0)
                            .count();

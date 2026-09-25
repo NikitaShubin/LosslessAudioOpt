@@ -279,6 +279,29 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
     return alias_created ? DecodeStatus::Failed : DecodeStatus::NeedsCopy;
 }
 
+bool decode_reference(const std::string& path, const std::string& ref_wav,
+                      const config::Format* src_fmt, const std::string& ffmpeg, int bits,
+                      const std::string& copy_dir, bool allow_ffmpeg, std::string* err,
+                      const std::atomic<bool>* kill, const proc::OutputMonitor* mon) {
+    if (src_fmt) {
+        DecodeStatus ds = decode_source_native(src_fmt, path, ref_wav, bits, kill, mon);
+        if (ds == DecodeStatus::NeedsCopy) {
+            // Некоторые декодеры (OptimFROG) не открывают файл с «чужим»
+            // расширением — даём копию с ожидаемым суффиксом.
+            std::string copy = util::join_path(copy_dir, "src_copy." + lower_ext(path));
+            if (util::copy_file(path, copy)) {
+                ds = decode_source_native(src_fmt, copy, ref_wav, bits, kill, mon);
+                util::remove_file(copy);
+            }
+        }
+        if (ds == DecodeStatus::Ok) return true;
+    }
+    // allow_ffmpeg=false — только когда исходник не читается ffprobe: там и
+    // ffmpeg не поможет, а вызывающий сообщит исходную ошибку probe.
+    if (!allow_ffmpeg) return false;
+    return media::decode_to_wav(path, ref_wav, ffmpeg, bits, err, kill, mon);
+}
+
 // Код завершения, при котором процесс упал с исключением, а не «честно» отказался:
 // под Wine — NTSTATUS-диапазон 0xC0000000..0xC000FFFF (C++ хранит его как int<0),
 // нативно — 128+сигнал (128+11 SIGSEGV, 128+6 SIGABRT и т.п.). Такой отказ

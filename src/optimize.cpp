@@ -469,16 +469,8 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     if (!probe.ok && lower_ext(path) != util::to_lower(target.extension)) {
         const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
         if (src_fmt && src_fmt->id != target.id) {
-            DecodeStatus ds = decode_source_native(src_fmt, path, src_wav, 16);
-            if (ds == DecodeStatus::NeedsCopy) {
-                std::string copy = util::join_path(session.dir(),
-                                                   "src_copy." + lower_ext(path));
-                if (util::copy_file(path, copy)) {
-                    ds = decode_source_native(src_fmt, copy, src_wav, 16);
-                    util::remove_file(copy);
-                }
-            }
-            if (ds == DecodeStatus::Ok) {
+            if (decode_reference(path, src_wav, src_fmt, ffmpeg, 16, session.dir(), false,
+                                 nullptr, nullptr, nullptr)) {
                 probe = media::probe_file(src_wav, ffprobe);
                 if (probe.ok) {
                     probe.format_name = src_fmt->id;
@@ -526,19 +518,10 @@ static int restore_one(size_t idx, const std::string& path, const config::Format
     const config::Format* src_fmt = find_source_fmt(probe, path, fmts);
     std::string dec_err;
     bool decoded = src_decoded;
-    if (!decoded && src_fmt && src_fmt->id != target.id) {
-        DecodeStatus ds = decode_source_native(src_fmt, path, src_wav, bits);
-        if (ds == DecodeStatus::NeedsCopy) {
-            std::string copy = util::join_path(session.dir(),
-                                               "src_copy." + lower_ext(path));
-            if (util::copy_file(path, copy)) {
-                ds = decode_source_native(src_fmt, copy, src_wav, bits);
-                util::remove_file(copy);
-            }
-        }
-        decoded = (ds == DecodeStatus::Ok);
-    }
-    if (!decoded) decoded = media::decode_to_wav(path, src_wav, ffmpeg, bits, &dec_err);
+    if (!decoded)
+        decoded = decode_reference(
+            path, src_wav, (src_fmt && src_fmt->id != target.id) ? src_fmt : nullptr, ffmpeg,
+            bits, session.dir(), true, &dec_err);
     if (!decoded) {
         session.cleanup();
         obs::sink()->error_file(idx, "ERROR " + path + " — " + i18n::str("decode to reference WAV: ") + dec_err + "\n");

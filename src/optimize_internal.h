@@ -102,6 +102,16 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
                                   const std::string& out_wav, int bits,
                                   const std::atomic<bool>* kill = nullptr,
                                   const proc::OutputMonitor* mon = nullptr);
+
+// Единственная точка получения эталонного WAV, на котором работают все
+// варианты файла: нативный декод исходного формата → ffmpeg-фолбэк. Обе
+// ветки канонизируют WAV, поэтому наружу всегда выходит канонический ref.wav:
+// на нём кодеки не падают на посторонних чанках (OptimFROG, LA).
+bool decode_reference(const std::string& path, const std::string& ref_wav,
+                      const config::Format* src_fmt, const std::string& ffmpeg, int bits,
+                      const std::string& copy_dir, bool allow_ffmpeg, std::string* err,
+                      const std::atomic<bool>* kill = nullptr,
+                      const proc::OutputMonitor* mon = nullptr);
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
                              const std::vector<std::string>& params, const Env& env,
                              const proc::OutputMonitor& monitor = {},
