@@ -256,6 +256,20 @@ bool decode_to_wav(const std::string& input, const std::string& output_wav,
                (util::trim(r.output).empty() ? "" : ": " + util::trim(r.output));
         return false;
     }
+    // Строгие кодеки (OptimFROG, LA) падают на WAV с посторонними чанками
+    // (fact, LIST, bext) либо с fmt не первым. Приводим эталонный WAV к
+    // каноническому виду (fmt+data), PCM-данные не меняются. Нормализация
+    // обязательна и на этом (ffmpeg-фолбэк) пути: он используется, когда
+    // нативный декодер не справился, и раньше отдавал кодекам неканонический
+    // WAV — из-за чего OptimFROG падал с access violation. Не удалось
+    // нормализовать — декод считаем неуспешным.
+    std::string cerr;
+    if (!canonicalize_wav(output_wav, &cerr)) {
+        *err = i18n::str("reference WAV normalization failed") +
+               (cerr.empty() ? "" : ": " + cerr);
+        util::remove_file(output_wav);
+        return false;
+    }
     return true;
 }
 

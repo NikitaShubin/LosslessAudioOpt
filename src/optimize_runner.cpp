@@ -643,8 +643,9 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
             mon.hard_timeout_sec = (int)std::min(proportional, (uint64_t)7200);
     }
 
+    bool crashed = false;
     std::string verr = encode_candidate(j.session->ref_wav_path(), candidate, v.args, env,
-                                        mon, &j.kill_requested);
+                                        mon, &j.kill_requested, &crashed);
     if (verr.empty() && opts.verify == Verify::All)
         verr = validate_candidate(j.session->ref_wav_path(), candidate, env,
                                   &j.kill_requested);
@@ -654,8 +655,19 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         return VariantOutcome::Cancelled;
     }
     if (!verr.empty()) {
+        if (crashed) {
+            // Кодек упал на общем ref.wav: остальные варианты этого файла уже
+            // бессмысленны. Флаги выставляем здесь, уже после проверки
+            // kill_requested выше, иначе крашивший вариант сам себя отменит.
+            j.crashed.store(true, std::memory_order_relaxed);
+            j.kill_requested.store(true, std::memory_order_relaxed);
+        }
         util::remove_file(candidate);
         record_error(verr);
+        if (crashed) {
+            std::lock_guard<std::mutex> lk(*j.m);
+            if (j.crash_reason.empty()) j.crash_reason = verr;
+        }
         return VariantOutcome::Failed;
     }
     uint64_t size = util::file_size(candidate);
@@ -811,6 +823,30 @@ void Runner::finalize_file(FileJob& j) {
                            {"reason", j.summary.detail}});
         }
         obs::sink()->mark_stopped(j.idx);
+        return;
+    }
+    if (j.crashed.load(std::memory_order_relaxed)) {
+        // Кодек упал на общем ref.wav: работа над файлом прервана осознанно,
+        // выдавать кандидат нельзя, ресурсы освобождаем целиком.
+        j.summary.path = j.path;
+        j.summary.status = "error";
+        std::string reason = j.crash_reason.empty()
+                                 ? j.failures.empty()
+                                       ? i18n::str("codec crashed — variants aborted")
+                                       : j.failures[0]
+                                 : j.crash_reason;
+        j.summary.detail = reason;
+        if (j.best_valid) util::remove_file(j.best.path);
+        discard_job_tmp(j);
+        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+        j.error_reported = true;
+        if (!opts.no_stats) stats::append_all(records);
+        if (logger) {
+            logger->event({{"type", "file_done"},
+                           {"file", j.path},
+                           {"status", "error"},
+                           {"reason", reason}});
+        }
         return;
     }
     j.summary.path = j.path;
@@ -1329,6 +1365,8 @@ void Runner::worker() {
                     w.disk_reserved = 0;
                 }
                 if (j.completed == j.tasks.size() ||
+                    (j.crashed.load(std::memory_order_relaxed) &&
+                     j.completed == j.released) ||
                     (j.cancelled && j.completed == j.released)) {
                     j.done = true;
                     total_done++;

@@ -139,6 +139,7 @@ bool ResourceManager::can_start_new_variant(const FileJob& j, int window,
     if (aborted) return false;
     if (j.done || !j.prep_done) return false;
     if (j.cancelled) return false;
+    if (j.crashed.load(std::memory_order_relaxed)) return false;
     if (j.released >= j.tasks.size()) return false;
     if (j.released - j.completed >= (size_t)window) return false;
     return true;
@@ -278,10 +279,36 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
     return alias_created ? DecodeStatus::Failed : DecodeStatus::NeedsCopy;
 }
 
+// Код завершения, при котором процесс упал с исключением, а не «честно» отказался:
+// под Wine — NTSTATUS-диапазон 0xC0000000..0xC000FFFF (C++ хранит его как int<0),
+// нативно — 128+сигнал (128+11 SIGSEGV, 128+6 SIGABRT и т.п.). Такой отказ
+// означает битый вход (общий для всех вариантов ref.wav), поэтому он «перечеркивает»
+// смысл остальных вариантов файла, в отличие от кодековых ошибок вида «did not
+// create the file», где файл ещё можно обработать другим кодеком.
+static bool is_crash_exit(int code) {
+    if (code < 0) {
+        unsigned u = static_cast<unsigned>(code);
+        return (u & 0xF0000000u) == 0xC0000000u;
+    }
+    if (code >= 128 && code < 160) {
+        switch (code - 128) {
+            case 4:   // SIGILL
+            case 6:   // SIGABRT
+            case 7:   // SIGBUS
+            case 8:   // SIGFPE
+            case 11:  // SIGSEGV
+            case 31:  // SIGSYS
+                return true;
+            default: break;
+        }
+    }
+    return false;
+}
+
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
                              const std::vector<std::string>& params, const Env& env,
                              const proc::OutputMonitor& monitor,
-                             const std::atomic<bool>* kill) {
+                             const std::atomic<bool>* kill, bool* crashed) {
     const config::Format& f = *env.fmt;
     std::vector<std::string> encode_args =
         build_cmd(f.encode_cmd, env.encoder, wav, candidate, params, f.engine_codec,
@@ -292,6 +319,7 @@ std::string encode_candidate(const std::string& wav, const std::string& candidat
     if (r.stalled) return i18n::str("encoder stalled (no progress)");
     if (r.timed_out) return i18n::str("encoder exceeded the timeout");
     if (r.exit_code != 0) {
+        if (crashed) *crashed = is_crash_exit(r.exit_code);
         std::string out = util::trim(r.output);
         return i18n::fmt("encoder returned code %d", r.exit_code) +
                (out.empty() ? "" : ": " + out);

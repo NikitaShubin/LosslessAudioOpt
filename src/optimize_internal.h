@@ -105,7 +105,8 @@ DecodeStatus decode_source_native(const config::Format* src_fmt, const std::stri
 std::string encode_candidate(const std::string& wav, const std::string& candidate,
                              const std::vector<std::string>& params, const Env& env,
                              const proc::OutputMonitor& monitor = {},
-                             const std::atomic<bool>* kill = nullptr);
+                             const std::atomic<bool>* kill = nullptr,
+                             bool* crashed = nullptr);
 bool remove_dec_wav(const std::string& p);
 std::string validate_candidate(const std::string& wav, const std::string& candidate,
                                const Env& env, const std::atomic<bool>* kill = nullptr);
@@ -233,6 +234,8 @@ struct FileJob {
     bool cancelled = false;
     std::atomic<bool> kill_requested{false};
     std::atomic<bool> finalizing{false};
+    std::atomic<bool> crashed{false};
+    std::string crash_reason;
 
     bool prep_ok = false;
     uint64_t ref_size = 0;
