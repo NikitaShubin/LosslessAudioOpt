@@ -102,3 +102,7 @@ ffmpeg — `["ffmpeg version"]`.
 Кроме точечной проверки подстрок, релизный CI сравнивает полный вывод `cli_check` с эталоном
 `.github/cli-baselines/<id>.txt` (`python3 .github/scripts/check_cli_baselines.py --compare`) —
 любое изменение справки кодека блокирует релиз до обновления конфига и эталона (см. AGENTS.md).
+
+## Документация
+
+- [README.en.md](README.en.md) — этот документ на английском.
