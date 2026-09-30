@@ -36,7 +36,7 @@ SKIP_PATH = os.path.join(ROOT, ".github", "cli-baselines", "skip-upstream.json")
 UPSTREAM_MANUAL = {
     "tak": "2.3.3",
     "optimfrog": "5.100",
-    "monkeys_audio": "13.25",
+    "monkeys_audio": "13.26",
 }
 
 GITHUB = {
