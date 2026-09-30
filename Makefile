@@ -86,11 +86,16 @@ $(BIN): $(MAIN_OBJS)
 
 $(OBJDIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJDIR)/%.o: third_party/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+# Пересборка при изменении любого заголовка: без этого правила make опирался
+# только на mtime .cpp и оставлял stale-объекты со старой раскладкой классов,
+# что проявлялось как segfault или потерянные строки в vtable.
+-include $(wildcard $(OBJDIR)/*.d)
 
 clean:
 	rm -rf build

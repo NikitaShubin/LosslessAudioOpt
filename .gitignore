@@ -26,6 +26,8 @@ __pycache__/
 
 # Артефакты сборки
 *.o
+*.d
+build/
 llao.exe
 llao-linux
 llao-daemon.exe
