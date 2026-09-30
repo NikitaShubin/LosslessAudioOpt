@@ -20,6 +20,7 @@
 
 #include "config.h"
 #include "media.h"
+#include "obs.h"
 #include "optimize.h"
 #include "proc.h"
 #include "report.h"
@@ -47,10 +48,10 @@ enum class DecodeStatus { Ok, NeedsCopy, Failed };
 uint64_t estimated_wav_bytes(const media::Probe& probe, int bits);
 
 // Пиковый след файла на диске (уровень 1 — файловый бюджет).
-uint64_t file_peak_bytes(uint64_t wav, Verify v);
+uint64_t file_peak_bytes(uint64_t wav);
 
 // Инкрементальный след одного варианта (уровень 2 — задачевый бюджет).
-uint64_t variant_peak_bytes(uint64_t wav, Verify v);
+uint64_t variant_peak_bytes(uint64_t wav);
 
 // ---------------------------------------------------------------------------
 // Утилиты
@@ -269,7 +270,7 @@ struct FileJob {
     std::vector<nlohmann::json> stat_records;
     std::vector<std::string> failures;
     std::vector<std::string> exclusions;
-    std::vector<std::string> excluded_fmts;
+    std::vector<obs::ExcludedVariant> excluded_variants;
     int variant_errors = 0;
     int tool_errors = 0;
     bool error_counted = false;
@@ -332,13 +333,25 @@ struct Runner {
     bool all_done_locked() const;
     void count_error(FileJob& j);
     void count_error_locked(FileJob& j);
+    // Диагностика файла, чей вариант упал в строгом режиме: пишется ДО аборта,
+    // потому что после abort_all() finalize_file уже не вызовется.
+    void report_error_before_abort(FileJob& j, const std::string& verr);
+    // Строка «ERROR <файл> — <причина>» с приведённой к одной строке причиной.
+    void error_line(FileJob& j, const std::string& reason);
     bool variant_launchable_locked();
     bool deferred_retry_locked();
     bool find_next_prep_locked(size_t* out);
     bool prep_allowed_locked() const;
     bool take_work_locked(Work* w);
     void prep_file(FileJob& j);
-    VariantOutcome run_variant(FileJob& j, size_t task_idx);
+    // force_best: сохранить результат как нового победителя независимо от cost.
+    // Нужно спуску при провале сверки победителя: там мы идём по кандидатам от
+    // меньшего к большему, и обычное жадное сравнение cost удалило бы кандидата.
+    VariantOutcome run_variant(FileJob& j, size_t task_idx, bool force_best = false);
+    // Спуск по ранее успешным кандидатам, пока не найдётся прошедший сверку.
+    bool descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
+                            std::vector<nlohmann::json>& records,
+                            std::string& reason);
     void finalize_file(FileJob& j);
     void worker();
 };

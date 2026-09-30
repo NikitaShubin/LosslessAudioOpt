@@ -11,7 +11,9 @@
 namespace obs {
 
 // Состояние отдельного варианта (сегмента полосы файла / задачи очереди).
-enum class TaskState { Running, Ok, Failed };
+// Skipped: задача снята не своей ошибкой, а прерыванием работы над файлом из-за
+// ошибки в соседней задаче (строгий режим). Рисуется серым — «виновник» красный.
+enum class TaskState { Running, Ok, Failed, Skipped };
 
 // Метаданные задачи для тултипов (формат/вариант/параметры).
 struct TaskInfo {
@@ -19,6 +21,15 @@ struct TaskInfo {
     std::string variant_id;
     std::vector<std::string> params;
     std::string note;
+};
+
+// Пропущенный вариант: кодек рабочий, но файл не соответствует его caps.
+// Один элемент на вариант, а не на формат — у LA их четыре, и пользователь
+// должен видеть четыре жёлтые точки.
+struct ExcludedVariant {
+    std::string fmt_id;
+    std::string variant_id;
+    std::string reason;  // уже готовая строка причины для тултипа
 };
 
 // Интерфейс приёмника событий. Все методы вызываются движком; реализации
@@ -38,11 +49,15 @@ struct Sink {
     // Расширенный вариант с метаданными задач (для демона/веба).
     virtual void set_tasks(size_t, const std::vector<TaskInfo>&) {}
 
-    // Форматы, исключённые по caps для этого файла (жёлтые точки в вебе).
-    virtual void set_excluded(size_t, const std::vector<std::string>&) {}
+    // Варианты, исключённые по caps для этого файла (жёлтые точки в вебе).
+    virtual void set_excluded(size_t, const std::vector<ExcludedVariant>&) {}
 
     // Смена состояния варианта task_idx.
     virtual void task(size_t, size_t, TaskState) {}
+
+    // Выбранный победитель файла (демон): индекс задачи в кружке на вебе.
+    // task_idx — индекс в tasks/task_infos, SIZE_MAX если неизвестен.
+    virtual void winner(size_t, const std::string&, const std::string&, size_t) {}
 
     // Файл обработан успешно; pct — процент выигрыша в сжатии.
     virtual void end_file(size_t, double) {}

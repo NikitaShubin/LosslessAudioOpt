@@ -86,7 +86,11 @@ struct Row {
     double pct = 0;                // выигрыш в сжатии (после ok)
     std::vector<std::string> tasks; // состояния вариантов: pend|running|ok|failed
     std::vector<obs::TaskInfo> task_infos; // метаданные задач (fmt/variant)
-    std::vector<std::string> excluded_fmts; // форматы, исключённые по caps (жёлтые точки)
+    std::vector<obs::ExcludedVariant> excluded; // варианты, пропущенные по caps (жёлтые точки)
+    bool has_winner = false;         // победитель известен (кружок на вебе)
+    size_t winner_task = SIZE_MAX;   // индекс задачи-победителя в tasks
+    std::string winner_fmt;          // формат победителя
+    std::string winner_variant;      // вариант победителя
     std::string mode;              // "optimize" | "restore"
     std::string target_dir;        // целевая папка (пусто = замена на месте)
     std::string out_path;          // фактический путь результата (после ok)
@@ -109,7 +113,9 @@ public:
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos);
     void set_task(size_t id, size_t idx, const std::string& st);
     void set_pct(size_t id, double pct);
-    void set_excluded(size_t id, const std::vector<std::string>& fmts);
+    void set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants);
+    void set_winner(size_t id, const std::string& fmt, const std::string& variant,
+                    size_t task_idx);
     // Метаданные строки: режим и целевая папка (при добавлении).
     void set_meta(size_t id, const std::string& mode, const std::string& target_dir);
     // Фактический путь результата (после ок, restore/замена на месте).

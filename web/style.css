@@ -52,8 +52,11 @@ td.prog{white-space:nowrap;text-align:center}
 .warn{color:#eab308;margin-right:6px;cursor:help}
 .tasks{display:flex;gap:4px;flex-wrap:wrap}
 .task-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+/* Победитель: цвет точки сохраняется, добавляется кольцо. */
+.task-winner{box-shadow:0 0 0 2px #0f1115,0 0 0 3.5px #f8fafc}
 .task-ok{background:#22c55e}.task-running{background:#06b6d4;animation:pulse 1s infinite}
 .task-failed{background:#ef4444}.task-pend{background:#374151}
+.task-skipped{background:#6b7280}
 .task-excluded{background:#eab308}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 #app{display:flex;flex-direction:column;height:100vh}

@@ -26,7 +26,9 @@ public:
     void prep(size_t id) override;
     void set_tasks(size_t id, size_t total) override;
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) override;
-    void set_excluded(size_t id, const std::vector<std::string>& fmts) override;
+    void set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants) override;
+    void winner(size_t id, const std::string& fmt, const std::string& variant,
+                size_t task_idx) override;
     void task(size_t id, size_t idx, obs::TaskState st) override;
     void end_file(size_t id, double pct) override;
     void mark_stopped(size_t id) override;

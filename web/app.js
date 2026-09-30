@@ -89,8 +89,8 @@ function setConn(ok, text) {
   connStatus.textContent = text;
   connStatus.className = "conn " + (ok ? "ok" : "err");
 }
-function taskDot(st, idx, info) {
-  const c = st==="ok" ? "ok" : st==="running" ? "running" : st==="failed" ? "failed" : "pend";
+function taskDot(st, idx, info, isWinner) {
+  const c = st==="ok" ? "ok" : st==="running" ? "running" : st==="failed" ? "failed" : st==="skipped" ? "skipped" : "pend";
   let title = "";
   if (info && info.fmt) {
     title = `${info.fmt}/${info.variant} ${info.params ? info.params.join(" ") : ""} — ${st}`;
@@ -98,11 +98,16 @@ function taskDot(st, idx, info) {
   } else {
     title = `Задача #${idx}: ${st}`;
   }
-  return `<span class="task-dot task-${c}" title="${esc(title)}"></span>`;
+  if (isWinner) title += " — победитель";
+  return `<span class="task-dot task-${c}${isWinner?" task-winner":""}" title="${esc(title)}"></span>`;
 }
 function excludedDots(excluded) {
   if (!excluded || !excluded.length) return "";
-  return excluded.map(f=>`<span class="task-dot task-excluded" title="${esc(f)} — вне характеристик формата (caps)"></span>`).join("");
+  return excluded.map(v=>{
+    const name = v && v.variant ? `${v.fmt}/${v.variant}` : String(v);
+    const why  = v && v.reason ? v.reason : "вне характеристик формата (caps)";
+    return `<span class="task-dot task-excluded" title="${esc(name)} — ${esc(why)}"></span>`;
+  }).join("");
 }
 function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
 
@@ -334,7 +339,17 @@ function renderQueue(rows){
     const pos = i+1;
     const bar = progressBar(r);
     const infos = r.task_infos || [];
-    const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx])).join("") + excludedDots(r.excluded);
+    // Победитель отмечается и по индексу, и по паре формат/вариант: после
+    // восстановления строки из queue.json индексы могут не совпасть.
+    const w = r.winner || null;
+    const winIdx = w && w.task!=null && w.task>=0 ? w.task : -1;
+    const isWin = (st,idx) => {
+      if (!w) return false;
+      if (idx === winIdx) return true;
+      const inf = infos[idx];
+      return !!(inf && w.fmt === inf.fmt && w.variant === inf.variant);
+    };
+    const tasks = (r.tasks||[]).map((st,idx)=>taskDot(st,idx, infos[idx], isWin(st,idx))).join("") + excludedDots(r.excluded);
     const canUp = i>0, canDown = i<rows.length-1;
     let actions = `<span class="action-btns">`;
     if (r.state==="ok") {

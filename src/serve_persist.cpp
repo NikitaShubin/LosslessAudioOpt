@@ -33,6 +33,18 @@ std::vector<persist::Row> DaemonSession::snapshot_for_persist(bool final) const 
         p.pct = r.pct;
         p.last_error = r.last_error;
         p.had_sidecar = r.had_sidecar;
+        // Отрисовка вариантов переживает рестарт: без этого восстановленная
+        // строка теряла точки вариантов и кольцо победителя.
+        p.tasks = r.tasks;
+        for (const auto& ti : r.task_infos)
+            p.task_infos.push_back({ti.fmt_id, ti.variant_id, ti.note});
+        for (const auto& v : r.excluded)
+            p.excluded.push_back({v.fmt_id, v.variant_id, v.reason});
+        if (r.has_winner) {
+            p.has_winner = true;
+            p.winner_fmt = r.winner_fmt;
+            p.winner_variant = r.winner_variant;
+        }
         std::string st = r.state;
         if (final && (st == "queued" || st == "prep" || st == "running")) st = "queued";
         p.state = st;
@@ -98,6 +110,19 @@ void DaemonSession::load_persisted(std::string* err) {
         r.last_error = why;
         r.had_sidecar = pr.had_sidecar;
         r.has_sidecar = pr.has_sidecar;
+        r.tasks = pr.tasks;
+        for (const auto& ti : pr.task_infos)
+            r.task_infos.push_back({ti.fmt, ti.variant, {}, ti.note});
+        for (const auto& s : pr.excluded)
+            r.excluded.push_back({s.fmt, s.variant, s.reason});
+        if (pr.has_winner) {
+            r.has_winner = true;
+            r.winner_fmt = pr.winner_fmt;
+            r.winner_variant = pr.winner_variant;
+            // Индекс победителя не сохраняем: после рестарта он не нужен —
+            // веб находит точку по паре формат/вариант.
+            r.winner_task = SIZE_MAX;
+        }
         st_->upsert(r);
         added_paths_.insert(full);
         order.push_back(r.id);

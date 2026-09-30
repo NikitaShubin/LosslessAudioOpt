@@ -135,12 +135,15 @@ uint64_t estimated_wav_bytes(const media::Probe& probe, int bits) {
     return 44 + ch * (bps / 8) * sr * (uint64_t)(dur + 1.0);
 }
 
-uint64_t file_peak_bytes(uint64_t wav, Verify v) {
-    return wav * ((v == Verify::None) ? 3 : 4);
+// Сверка кандидата всегда присутствует (режима «без проверки» больше нет), поэтому
+// оценка диска фиксированная: исходник+эталонный WAV сверху, плюс кандидат и его
+// декод для сверки.
+uint64_t file_peak_bytes(uint64_t wav) {
+    return wav * 4;
 }
 
-uint64_t variant_peak_bytes(uint64_t wav, Verify v) {
-    return wav * ((v == Verify::None) ? 1 : 2);
+uint64_t variant_peak_bytes(uint64_t wav) {
+    return wav * 2;
 }
 
 std::string lower_ext(const std::string& path) {

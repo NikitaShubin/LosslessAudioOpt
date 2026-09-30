@@ -44,16 +44,29 @@ void DaemonSink::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     st_->set_tasks(id, infos);
 }
 
-void DaemonSink::set_excluded(size_t id, const std::vector<std::string>& fmts) {
+void DaemonSink::set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants) {
     nlohmann::json jf = nlohmann::json::array();
-    for (auto& f : fmts) jf.push_back(f);
+    for (const auto& v : variants)
+        jf.push_back({{"fmt", v.fmt_id}, {"variant", v.variant_id}, {"reason", v.reason}});
     emit(id, "set_excluded", {{"excluded", jf}});
-    st_->set_excluded(id, fmts);
+    st_->set_excluded(id, variants);
+}
+
+void DaemonSink::winner(size_t id, const std::string& fmt, const std::string& variant,
+                        size_t task_idx) {
+    // SIZE_MAX = индекс точки неизвестен (победитель не найден в списке
+    // вариантов). Наружу отдаём null, чтобы веб не получал 18446744073709551615.
+    emit(id, "winner", {{"winner", {{"fmt", fmt},
+                                   {"variant", variant},
+                                   {"task", task_idx == SIZE_MAX ? nlohmann::json()
+                                                                 : nlohmann::json(task_idx)}}}});
+    st_->set_winner(id, fmt, variant, task_idx);
 }
 
 void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
     const char* s = st == obs::TaskState::Running ? "running"
                     : st == obs::TaskState::Ok     ? "ok"
+                    : st == obs::TaskState::Skipped ? "skipped"
                                                    : "failed";
     emit(id, "task", {{"idx", idx}, {"state", s}});
     st_->set_task(id, idx, s);

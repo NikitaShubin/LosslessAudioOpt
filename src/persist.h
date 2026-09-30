@@ -26,6 +26,20 @@
 namespace persist {
 
 // Одна строка сохраняемого состояния очереди.
+// Метаданные варианта для восстановления точек на вебе после рестарта.
+struct TaskMeta {
+    std::string fmt;
+    std::string variant;
+    std::string note;
+};
+
+// Вариант, пропущенный по caps (жёлтая точка на вебе).
+struct Skipped {
+    std::string fmt;
+    std::string variant;
+    std::string reason;
+};
+
 struct Row {
     // path — при непустом root: относительный путь от корня (корень хранится
     // отдельно); без root (старый формат) — полный/унаследованный путь.
@@ -39,6 +53,14 @@ struct Row {
     bool had_sidecar = false; // на входе был sidecar <base>.tags.zip
     bool has_sidecar = false; // рядом с итогом есть sidecar
     std::string last_error;   // текст последней ошибки (error/stopped)
+    // Отрисовка вариантов. Не влияет на перезапуск обработки — только на то,
+    // чтобы восстановленная строка выглядела как до рестарта демона.
+    std::vector<std::string> tasks;
+    std::vector<TaskMeta> task_infos;
+    std::vector<Skipped> excluded;
+    bool has_winner = false;
+    std::string winner_fmt;
+    std::string winner_variant;
 };
 
 // Путь к sidecar для исходника path: <dir>/<base_no_ext(path)>.tags.zip.

@@ -87,24 +87,28 @@ void usage() {
 #else
     const char* prog = "llao";
 #endif
-    out::print("  %s serve [опции]                       headless-движок с HTTP-API и веб-UI\n", prog);
+    out::print("  %s serve [options]                      headless engine with HTTP API and web UI\n", prog);
     out::print("  %s check-formats                       validate the formats/*.json schema\n", prog);
     out::print("  %s variants [fmt_id ...]               compression variants from formats/*.json\n", prog);
     out::print("  %s tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n", prog);
     out::print("  %s help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n", prog);
-    out::print("  %s stats                               show accumulated statistics\n", prog);
+    out::print("  %s stats [--report=<file>]               show accumulated statistics\n", prog);
     out::print("  %s optimize <file|folder> [...]        main enumeration\n", prog);
     out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
-    out::print("             [--verify=all|winner|none] [--ignore-errors] [--tmp=<path>]\n");
+    out::print("             [--verify=all|winner] [--ignore-errors] [--tmp=<path>]\n");
     out::print("  %s restore <file|folder> [...]         decode + re-encode to the target format\n", prog);
     out::print("             [--jobs=N|M.F] [--to=flac] [--variant=<id>] [--no-download]\n");
     out::print("             [--allow-lossy]\n");
     out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
     out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
+    out::print("  stats --report=<file> writes the same ranking as a shareable text table; the\n");
+    out::print("    stats.json path can be overridden with the LLAO_STATS_FILE env var\n");
     out::print("  optimize --verify: all = check every candidate (default); winner = check only the\n");
     out::print("    best by size; none = no verification at all. Any file error aborts the run unless\n");
     out::print("    --ignore-errors is given (then such files are skipped and the run continues).\n");
+    out::print("  A failed file is always reported: its name and reason go to the output, the report\n");
+    out::print("    and stats. --ignore-errors skips such files without counting them (exit 0).\n");
     out::print("  For server options see: %s serve --help\n", prog);
 }
 
@@ -227,8 +231,35 @@ int cmd_help(const std::vector<std::string>& args) {
     }
 }
 
-int cmd_stats() {
+int cmd_stats(const std::vector<std::string>& args) {
+    std::string report;
+    bool no_more_opts = false;
+    for (const auto& a : args) {
+        if (!no_more_opts && a == "--") {
+            no_more_opts = true;
+        } else if (!no_more_opts && a.rfind("--report=", 0) == 0) {
+            report = a.substr(9);
+        } else if (!no_more_opts && a == "--report") {
+            out::error("ERROR: use --report=<file>\n");
+            return 2;
+        } else {
+            out::error("ERROR: unknown option '%s'\n", a.c_str());
+            return 2;
+        }
+    }
     auto items = stats::load();
+    if (!report.empty()) {
+        if (items.empty()) {
+            out::error("ERROR: no statistics to report (nothing has been optimized yet)\n");
+            return 1;
+        }
+        if (!stats::write_report(report, items)) {
+            out::error("ERROR: cannot write report to '%s'\n", report.c_str());
+            return 1;
+        }
+        out::print("%s\n", report.c_str());
+        return 0;
+    }
     stats::print_summary(items);
     return 0;
 }
@@ -270,13 +301,12 @@ int cmd_optimize(const std::vector<std::string>& args) {
             std::string v = a.substr(9);
             if (v == "all") opts.verify = optimize::Verify::All;
             else if (v == "winner") opts.verify = optimize::Verify::Winner;
-            else if (v == "none") opts.verify = optimize::Verify::None;
             else {
-                out::error("ERROR: --verify must be one of: all|winner|none\n");
+                out::error("ERROR: --verify must be one of: all|winner\n");
                 return 2;
             }
         } else if (!no_more_opts && a == "--verify") {
-            out::error("ERROR: use --verify=all|winner|none\n");
+            out::error("ERROR: use --verify=all|winner\n");
             return 2;
         } else if (!no_more_opts && a == "--ignore-errors") {
             opts.ignore_errors = true;
@@ -399,7 +429,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
         if (cmd == "variants") return optimize::list_variants(rest);
         if (cmd == "tools") return cmd_tools(rest);
         if (cmd == "help") return cmd_help(rest);
-        if (cmd == "stats") return cmd_stats();
+        if (cmd == "stats") return cmd_stats(rest);
         if (cmd == "optimize") return cmd_optimize(rest);
         if (cmd == "restore") return cmd_restore(rest);
 

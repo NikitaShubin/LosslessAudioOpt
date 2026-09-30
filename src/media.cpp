@@ -29,9 +29,15 @@ struct WavReader {
     HANDLE h = INVALID_HANDLE_VALUE;
 #endif
 
-    ~WavReader() {
+    ~WavReader() { close(); }
+    void close() {
 #ifdef _WIN32
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        if (h != INVALID_HANDLE_VALUE) {
+            CloseHandle(h);
+            h = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (fs.is_open()) fs.close();
 #endif
     }
     bool open(const std::string& p) {
@@ -364,10 +370,17 @@ bool canonicalize_wav(const std::string& path, std::string* err) {
     for (const auto& c : ch)
         if (c.id == "fact") has_fact = true;
 
-    // Уже совместимый заголовок: fmt идёт первым, нет fact. Прочие кодеки
-    // (flac, tak, wavpack...) спокойно переживают чанки LIST и т.п., поэтому
-    // перезапись не нужна — сохраняем файл как есть.
-    if (fmt_first && !has_fact) return true;
+    // Нативные декодеры (MAC.exe) дописывают после data чанки cue/LIST/bext/LGWV
+    // (LGWV — APEv2-тег исходника). Заголовок при этом выглядит идеально:
+    // fmt первый, fact нет, — но строгие кодеки (OptimFROG) на таком WAV
+    // падают с access violation. Поэтому data должен быть последним чанком.
+    const uint64_t data_end = data_body + data_len + (data_len & 1);
+    bool data_last = data_end == util::file_size(path);
+
+    // Уже совместимый заголовок: fmt идёт первым, нет fact, data — последний.
+    // Прочие кодеки (flac, tak, wavpack...) спокойно переживают чанки LIST и т.п.,
+    // поэтому перезапись не нужна — сохраняем файл как есть.
+    if (fmt_first && !has_fact && data_last) return true;
 
     // Читаем PCM-параметры из fmt (первые 16 байт каноничны и для WAVEFORMATEX).
     char fbuf[16];
@@ -433,6 +446,10 @@ bool canonicalize_wav(const std::string& path, std::string* err) {
             return false;
         }
     }
+
+    // Handle чтения держим открытым только на время копирования: под wine
+    // замена файла на месте при живом handle даёт ACCESS_DENIED.
+    r.close();
 
     util::ReplaceResult rep = util::replace_file(path, tmp, path);
     if (!rep.ok) {

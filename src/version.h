@@ -3,5 +3,5 @@
 // Версия приложения. Переопределяется сборкой через -DLLAO_VERSION="x.y.z"
 // (при релизном теге). Значение по умолчанию — развитие на ветке feat/daemon.
 #ifndef LLAO_VERSION
-#define LLAO_VERSION "2.1.3"
+#define LLAO_VERSION "2.2.0"
 #endif

@@ -21,12 +21,11 @@ inline const char* mode_str(optimize::JobMode m) {
     return m == optimize::JobMode::Restore ? "restore" : "optimize";
 }
 
-// Режим верификации кандидатов.
+// Режим верификации кандидатов: all|winner.
 inline optimize::Verify parse_verify(const std::string& s, bool* ok = nullptr) {
     if (ok) *ok = true;
     if (s == "all") return optimize::Verify::All;
     if (s == "winner") return optimize::Verify::Winner;
-    if (s == "none") return optimize::Verify::None;
     if (ok) *ok = false;
     return optimize::Verify::Winner;
 }
@@ -34,8 +33,7 @@ inline optimize::Verify parse_verify(const std::string& s, bool* ok = nullptr) {
 inline const char* verify_str(optimize::Verify v) {
     switch (v) {
         case optimize::Verify::All: return "all";
-        case optimize::Verify::Winner: return "winner";
-        default: return "none";
+        default: return "winner";
     }
 }
 

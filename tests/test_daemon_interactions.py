@@ -230,7 +230,11 @@ def main():
         paths9 = []
         for i, freq in enumerate((1000, 1100, 1200)):
             p = os.path.join(workdir, f"r{i}.wav")
-            H.gen_wav(p, freq)
+            # 20 секунд, а не дефолтные 0.25: кейс проверяет batch-stop по
+            # АКТИВНЫМ строкам. Короткий wav на быстрой машине успевает
+            # завершиться (state=ok) до cancel, а restart завершённые строки
+            # сознательно не поднимает — тест получался плавающим.
+            H.gen_wav(p, freq, duration=20)
             paths9.append(p)
         r = d4.rpc("add", {"paths": paths9})
         ids9 = [x["id"] for x in r["result"]["added"]]

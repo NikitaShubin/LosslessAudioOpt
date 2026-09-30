@@ -106,11 +106,14 @@ std::string DaemonSession::version() const { return LLAO_VERSION; }
 double DaemonSession::uptime_s() const { return monotonic_s() - started_; }
 
 nlohmann::json DaemonSession::session_options() const {
+    // Отдаём реальные настройки сессии. Раньше здесь стояла константа true, и
+    // интерфейс показывал tolerant-режим, хотя демон работал строго — режим,
+    // заданный флагом --ignore-errors, до сюда не доходил.
     return {{"jobs", opts_.jobs},
             {"jobs_float", opts_.jobs_float},
             {"dry_run", opts_.dry_run},
             {"verify", dsvc::verify_str(opts_.verify)},
-            {"ignore_errors", true}};
+            {"ignore_errors", opts_.ignore_errors}};
 }
 
 nlohmann::json DaemonSession::counters() const {

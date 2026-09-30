@@ -58,7 +58,10 @@ nlohmann::json rows_json(const StateMirror& st) {
                              {"note", ti.note}});
         }
         nlohmann::json excl = nlohmann::json::array();
-        for (const auto& f : r.excluded_fmts) excl.push_back(f);
+        for (const auto& v : r.excluded)
+            excl.push_back({{"fmt", v.fmt_id},
+                            {"variant", v.variant_id},
+                            {"reason", v.reason}});
         arr.push_back({{"id", r.id},
                        {"label", r.label},
                        {"path", r.path.empty() ? r.label : r.path},
@@ -71,6 +74,19 @@ nlohmann::json rows_json(const StateMirror& st) {
                        {"last_error", r.last_error},
                        {"had_sidecar", r.had_sidecar},
                        {"has_sidecar", r.has_sidecar},
+                       // task — индекс точки-победителя в THIS-процессе. После
+                       // перезапуска он не восстанавливается (в queue.json
+                       // храним только пару fmt/variant, индексы вариантов
+                       // могли измениться), поэтому наружу отдаём null, а не
+                       // SIZE_MAX: веб ориентируется на fmt/variant.
+                       {"winner", r.has_winner
+                                      ? nlohmann::json{
+                                            {"fmt", r.winner_fmt},
+                                            {"variant", r.winner_variant},
+                                            {"task", r.winner_task == SIZE_MAX
+                                                        ? nlohmann::json()
+                                                        : nlohmann::json(r.winner_task)}}
+                                      : nlohmann::json()},
                        {"tasks", std::move(tasks)},
                        {"task_infos", std::move(infos)},
                        {"excluded", std::move(excl)}});

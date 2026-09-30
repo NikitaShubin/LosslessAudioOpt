@@ -13,7 +13,7 @@ UI **не потребляет** `/api/events`. Вся отрисовка стр
 
 - `id`, `label`, `state`, `pct` — базовое состояние строки
 - `tasks`, `task_infos` — состояния и метаданные вариантов
-- `excluded` — форматы, исключённые по caps
+- `excluded` — варианты, пропущенные по caps, по одному на вариант
 - `mode` (optimize|restore) и `out_path` (фактический результат)
 
 Пауза/перезапуск вычисляются из `state` (`queued|prep|running|stopped|error`),
@@ -57,7 +57,7 @@ Event.file_id. Обёртки `args` нет — все поля в корне JS
 - `job_meta` {id, mode, target_dir} — режим/целевая папка строки
 - `prep` {id} — строка взята в обработку (prep)
 - `set_tasks` {id, task_infos, total} — набор метаданных задач
-- `set_excluded` {id, excluded} — форматы, исключённые по caps (жёлтые точки)
+- `set_excluded` {id, excluded} — варианты, пропущенные по caps (жёлтые точки)
 - `task` {id, idx, state} — состояние варианта (running|ok|failed)
 - `state` {id, state} — смена состояния строки
 - `end_file` {id, pct} — файл завершён (ok), pct — выигрыш

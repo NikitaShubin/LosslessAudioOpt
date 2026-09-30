@@ -138,13 +138,26 @@ void StateMirror::set_pct(size_t id, double pct) {
     r.pct = pct;
 }
 
-void StateMirror::set_excluded(size_t id, const std::vector<std::string>& fmts) {
+void StateMirror::set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants) {
     std::lock_guard<std::mutex> lk(m_);
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
     touch_locked(id);
-    r.excluded_fmts = fmts;
+    r.excluded = variants;
+}
+
+void StateMirror::set_winner(size_t id, const std::string& fmt, const std::string& variant,
+                             size_t task_idx) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    r.winner_fmt = fmt;
+    r.winner_variant = variant;
+    r.winner_task = task_idx;
+    r.has_winner = true;
 }
 
 void StateMirror::set_meta(size_t id, const std::string& mode,

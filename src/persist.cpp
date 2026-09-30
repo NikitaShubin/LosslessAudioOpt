@@ -34,6 +34,22 @@ std::string to_json(const std::vector<Row>& rows) {
                        {"has_sidecar", r.has_sidecar},
                        {"last_error", r.last_error}});
         if (!r.root.empty()) arr.back()["root"] = r.root;
+        if (!r.tasks.empty()) arr.back()["tasks"] = r.tasks;
+        if (!r.task_infos.empty()) {
+            nlohmann::json ti = nlohmann::json::array();
+            for (const auto& t : r.task_infos)
+                ti.push_back({{"fmt", t.fmt}, {"variant", t.variant}, {"note", t.note}});
+            arr.back()["task_infos"] = std::move(ti);
+        }
+        if (!r.excluded.empty()) {
+            nlohmann::json ex = nlohmann::json::array();
+            for (const auto& s : r.excluded)
+                ex.push_back({{"fmt", s.fmt}, {"variant", s.variant},
+                              {"reason", s.reason}});
+            arr.back()["excluded"] = std::move(ex);
+        }
+        if (r.has_winner)
+            arr.back()["winner"] = {{"fmt", r.winner_fmt}, {"variant", r.winner_variant}};
     }
     util::sanitize_json(arr);
     nlohmann::json doc = {{"version", 2}, {"rows", std::move(arr)}};
@@ -63,6 +79,30 @@ bool from_json(const std::string& text, std::vector<Row>* rows) {
         r.had_sidecar = j.value("had_sidecar", false);
         r.has_sidecar = j.value("has_sidecar", false);
         r.last_error = j.value("last_error", "");
+        // Отрисовка вариантов: в старых файлах этих полей нет — тогда строка
+        // просто восстановится без точек, и это не ошибка.
+        if (j.contains("tasks") && j["tasks"].is_array())
+            for (const auto& t : j["tasks"])
+                if (t.is_string()) r.tasks.push_back(t.get<std::string>());
+        if (j.contains("task_infos") && j["task_infos"].is_array()) {
+            for (const auto& t : j["task_infos"]) {
+                if (!t.is_object()) continue;
+                r.task_infos.push_back({t.value("fmt", ""), t.value("variant", ""),
+                                        t.value("note", "")});
+            }
+        }
+        if (j.contains("excluded") && j["excluded"].is_array()) {
+            for (const auto& s : j["excluded"]) {
+                if (!s.is_object()) continue;
+                r.excluded.push_back({s.value("fmt", ""), s.value("variant", ""),
+                                      s.value("reason", "")});
+            }
+        }
+        if (j.contains("winner") && j["winner"].is_object()) {
+            r.has_winner = true;
+            r.winner_fmt = j["winner"].value("fmt", "");
+            r.winner_variant = j["winner"].value("variant", "");
+        }
         if (r.path.empty()) continue;
         rows->push_back(std::move(r));
     }
