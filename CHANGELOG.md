@@ -1,0 +1,179 @@
+# Changelog
+
+All notable changes to LLAO, newest first. This file is the base text; [CHANGELOG.ru.md](CHANGELOG.ru.md) is the Russian translation of the same content. The release page text is taken from this file (see `release.yml`), so a version section here is what users see on the release.
+
+Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
+
+## 2.2.0 — 2026-09-30
+
+### Task dots in the web UI
+The dots in a file row are no longer "just progress":
+- variants excluded by `caps` are marked one dot per variant (yellow) with a reason, instead of one entry per format — a format can have a suitable variant at an unsuitable bit depth, and a plain list of "excluded formats" could not convey that;
+- the winner marker and its task index survive a daemon restart (`queue.json` stores the fmt/variant pair);
+- a new `skipped` state — a grey dot for a task cancelled not by its own failure but by an abort caused by a neighbouring task, so the culprit (red `failed`) is distinguishable from the victims.
+
+### Error contract
+- a variant failure in strict mode no longer ends in a nameless `Aborted: N file(s) failed`: the file is closed *before* the abort, and its name and reason go to the output, `--report` and `stats.json`. Multi-line reasons from codec stderr are folded into one line;
+- files that did not run to the end because of an abort are counted by a separate `Not processed` line instead of being drawn as empty rows;
+- partially copied delivery files are removed on both the Windows and the POSIX path.
+
+### `--formats`
+`optimize --formats=<id>` with an unknown id used to filter out every format silently (`no suitable candidates`, code 0). It is now `ERROR: unknown format '<id>'` with code 1, the same way `variants` rejects an unknown `fmt_id`.
+
+### `llao stats --report=<file>`
+A new export writes the format ranking as a plain text table **without localization** — only format ids, sizes and percentages — so it can be handed to a codec author as is. On a real 3.6 GB library the ranking looks like this:
+
+```
+tak               86.78%      3432 candidates
+monkeys_audio     84.63%      1895 candidates
+optimfrog         83.88%      6080
+la                83.27%      1484
+wavpack           78.20%      9408
+alac              77.20%       388
+tta               73.19%       443
+flac              45.09%      7203
+```
+
+The database path is overridable through `LLAO_STATS_FILE`.
+
+### Localization
+- `llao serve --help` moved to an English base with the translation in `lang/ru.json` (it used to be printed with a raw `printf` containing Cyrillic, so both the Russian and the English user saw Russian);
+- the `usage()` keys in `lang/ru.json` were brought in line with the current text: 26 strings got a translation, 11 stale keys were dropped. A Russian user no longer sees English lines in the help.
+
+### Documentation
+The README is now bilingual: `README.md` is English (the primary one, it ships in the release) and `README.ru.md` is Russian; the config schema is split the same way (`formats/README.en.md` / `README.ru.md`). `AGENTS.md` gained a rule about keeping the pairs in sync. This file and its Russian counterpart were added at the same time, so the release text has a source in the repository.
+
+### Encoder crashes
+The work that was versioned 2.1.3 during development shipped in this release:
+- the ffmpeg fallback path now canonicalizes the reference WAV, which removes an access violation (0xC0000005) in OptimFROG on the fallback path;
+- an encoder crash stops the work on the whole file. Previously the remaining variants kept spinning on the same broken reference WAV, although the result obviously could not change — `stats.json` held 7287 such records for a single broken input.
+
+### Miscellaneous
+- Monkey's Audio updated to **13.26**;
+- the build now rebuilds objects when a header changes (`-MMD/-MP`) — before this, stale objects with the old class layout were left behind, which showed up as a segfault or lost vtable entries;
+- `WavReader` got an explicit `close()` that guards against a double close of the handle;
+- the daemon reported a hardcoded `ignore_errors: true` in `/api/state`, so the UI claimed tolerant mode while the daemon ran strictly.
+
+## 2.1.2 — 2026-09-24
+
+- WAV canonicalization after a native decode. Decoding `.ape` through `MAC.exe` produced a reference WAV with a non-canonical header (a `fact` chunk, or `bext`/`minf`/`elm1` before `fmt`): OptimFROG crashed with 0xC0000005 and produced no file, LA reported `invalid .wav header`. `media::canonicalize_wav()` reduces the header to a canonical 44-byte `fmt`(16 PCM)+`data`, with the PCM copied byte-for-byte. The ffmpeg fallback is not normalized (its format suits both codecs).
+
+## 2.1.1 — 2026-09-11
+
+- a favicon with a gradient in the web UI, the version in the UI header, and the stable `llao-latest-win64.zip` asset.
+
+## 2.1.0 — 2026-09-10
+
+- The queue no longer depends on the daemon's working directory: a row stores an absolute `root` plus a path relative to it, so a restart from any directory recognizes its sources. Before this, a restart from a different directory could report every row as `source file not found`.
+- `replace_file()` instead of `std::rename` when writing results and the discovery file, which on Windows did not overwrite the target and could leave dangling `.tmp` files or second records.
+
+## 2.0.0 — 2026-09-08
+
+### The terminal interface is gone
+The status bar and the separate `llao-daemon` process were removed. The engine runs headless and the interface is a browser: the `serve` subcommand starts an HTTP daemon with a web UI. The CLI (`optimize`, `restore`, `tools`, `variants`, `stats`) and the server live in **one binary** — `llao.exe` / `llao-linux`.
+
+### Daemon and web UI
+- HTTP API and a built-in web UI (no build step, vanilla ES6, embedded into the executable): login by token, the queue table with per-variant task dots, counters, add by path, cancel-file/cancel-all, reorder, remove, pause/resume, restart, shutdown with confirmation;
+- a persistent queue in `queue.json` (v2) next to the discovery file, updated on every change and on shutdown, so `ok` rows survive a restart, active rows continue and stopped/error rows keep their reason;
+- instant process kill on remove/shutdown, a prep watchdog with a time budget, tombstones instead of ghost rows, atomic restart, and id-based (not position-based) removal;
+- crash safety: unfinished rows are reported as such on the next start, and the result write is transactional through a temporary file, so a crash between the steps never shows a false "done".
+
+### Architecture
+- tags and format descriptions moved into `formats/*.json` — no hardcoded format names or tag key tables in C++; a new format is added by JSON alone;
+- the monoliths were decomposed: `serve.cpp` into `serve_entry`/`serve_session`/`serve_queue`/`serve_persist`, `optimize.cpp` (3128 lines) into `optimize_util`/`optimize_codec`/`optimize_runner`, `tags.cpp` (1845 lines) into per-format modules; see `docs/architecture-audit.md`;
+- the engine was decoupled from the UI through `obs::Sink` and turned into a long-running queue with a public `Engine` API.
+
+### Infrastructure
+- CI builds the single binary natively on Linux and runs the whole test suite, with `bin/` cached by `formats/*.json`;
+- a dev container (llvm-mingw + wine32/64 + ffmpeg + p7zip) and the `llao` wine wrapper with a real single-instance mutex;
+- `stats.json` records candidate performance metrics: `wall_ms`, `prep_wall_ms`, `decode_wall_ms`.
+
+## 1.10.1 — 2026-08-23
+
+- `files` lists in the format configs: the codec cache and the release archive now copy only the listed files, which removed ~8 MB from the release and ~610 MB from a local `bin/`;
+- local `bin/` cleaned of unused GUI tools, installers and documentation.
+
+## 1.10.0 — 2026-08-23
+
+- a pseudographic interface for `restore`, identical to the optimizer (two phases, navigation, auto-follow, scrollbar), plus the `--no-status` flag;
+- an alias chain for native decoders: symlink → hardlink → original → temporary copy, so a decoder can always be pointed at a path it accepts;
+- a unified footer and scrollbar color palette;
+- ffprobe JSON artifacts stripped from probe output.
+
+## 1.9.0 — 2026-08-22
+
+- native Linux build: `make TARGET=linux` produces `llao-linux` with g++, no cross-compiler needed; the Windows codec utilities run under wine;
+- `DiskBudget`: a centralized disk budget with file-level and variant-level budgeting, deferred files and real free-space checks, so a run stops cleanly instead of filling the disk;
+- `--tmp=<path>` for a custom temporary directory (RAMFS-compatible);
+- the status bar is suppressed on a pipe, and `decoder_path` finds `.exe` decoders on Linux.
+
+## 1.8.1 — 2026-08-22
+
+- terminal size detection under wine via `stty`/`tput`, and `init()` no longer disables the interactive UI when `GetConsoleMode` fails — previously `wine llao.exe` without `LLAO_STATUS_FORCE=1` turned the whole UI off;
+- external process output normalized, and the error text is no longer truncated.
+
+## 1.8.0 — 2026-08-20
+
+- stall detection: a codec that stops making progress is killed, not just a slow one (polling of CPU time and output size);
+- a proportional hard timeout (based on the WAV size) instead of a fixed 1800 s;
+- the scheduler footprint model corrected, with a separate per-file base cost;
+- distinct footer and scrollbar colors in the UI.
+
+## 1.7.0 — 2026-08-19
+
+- tags fully data-driven: `key_map`, `write_constraints` and `native_reader` live in `formats/*.json`, the hardcoded key tables are gone;
+- scheduler: a window per file (a large file with slow variants no longer blocks the rest), a tmp budget of free space minus a reserve, and honest errors — a candidate that is not smaller than the original is an honest SKIP;
+- immediate abort on an error without `--ignore-errors` (active encoders and decoders are interrupted);
+- status bar: a vertical scrollbar, correct handling of wide CJK glyphs, an hscroll mask, and a diagnostics buffer shown in the footer;
+- per-process tmp isolation (`tmp/<pid>`) with ASCII names for ANSI encoders, and lower thread priority for the codecs.
+
+## 1.6.0 — 2026-08-17
+
+- status bar v2: a progress bar and a mosaic mode (Tab), a state palette, scrolling paths, right-aligned percentages and processor time instead of wall time. *(The status bar itself was removed in 2.0.)*
+
+## 1.5.0 — 2026-08-17
+
+- the interface moved into the console alternate screen buffer, so the original screen with the command line is restored on exit;
+- readable replacement errors: ANSI messages are recoded to UTF-8 instead of garbled bytes, and renames retry against a transient antivirus lock;
+- strict scheduler priority: an idle worker takes the variant of the earliest ready file.
+
+## 1.4.0 — 2026-08-17
+
+- codecs are spawned so that they cannot inherit our open file handles. Before this they inherited a transient descriptor and parallel file replacement failed with `ERROR_SHARING_VIOLATION`; constraining the inheritance through `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` was rejected as unstable on real Windows, so files are now opened non-inheritable with `FILE_SHARE_DELETE`;
+- Ctrl+C handling: the first press is a graceful stop, the second a forced exit, and the encoders die with the process (a Job Object with `KILL_ON_JOB_CLOSE`);
+- the prep window no longer follows the number of files not yet started, cancellation is checked in the workers, and a failed replacement counts as a file error.
+
+## 1.3.0 — 2026-08-16
+
+- the status bar works in the alternate screen buffer, overflow resets the scroll region, and log lines are clipped to the window width with the tail kept;
+- CI moved to `checkout@v5` and `action-gh-release@v3`.
+
+## 1.2.0 — 2026-08-16
+
+- safe in-place replacement: the original is moved to `.llao-bak.<ext>`, the candidate is renamed into place, and a failure rolls back;
+- `--verify=all|winner|none` and `--ignore-errors`, with an immediate abort on a file error;
+- parallel prep of up to `min(jobs, remaining files)` — before this the CPU idled on large libraries;
+- streaming WAV comparison instead of loading the file into memory;
+- the `llao` wine wrapper ships in the release archive, so `llao.exe` can be run on Linux without wine noise.
+
+## 1.1.2 — 2026-08-16
+
+- status bar: spaces were dropped while drawing, so the text ran together and the percentage stuck to the file name;
+- `restore`: renaming the temporary file retries, so a transient lock no longer leaves a `.llao-restore-tmp` behind.
+
+## 1.1.1 — 2026-08-15
+
+- honest errors and a native probe fallback: valid `.ofr` files (ffmpeg cannot parse OptimFROG at all) were marked SKIP with `errors: 0`, while real failures (a broken file, a missing utility) were disguised as success with exit 0;
+- the error test counts errors independently of the output language.
+
+## 1.1.0 — 2026-08-15
+
+- `--jobs=N|M.F` — a core multiplier (default 2.0) — and a scheduler window that adapts to free tmp space and RAM;
+- the status bar block at the bottom of the screen.
+
+## 1.0.0 — 2026-08-15
+
+- first tagged release: parallel variant processing, a global scheduler window and a tmp limit by size;
+- localization (i18n catalogs, the interface language follows `--lang`, `LLAO_LANG`, `llao.json` and the system language);
+- a release CI that builds `llao.exe`, installs the codecs and publishes the archive, and blocks the release when a codec's CLI output changes or a pinned version is stale;
+- Monkey's Audio 13.25.

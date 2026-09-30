@@ -418,6 +418,8 @@ phases: decode the source → encode into the target format.
 ## Documentation
 
 - [README.ru.md](README.ru.md) — this document in Russian.
+- [CHANGELOG.md](CHANGELOG.md) — what changed in each version (the text of the
+  release page is taken from it).
 
 ## License
 

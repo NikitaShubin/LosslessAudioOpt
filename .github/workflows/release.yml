@@ -92,7 +92,7 @@ jobs:
           VER="${GITHUB_REF_NAME:-v1.0.0}"
           DEST="llao-${VER}-win64"
           rm -rf "$DEST"; mkdir -p "$DEST"
-          cp llao llao.exe llao.json README.md README.ru.md "$DEST/"
+          cp llao llao.exe llao.json README.md README.ru.md CHANGELOG.md CHANGELOG.ru.md "$DEST/"
           cp -r formats lang "$DEST/"
           mkdir -p "$DEST/bin"
           python3 - "$DEST/bin" <<'PY'
@@ -149,8 +149,37 @@ jobs:
       - name: Стабильный ассет llao-latest-win64.zip
         run: cp "llao-${GITHUB_REF_NAME:-v1.0.0}-win64.zip" "llao-latest-win64.zip"
 
+      - name: Текст релиза из CHANGELOG.md
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME:-v1.0.0}"
+          VERSION="${VER#v}"
+          # Секция вида "## 2.2.0 — 2026-09-30" из CHANGELOG.md. Текст ведётся
+          # вручную (английский — базовый, русский — перевод), поэтому
+          # generate_release_notes не используется: он выдал бы перечисление
+          # коммитов вместо разбора, что изменилось для пользователя.
+          awk -v want="## ${VERSION} " '
+            index($0, want) == 1 { found = 1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q "^## ${VERSION} " release-notes.md; then
+            echo "::error::в CHANGELOG.md нет секции для ${VERSION} — текст релиза пуст"
+            exit 1
+          fi
+          # Одна ссылка сравнения (при generate_release_notes она задваивалась).
+          PREV=$(git describe --tags --abbrev=0 "${VER}^" 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            {
+              echo
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${VER}"
+            } >> release-notes.md
+          fi
+          cat release-notes.md
+
       - name: Публикация релиза
         uses: softprops/action-gh-release@v3
         with:
           files: llao-*.zip
-          generate_release_notes: true
+          body_path: release-notes.md
+          name: LLAO ${{ github.ref_name }}
