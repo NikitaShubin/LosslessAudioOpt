@@ -17,6 +17,11 @@ namespace stats {
 static std::mutex g_mutex;
 
 std::string path() {
+    // Оверрайд нужен для тестов и для разбора чужой статистики: по умолчанию
+    // файл лежит рядом с exe (у клиента и у демона это разные экземпляры).
+    if (const char* env = std::getenv("LLAO_STATS_FILE")) {
+        if (*env) return env;
+    }
     return util::join_path(util::exe_dir(), "stats.json");
 }
 
@@ -110,6 +115,64 @@ void print_summary(const std::vector<json::json>& items) {
                    r.total_out / 1048576.0, i18n::str("MB").c_str());
         }
     }
+}
+
+bool write_report(const std::string& dest, const std::vector<json::json>& items) {
+    std::string text = build_report(items);
+    if (text.empty()) return false;
+    return util::write_text(dest, text);
+}
+
+std::string build_report(const std::vector<json::json>& items) {
+    if (items.empty()) return std::string();
+
+    std::map<std::string, int> by_status;
+    uint64_t total_in = 0, total_out = 0;
+    int winners = 0;
+    for (const auto& it : items) {
+        by_status[it.value("status", "?")]++;
+        if (it.contains("source_size") && it["source_size"].is_number_unsigned())
+            total_in += it["source_size"].get<uint64_t>();
+        if (it.contains("result_size") && it["result_size"].is_number_unsigned())
+            total_out += it["result_size"].get<uint64_t>();
+        if (it.value("winner", false)) winners++;
+    }
+
+    std::string r;
+    r += "LLAO — format statistics\n";
+    r += "Source: " + path() + "\n";
+    r += "Records: " + std::to_string(items.size()) + "\n";
+    r += "Files replaced: " + std::to_string(winners) + "\n";
+    if (total_in > 0) {
+        char buf[160];
+        double ratio = total_out > 0 ? (double)total_out / (double)total_in : 0.0;
+        snprintf(buf, sizeof(buf), "Total size: %.2f MB -> %.2f MB (%.2f%% of source)\n",
+                 total_in / 1048576.0, total_out / 1048576.0, ratio * 100.0);
+        r += buf;
+    }
+
+    r += "\nCandidates by status:\n";
+    for (const auto& [st, cnt] : by_status) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "  %-10s %d\n", st.c_str(), cnt);
+        r += buf;
+    }
+
+    // Рейтинг — по убыванию средней экономии: так видно, кто выигрывает на
+    // конкретном материале, а не «вообще у всех одинаково».
+    std::vector<Rank> ranks = ranking(items);
+    if (!ranks.empty()) {
+        r += "\nFormat ranking (average savings over successful candidates):\n";
+        r += "  format            savings  candidates        size (MB)\n";
+        for (const auto& rk : ranks) {
+            char buf[192];
+            snprintf(buf, sizeof(buf), "  %-16s %6.2f%% %9d  %8.2f -> %8.2f\n",
+                     rk.format.c_str(), rk.savings * 100.0, rk.samples,
+                     rk.total_in / 1048576.0, rk.total_out / 1048576.0);
+            r += buf;
+        }
+    }
+    return r;
 }
 
 std::vector<Rank> ranking(const std::vector<json::json>& items) {

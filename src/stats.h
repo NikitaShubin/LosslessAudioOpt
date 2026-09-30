@@ -6,7 +6,7 @@
 
 namespace stats {
 
-// Путь к stats.json (рядом с exe).
+// Путь к stats.json (рядом с exe; переопределяется LLAO_STATS_FILE).
 std::string path();
 
 // Читает все записи (массив). При отсутствии/ошибке файла — пустой список.
@@ -20,6 +20,15 @@ bool append_all(const std::vector<nlohmann::json>& items);
 
 // Краткая сводка накопленной статистики (для `llao.exe stats`).
 void print_summary(const std::vector<nlohmann::json>& items);
+
+// Текст файла-отчёта (для `llao.exe stats --report=<file>`). Пустая строка,
+// если записей нет: отчёт без данных бесполезен. Формат табличный и без
+// локализации — в нём только id форматов, числа и проценты, — чтобы его можно
+// было отдать автору кодека как есть.
+std::string build_report(const std::vector<nlohmann::json>& items);
+
+// Записать build_report() в dest. false — если нечего писать или запись не удалась.
+bool write_report(const std::string& dest, const std::vector<nlohmann::json>& items);
 
 // Ранжирование форматов по накопленной статистике: формат выше — тем более
 // вероятен как победитель (средняя экономия по успешным кандидатам).
