@@ -22,6 +22,10 @@ std::string abs_path(const std::string& p);
 bool path_is_absolute(const std::string& p);
 std::string to_lower(const std::string& s);
 std::string trim(const std::string& s);
+// Схлопывает переводы строк и пробельные серии в один пробел: причины ошибок
+// приходят из stderr кодеков многострочными, а в строках лога и таблицах
+// отчёта перенос строки ломает разметку.
+std::string one_line(const std::string& s);
 bool ends_with(const std::string& s, const std::string& suffix);
 
 std::string exe_path();               // полный путь к исполняемому файлу

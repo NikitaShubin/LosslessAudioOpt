@@ -166,6 +166,44 @@ void Runner::count_error_locked(FileJob& j) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ошибка варианта в строгом режиме: закрываем файл прямо здесь, до аборта.
+//
+// count_error() ставит abort и зовёт proc::abort_all(), после чего вызовы
+// finalize_file отсекаются гардом !proc::aborted(). Без этого файла в выводе,
+// в --report и в stats.json не было бы вообще ничего: прогон обрывался строчкой
+// «Aborted: N file(s) failed» без единого имени файла и без причины.
+//
+// Задачи этого и других файлов, снятые этим абортом, помечаются Skipped (серым):
+// их остановили из-за чужой ошибки, виновник — красный Failed.
+// ---------------------------------------------------------------------------
+
+void Runner::report_error_before_abort(FileJob& j, const std::string& verr) {
+    std::vector<nlohmann::json> records;
+    {
+        std::lock_guard<std::mutex> jl(*j.m);
+        j.summary.path = j.path;
+        j.summary.status = "error";
+        std::string reason = verr;
+        if (reason.empty() && !j.failures.empty()) reason = j.failures.back();
+        if (reason.empty()) reason = i18n::str("variant failed");
+        reason = util::one_line(reason);
+        j.summary.detail = reason;
+        if (verr.empty() && !j.error_reported) {
+            // При непустом verr строку ниже печатает обработчик исключения —
+            // в своём формате, дублировать её не нужно.
+            error_line(j, reason);
+            j.error_reported = true;
+        }
+        records = std::move(j.stat_records);
+    }
+    if (!opts->no_stats && !records.empty()) stats::append_all(records);
+}
+
+void Runner::error_line(FileJob& j, const std::string& reason) {
+    obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + util::one_line(reason) + "\n");
+}
+
 bool Runner::variant_launchable_locked() {
     if (abort.load()) return false;
     if (queue_paused.load() && opts->mode == SessionMode::Daemon) return false;
@@ -216,7 +254,7 @@ bool Runner::take_work_locked(Work* w) {
         uint64_t reserved = 0;
         size_t jf = j.released - j.completed;
         if (jf > 0 && j.ref_size > 0) {
-            uint64_t vpeak = variant_peak_bytes(j.ref_size, opts->verify);
+            uint64_t vpeak = variant_peak_bytes(j.ref_size);
             if (rm.request_disk(vpeak).status != ResourceRequest::Status::Granted) continue;
             reserved = vpeak;
         }
@@ -230,7 +268,7 @@ bool Runner::take_work_locked(Work* w) {
             if (j.done || j.prep_done || j.prep_running || !j.deferred) continue;
             if (std::chrono::steady_clock::now() < j.defer_until) continue;
             if (j.probe.ok && j.wav_est > 0) {
-                j.peak_file = file_peak_bytes(j.wav_est, opts->verify);
+                j.peak_file = file_peak_bytes(j.wav_est);
                 if (rm.request_disk(j.peak_file).status == ResourceRequest::Status::Granted) {
                     j.deferred = false;
                     j.prep_running = true;
@@ -305,8 +343,7 @@ void Runner::prep_file(FileJob& j) {
                            {"status", "error"},
                            {"reason", j.summary.detail}});
         }
-        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " +
-                                           j.summary.detail + "\n");
+        error_line(j, j.summary.detail);
         j.error_reported = true;
     };
 
@@ -359,7 +396,7 @@ void Runner::prep_file(FileJob& j) {
                                {"status", "error"},
                                {"reason", probe.error}});
             }
-            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + probe.error + "\n");
+            error_line(j, probe.error);
                 j.error_reported = true;
                 release_deferred_budget();
                 return;
@@ -429,7 +466,7 @@ void Runner::prep_file(FileJob& j) {
 
     j.wav_est = estimated_wav_bytes(probe, bits);
     if (j.peak_file == 0) {
-        j.peak_file = file_peak_bytes(j.wav_est, opts.verify);
+        j.peak_file = file_peak_bytes(j.wav_est);
         if (rm.request_disk(j.peak_file).status != ResourceRequest::Status::Granted) {
             j.deferred = true;
             j.peak_file = 0;
@@ -474,7 +511,7 @@ void Runner::prep_file(FileJob& j) {
                            {"status", "error"},
                            {"reason", j.summary.detail}});
         }
-        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + j.summary.detail + "\n");
+        error_line(j, j.summary.detail);
         j.error_reported = true;
         return;
     }
@@ -507,9 +544,15 @@ void Runner::prep_file(FileJob& j) {
                  (probe.sample_rate < f.sample_rate_min || probe.sample_rate > f.sample_rate_max))
             why = i18n::fmt("sample rate %d Hz out of range", probe.sample_rate);
         if (!why.empty()) {
-            j.failures.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
-            j.exclusions.push_back(f.id + ": " + i18n::str("out of caps") + " (" + why + ")");
-            j.excluded_fmts.push_back(f.id);
+            // Отсечение по caps — не сбой: кодек рабочий, файл ему не подходит.
+            // Кладём только в exclusions, иначе причина показывается пользователю
+            // вместо реальной ошибки (j.failures[0] уходит в строку статуса).
+            std::string reason = i18n::str("out of caps") + " (" + why + ")";
+            j.exclusions.push_back(f.id + ": " + reason);
+            // По точке на вариант: у LA их четыре, и пользователь должен видеть
+            // четыре жёлтые точки, а не одну на формат.
+            for (const auto& v : f.variants)
+                j.excluded_variants.push_back({f.id, v.id, reason});
             continue;
         }
 
@@ -553,7 +596,7 @@ void Runner::prep_file(FileJob& j) {
 // run_variant: один вариант (кодирование, валидация, теги, жадный отбор)
 // ---------------------------------------------------------------------------
 
-VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
+VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best) {
     const Options& opts = *this->opts;
     const TaskDesc& td = j.tasks[task_idx];
     const config::Format& f = (*fmts)[td.fmt_idx];
@@ -581,6 +624,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         {"duration", j.probe.duration},
         {"format", f.id},
         {"variant", v.id},
+        {"task", task_idx},
         {"verify", verify_name(opts.verify)},
         {"prep_wall_ms", j.prep_wall_ms},
         {"decode_wall_ms", j.decode_wall_ms},
@@ -760,7 +804,8 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
             }
         }
         bool promote = false;
-        if (!j.best_valid) promote = true;
+        if (force_best) promote = true;
+        else if (!j.best_valid) promote = true;
         else if (cand.cost < j.best.cost) promote = true;
         else if (cand.cost == j.best.cost && cand.order < j.best_order) promote = true;
         if (promote) {
@@ -775,6 +820,158 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx) {
         j.stat_records.push_back(std::move(rec));
     }
     return VariantOutcome::Ok;
+}
+
+// ---------------------------------------------------------------------------
+// Спуск при провале сверки победителя (verify=winner + ignore_errors).
+//
+// Победителя отдать нельзя, но tolerant-режим обязан выдать хоть что-то
+// проверенное. Берём варианты, которые раньше успешно закодировались, и
+// перекодируем их по одному — от меньшего cost к большему, пока сверка не
+// пройдёт. Хранить все файлы нельзя, поэтому на диске лежит только текущий
+// кандидат: предыдущий удаляется при переходе к следующему.
+// ---------------------------------------------------------------------------
+bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
+                                std::vector<nlohmann::json>& records,
+                                std::string& reason) {
+    struct Retry {
+        size_t task = 0;
+        uint64_t cost = 0;
+        std::string format;
+        std::string variant;
+    };
+    // Список берём из локальных записей прогона: он есть всегда, независимо от
+    // --no-stats, в отличие от stats.json.
+    std::vector<Retry> todo;
+    for (const auto& r : records) {
+        if (r.value("status", std::string()) != "ok") continue;
+        if (!r.contains("task") || !r.contains("cost")) continue;
+        todo.push_back({r["task"].get<size_t>(), r["cost"].get<uint64_t>(),
+                        r.value("format", std::string()),
+                        r.value("variant", std::string())});
+    }
+    std::sort(todo.begin(), todo.end(), [](const Retry& a, const Retry& b) {
+        if (a.cost != b.cost) return a.cost < b.cost;
+        return a.task < b.task;
+    });
+
+    const size_t failed_task = j.best_order;
+    const std::string wav_path = j.session->ref_wav_path();
+    std::string notes;
+    size_t tried = 0;
+
+    for (const Retry& c : todo) {
+        if (c.task == failed_task) continue;         // уже провалился
+        if (c.task >= j.tasks.size()) continue;
+        // Дальше только ещё большие файлы: отдавать крупнее исходного смысла
+        // нет, спуск на этом исчерпан.
+        if (c.cost >= j.probe.size) {
+            notes += notes.empty() ? "" : "; ";
+            notes += i18n::str("no smaller unverified candidate left");
+            break;
+        }
+        if (j.kill_requested.load(std::memory_order_relaxed) || proc::cancelled() ||
+            proc::aborted())
+            return false;
+
+        // Перекодируем заново: файла кандидата на диске уже нет, он был удалён
+        // как невостребованный. force_best удерживает его, несмотря на cost.
+        lk.unlock();
+        VariantOutcome oc = VariantOutcome::Failed;
+        std::string verr;
+        try {
+            oc = run_variant(j, c.task, /*force_best=*/true);
+        } catch (const std::exception& exc) {
+            verr = exc.what();
+        } catch (...) {
+            verr = "unknown exception during retry";
+        }
+        lk.lock();
+
+        if (j.kill_requested.load(std::memory_order_relaxed) || proc::cancelled() ||
+            proc::aborted())
+            return false;
+
+        if (oc != VariantOutcome::Ok || j.best_order != c.task) {
+            notes += notes.empty() ? "" : "; ";
+            notes += i18n::fmt("%s/%s: %s", c.format.c_str(), c.variant.c_str(),
+                               verr.empty() ? i18n::str("re-encode failed").c_str()
+                                            : verr.c_str());
+            // Перекодирование не удалось: исходная запись «ok» в stats больше не
+            // соответствует reality (файла кандидата на диске уже нет), поэтому
+            // честно переводим её в error, иначе прогон выглядит успешным.
+            for (auto& r : records) {
+                if (r.value("task", size_t(SIZE_MAX)) != c.task) continue;
+                if (r.value("status", std::string()) != "ok") continue;
+                r["status"] = "error";
+                r["error"] = verr.empty() ? i18n::str("re-encode failed") : verr;
+                r["retry"] = true;
+                break;
+            }
+            obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
+            continue;
+        }
+        ++tried;
+
+        auto eit = j.envs.find(j.best.format);
+        std::string werr;
+        if (eit == j.envs.end()) {
+            werr = "internal: no Env for " + j.best.format;
+        } else {
+            std::optional<Env> env_copy = eit->second;
+            lk.unlock();
+            werr = validate_candidate(wav_path, j.best.path, *env_copy, &j.kill_requested);
+            lk.lock();
+        }
+        if (j.kill_requested.load(std::memory_order_relaxed) || proc::cancelled() ||
+            proc::aborted())
+            return false;
+
+        nlohmann::json vf;
+        for (auto& r : records) {
+            if (r.value("task", size_t(SIZE_MAX)) == c.task) {
+                vf = r;
+                break;
+            }
+        }
+        if (vf.is_null()) {
+            vf = {{"file", j.path}, {"format", c.format}, {"variant", c.variant},
+                  {"task", c.task}, {"source_size", j.probe.size}};
+        }
+        vf["verify"] = verify_name(Verify::Winner);
+        vf["retry"] = true;
+        vf["cost"] = j.best.cost;
+
+        if (werr.empty()) {
+            // Спустились и нашли кандидата, который прошёл сверку: в stats он
+            // обязан лежать как обычный успех с пометкой retry, а не как
+            // verify_fail с пустой ошибкой.
+            vf["status"] = "ok";
+            vf.erase("error");
+            obs::sink()->task(j.idx, c.task, obs::TaskState::Ok);
+            records.push_back(std::move(vf));
+            if (logger)
+                logger->event({{"type", "candidate"},
+                               {"file", j.path},
+                               {"format", j.best.format},
+                               {"variant", j.best.variant},
+                               {"status", "ok"},
+                               {"retry", true},
+                               {"size", j.best.size},
+                               {"cost", j.best.cost}});
+            reason.clear();
+            return true;
+        }
+        vf["status"] = "verify_fail";
+        vf["error"] = werr;
+        obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
+        notes += notes.empty() ? "" : "; ";
+        notes += i18n::fmt("%s/%s: %s", c.format.c_str(), c.variant.c_str(), werr.c_str());
+        records.push_back(std::move(vf));
+    }
+
+    reason = notes.empty() ? i18n::str("no other candidate could be verified") : notes;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -814,7 +1011,7 @@ void Runner::finalize_file(FileJob& j) {
         j.summary.detail = reason;
         if (j.best_valid) util::remove_file(j.best.path);
         discard_job_tmp(j);
-        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+        error_line(j, reason);
         j.error_reported = true;
         if (!opts.no_stats) stats::append_all(records);
         if (logger) {
@@ -830,6 +1027,26 @@ void Runner::finalize_file(FileJob& j) {
 
     std::string msg;
     char buf[512];
+    // Размер кандидата после записи тегов: доставку сверяем именно с ним.
+    // summary.best — это размер проверенного кандидата, а теги (обложка,
+    // ReplayGain, cue_sheet) дописываются позже и меняют байтовый размер,
+    // поэтому сверять доставку с summary.best нельзя.
+    uint64_t delivered_size = 0;
+
+    // Два независимых вопроса, от которых зависит судьба файла. Решаем их
+    // один раз здесь, дальше идут обычные ветки — без таблицы комбинаций:
+    //
+    //   verify_all — проверяем КАЖДЫЙ вариант (--verify=all), а не только
+    //                победителя. Сбой варианта при этом важнее любых
+    //                договорённостей об отдаче файла.
+    //   tolerant   — сбои не теряют файл: неудачный вариант просто исключается
+    //                из отбора (--ignore-errors), а если не годятся все —
+    //                спускаемся по списку кандидатов.
+    //
+    // Дальше важно только одно: при verify=winner судьбу файла решает проверка
+    // победителя, и в tolerant-режиме вместо отказа идёт спуск по кандидатам.
+    const bool verify_all = (opts.verify == Verify::All);
+    const bool tolerant = opts.ignore_errors;
 
     if (j.summary.status == "error") {
     } else if (j.early_ok) {
@@ -853,7 +1070,7 @@ void Runner::finalize_file(FileJob& j) {
         if (hard) {
             j.summary.status = "error";
             j.summary.detail = reason;
-            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+            error_line(j, reason);
             j.error_reported = true;
             if (!opts.no_stats) stats::append_all(records);
             if (logger) {
@@ -879,12 +1096,16 @@ void Runner::finalize_file(FileJob& j) {
                                {"reason", reason}});
             }
         }
-    } else if (!opts.ignore_errors && j.variant_errors > 0) {
+    } else if (verify_all && !tolerant && j.variant_errors > 0) {
+        // Строгий режим с проверкой всех вариантов: хоть один не сложился — файл
+        // не отдаём, даже если остальные варианты в порядке. При verify=winner
+        // сбои вариантов лишь исключают их из отбора, и судьбу файла решает
+        // проверка победителя (ниже).
         std::string reason =
             j.failures.empty() ? i18n::str("variant failed") : j.failures[0];
         j.summary.status = "error";
         j.summary.detail = reason;
-        obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+        error_line(j, reason);
         j.error_reported = true;
         if (!opts.no_stats) stats::append_all(records);
         if (logger) {
@@ -898,7 +1119,7 @@ void Runner::finalize_file(FileJob& j) {
         uint64_t best_cost = best.cost;
 
         std::string winner_fail;
-        if (opts.verify == Verify::Winner) {
+        if (!verify_all) {
             auto eit = j.envs.find(best.format);
             std::optional<Env> env_copy;
             if (eit != j.envs.end()) env_copy = eit->second;
@@ -926,7 +1147,42 @@ void Runner::finalize_file(FileJob& j) {
                                         best.format.c_str(), best.variant.c_str(),
                                         werr.c_str());
                 j.failures.insert(j.failures.begin(), winner_fail);
+                // Провал сверки пишем отдельной записью: иначе в статистике
+                // кандидат остаётся с status=ok, и по выгрузке нельзя понять,
+                // что файл отдан после спуска по списку.
+                nlohmann::json vf;
+                for (const auto& r : records) {
+                    if (r.value("format", std::string()) == best.format &&
+                        r.value("variant", std::string()) == best.variant) {
+                        vf = r;
+                        break;
+                    }
+                }
+                if (vf.is_null()) {
+                    vf = {{"file", j.path}, {"format", best.format},
+                          {"variant", best.variant}, {"source_size", j.probe.size}};
+                }
+                vf["status"] = "verify_fail";
+                vf["error"] = werr;
+                vf["verify"] = verify_name(Verify::Winner);
+                vf["cost"] = best.cost;
+                records.push_back(std::move(vf));
+                obs::sink()->task(j.idx, j.best_order, obs::TaskState::Failed);
             }
+        }
+
+        if (!winner_fail.empty() && tolerant) {
+            // Победитель не годится, но файл отдавать нужно: спускаемся по ранее
+            // успешным кандидатам, пока не найдём прошедший сверку. Здесь же
+            // tolerant-режим сходится: при verify=all сверка победителя не
+            // выполнялась, спускаться неоткуда.
+            std::string dreason;
+            if (descend_candidates(j, lk, records, dreason)) {
+                winner_fail.clear();
+            } else {
+                winner_fail += "; " + dreason;
+            }
+            best_cost = j.best.cost;  // победитель мог смениться
         }
 
         if (!winner_fail.empty()) {
@@ -936,7 +1192,7 @@ void Runner::finalize_file(FileJob& j) {
             if (!opts.no_stats) stats::append_all(records);
             j.summary.status = "error";
             j.summary.detail = winner_fail;
-            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + winner_fail + "\n");
+            error_line(j, winner_fail);
             j.error_reported = true;
             if (logger) {
                 logger->event({{"type", "file_done"},
@@ -975,6 +1231,7 @@ void Runner::finalize_file(FileJob& j) {
             j.summary.savings_pct = savings;
             j.summary.best_format = best.format;
             j.summary.best_variant = best.variant;
+            delivered_size = util::file_size(best.path);
 
             if (j.mode == JobMode::Restore) {
                 std::string ext = fmt_ext(best.format, *fmts);
@@ -1190,6 +1447,24 @@ void Runner::finalize_file(FileJob& j) {
         }
     }
 
+    // Сверка отданного файла с кандидатом: копирование/переименование не должны
+    // были изменить ни байта. Расхождение — ошибка, а не «мелочь»: значит на диск
+    // попал не тот файл, и выигрыш в процентах неверен.
+    if (j.summary.status == "ok" && !j.out_path.empty() && delivered_size > 0) {
+        uint64_t on_disk = util::file_size(j.out_path);
+        if (on_disk != delivered_size) {
+            std::string reason = i18n::fmt(
+                "delivered size does not match the verified candidate "
+                "(candidate %llu, on disk %llu)",
+                (unsigned long long)delivered_size, (unsigned long long)on_disk);
+            j.summary.status = "error";
+            j.summary.detail = reason;
+            j.summary.savings_pct = 0.0;
+            msg += i18n::fmt("      ! %s\n", reason.c_str());
+            obs::sink()->task(j.idx, j.best_order, obs::TaskState::Failed);
+        }
+    }
+
     if (j.best_valid) util::remove_file(j.best.path);
     discard_job_tmp(j);
 
@@ -1206,16 +1481,38 @@ void Runner::finalize_file(FileJob& j) {
             std::string reason = j.summary.detail.empty()
                                      ? i18n::str("error ignored")
                                      : j.summary.detail;
-            obs::sink()->error_file(j.idx, "ERROR " + j.path + " — " + reason + "\n");
+            error_line(j, reason);
             j.error_reported = true;
         }
     } else if (j.summary.status == "stopped") obs::sink()->mark_stopped(j.idx);
     else {
+        if (!j.summary.best_format.empty()) {
+            // Кружок победителя на вебе: индекс задачи ищем по совпадению
+            // формата и варианта, он же понадобится после восстановления строки
+            // из queue.json.
+            size_t wt = SIZE_MAX;
+            for (size_t i = 0; i < j.tasks.size(); i++) {
+                const auto& td = j.tasks[i];
+                const auto& f = (*fmts)[td.fmt_idx];
+                if (f.id == j.summary.best_format &&
+                    f.variants[td.variant_idx].id == j.summary.best_variant) {
+                    wt = i;
+                    break;
+                }
+            }
+            obs::sink()->winner(j.idx, j.summary.best_format, j.summary.best_variant, wt);
+        }
         obs::sink()->end_file(j.idx, j.summary.savings_pct);
         if (!j.out_path.empty()) obs::sink()->out_file(j.idx, j.out_path);
     }
     if (j.summary.status == "error") {
         if (opts.ignore_errors || opts.mode == SessionMode::Daemon) {
+            // --ignore-errors: пользователь осознанно разрешил пропускать такие
+            // файлы (в том числе когда в списке остались только проблемные), и
+            // по каждому файлу оптимизация идёт среди успешных кандидатов.
+            // Пропуск — не ошибка: файл не считается, прогон не прерывается и
+            // код возврата остаётся 0. Ненулевой код в этом режиме возможен
+            // только при сбое самого сервиса, а не отдельного файла.
             if (j.summary.detail.empty()) j.summary.detail = i18n::str("error ignored");
         } else {
             count_error_locked(j);
@@ -1298,8 +1595,8 @@ void Runner::worker() {
                             infos.push_back({f.id, v.id, v.args, v.note});
                         }
                         obs::sink()->set_tasks(w.idx, infos);
-                        if (!j.excluded_fmts.empty())
-                            obs::sink()->set_excluded(w.idx, j.excluded_fmts);
+                        if (!j.excluded_variants.empty())
+                            obs::sink()->set_excluded(w.idx, j.excluded_variants);
                     }
                 }
                 cv.notify_all();
@@ -1315,9 +1612,17 @@ void Runner::worker() {
             } catch (...) {
                 verr = "unknown exception during variant";
             }
-            if (proc::cancelled() || proc::aborted()) break;
+            if (proc::cancelled() || proc::aborted()) {
+                // Снятая задача: её остановили из-за ошибки в соседней, а не
+                // из-за собственного сбоя, поэтому красным её не помечаем —
+                // пользователь должен отличать «виновника» от жертв.
+                if (proc::aborted() && !proc::cancelled())
+                    obs::sink()->task(w.idx, w.task, obs::TaskState::Skipped);
+                break;
+            }
             if (!opts->ignore_errors && opts->mode != SessionMode::Daemon &&
                 (oc == VariantOutcome::Failed || !verr.empty())) {
+                report_error_before_abort(*w.job, verr);
                 count_error(*w.job);
             }
             obs::sink()->task(w.idx, w.task,

@@ -57,9 +57,17 @@ void write_report(const std::string& path, const std::vector<FileSummary>& files
     std::string text;
     char buf[1024];
 
-    size_t n_ok = 0, n_skip = 0, n_err = 0, n_replaced = 0;
+    size_t n_ok = 0, n_skip = 0, n_err = 0, n_replaced = 0, n_unprocessed = 0;
     uint64_t t_orig = 0, t_best = 0;
     for (const auto& f : files) {
+        // Файл, не дошедший до финализации (сбой варианта в строгом режиме
+        // отбирает у аборта их целиком), не имеет ни пути, ни статуса. Строку
+        // с пустыми полями в таблицу не пишем, но считаем и говорим про это
+        // честно: прогон был неполным.
+        if (f.path.empty()) {
+            n_unprocessed++;
+            continue;
+        }
         if (f.status == "ok") n_ok++;
         else if (f.status == "stopped") n_skip++;
         else n_err++;
@@ -75,6 +83,13 @@ void write_report(const std::string& path, const std::vector<FileSummary>& files
                        files.size(), n_ok, n_skip, n_err, n_replaced).c_str());
     text += buf;
 
+    if (n_unprocessed > 0) {
+        snprintf(buf, sizeof(buf), "%s",
+                 i18n::fmt("Not processed (the run was aborted): %zu file(s)\n",
+                           n_unprocessed).c_str());
+        text += buf;
+    }
+
     if (n_ok > 0 && t_orig > 0) {
         double ratio = t_best > 0 ? 100.0 * (1.0 - (double)t_best / (double)t_orig) : 0.0;
         snprintf(buf, sizeof(buf), "%s",
@@ -83,10 +98,14 @@ void write_report(const std::string& path, const std::vector<FileSummary>& files
         text += buf;
     }
 
-    if (!files.empty()) {
+    bool any_row = false;
+    for (const auto& f : files)
+        if (!f.path.empty()) { any_row = true; break; }
+    if (any_row) {
         text += i18n::str("File | Status | Format | Variant | Was (MB) | Now (MB) | Savings\n");
         text += "-----|--------|--------|---------|-----------|------------|---------\n";
         for (const auto& f : files) {
+            if (f.path.empty()) continue;
             std::string name = util::base_name(f.path);
             std::string savings;
             if (f.status == "ok" && f.original > 0) {
@@ -100,7 +119,7 @@ void write_report(const std::string& path, const std::vector<FileSummary>& files
                      f.best_variant.c_str(),
                      f.original / 1048576.0, f.best / 1048576.0, savings.c_str());
             text += buf;
-            if (!f.detail.empty()) text += " (" + f.detail + ")";
+            if (!f.detail.empty()) text += " (" + util::one_line(f.detail) + ")";
             text += "\n";
         }
         text += "\n";

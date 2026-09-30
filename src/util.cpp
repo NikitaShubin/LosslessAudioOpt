@@ -232,6 +232,22 @@ bool ends_with(const std::string& s, const std::string& suffix) {
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+std::string one_line(const std::string& s) {
+    std::string r;
+    r.reserve(s.size());
+    bool sp = false;
+    for (char c : s) {
+        if (c == '\r' || c == '\n' || c == '\t' || c == ' ') {
+            sp = true;
+            continue;
+        }
+        if (sp && !r.empty()) r += ' ';
+        sp = false;
+        r += c;
+    }
+    return r;
+}
+
 std::string exe_path() {
 #ifdef _WIN32
     wchar_t buf[MAX_PATH * 4] = {0};
@@ -391,6 +407,9 @@ bool copy_file(const std::string& src, const std::string& dst) {
     }
     CloseHandle(hs);
     if (!CloseHandle(hd)) ok = false;
+    // Обрезанный остаток копии не оставляем: в папке назначения он выглядел бы
+    // как готовый результат, а в папке файла — как кандидат.
+    if (!ok) remove_file(dst);
     return ok;
 }
 #else
@@ -445,6 +464,7 @@ bool copy_file(const std::string& src, const std::string& dst) {
     }
     close(hs);
     close(hd);
+    if (!ok) remove_file(dst);
     return ok;
 }
 #endif

@@ -308,6 +308,19 @@ int run(const Options& opts) {
         return 1;
     }
 
+    // Неизвестный id в --formats раньемочално отсекал все форматы: запуск
+    // доходил до «no suitable candidates» с кодом 0. Отвергаем список сразу,
+    // тем же способом, что и `variants` с неизвестным fmt_id.
+    for (const auto& id : opts.formats) {
+        bool found = false;
+        for (const auto& f : fmts)
+            if (f.id == id) found = true;
+        if (!found) {
+            out::error("ERROR: unknown format '%s'\n", id.c_str());
+            return 1;
+        }
+    }
+
     {
         auto ranks = stats::ranking(stats::load());
         std::stable_sort(fmts.begin(), fmts.end(), [&](const config::Format& a,
@@ -437,7 +450,7 @@ int run(const Options& opts) {
     if ((r.failed.load() > 0 || r.abort.load()) && !opts.ignore_errors) {
         out::error("Aborted: %d file(s) failed. Fix the issues above or re-run with "
                    "--ignore-errors to skip such files.\n",
-                   r.failed.load());
+                    r.failed.load());
     }
     return (r.failed.load() > 0 || r.abort.load()) ? 1 : 0;
 }
