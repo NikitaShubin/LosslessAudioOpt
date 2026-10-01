@@ -103,6 +103,8 @@ def run_tool(args, timeout=1200):
         cmd = ["wine", LLAO] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
+    # Тестовые прогоны не должны попадать в рабочую stats.json.
+    env["LLAO_STATS_FILE"] = os.path.join(WORK, "stats.json")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
                        timeout=timeout, env=env)
     out = (r.stdout or "") + (r.stderr or "")

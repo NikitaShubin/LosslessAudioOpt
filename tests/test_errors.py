@@ -19,6 +19,9 @@ OptimFROG вообще) помечались как SKIP, а операцион�
     G2  то же с --ignore-errors: прогон продолжается, упавший файл помечен, но
         пропущенные файлы ошибкой не считаются («ошибок: 0», rc=0)
     H1  неизвестный id в --formats -> rc=1, «unknown format», без перебора
+    H2  24-битное моно с нечётным числом сэмплов кодируется: файл должен
+        сжаться, а не отвергнуться. Пропускается, пока в
+        formats/monkeys_audio.json не выставлен признак features.odd_sample_count
 
 Запуск:
     python3 tests/test_errors.py          # полный прогон
@@ -28,6 +31,7 @@ OptimFROG вообще) помечались как SKIP, а операцион�
 Требования: wine, ffmpeg/ffprobe в PATH, llao.exe (соберётся сам), bin/ наполнен.
 """
 import glob
+import json
 import os
 import random
 import re
@@ -77,6 +81,10 @@ def run_tool(args, timeout=1200):
         cmd = ["wine", LLAO] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
+    # Статистика пишется рядом с бинарником, то есть в рабочую stats.json
+    # пользователя. Тестовые прогоны (в том числе с подменой кодировщика,
+    # которая портит рейтинг форматов) не должны туда попадать.
+    env["LLAO_STATS_FILE"] = os.path.join(WORK, "stats.json")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
                        timeout=timeout, env=env)
     out = (r.stdout or "") + (r.stderr or "")
@@ -210,48 +218,131 @@ def f6_missing_tool(d):
             os.rename(hidden, takc)
 
 
+def stub_encoder(d, enabled=True):
+    """Подменяет кодировщик APE на Takc.exe, чтобы вызвать отказ варианта.
+
+    Раньше триггером был известный дефект кодировщика APE (24-битное моно с
+    нечётным числом сэмплов), и тесты G1/G2 держались на нём. Опора на чужой
+    дефект не годится: когда он исчезает, тесты проходят вхолостую, проверяя не
+    то. Отказ варианта вызывается подменой бинарника — независимо от версии
+    кодека. Takc.exe на аргументах кодера печатает в stderr «Command line
+    error: invalid mode» и выходит с кодом 1, не создавая файл, — ровно то, что
+    делает отказавший кодировщик.
+
+    Возвращает функцию восстановления (безопаснее try/finally вручную).
+    """
+    mac = os.path.join(BIN, "monkeys_audio", "MAC.exe")
+    takc = os.path.join(BIN, "tak", "Takc.exe")
+    backup = os.path.join(d, "MAC.exe.backup")
+    if not enabled:
+        return lambda: None
+    assert os.path.exists(mac), "нет %s — bin/ не наполнен" % mac
+    assert os.path.exists(takc), "нет %s — bin/ не наполнен" % takc
+    cp(mac, backup)
+    cp(takc, mac)
+
+    def restore():
+        if os.path.exists(backup):
+            shutil.copy2(backup, mac)
+            os.remove(backup)
+    return restore
+
+
 def g1_variant_failure_reported(d):
     """Строгий режим: файл и причина сбоя варианта видны пользователю."""
-    cp(os.path.join(FIX, "tone_odd.wav"), os.path.join(d, "tone_odd.wav"))
+    cp(os.path.join(FIX, "tone_even.wav"), os.path.join(d, "tone.wav"))
     rep = os.path.join(d, "report.txt")
-    rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
-                        "--no-download", "--report=" + rep])
+    restore = stub_encoder(d)
+    try:
+        rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
+                            "--no-download", "--report=" + rep])
+    finally:
+        restore()
     assert rc == 1, "ожидался rc=1:\n%s" % out
     assert has_errors(out, 1), "итог должен считать ошибку:\n%s" % out
     assert "ERROR" in out, "в выводе нет ERROR:\n%s" % out
-    assert "tone_odd.wav" in out, "ERROR без имени файла:\n%s" % out
+    assert "tone.wav" in out, "ERROR без имени файла:\n%s" % out
     # Причина обязана быть в ERROR-строке, иначе это «Aborted» без диагноза.
-    first = [l for l in out.splitlines() if "tone_odd.wav" in l and "ERROR" in l]
+    first = [l for l in out.splitlines() if "tone.wav" in l and "ERROR" in l]
     assert first, "нет строки ERROR с файлом:\n%s" % out
-    assert "tolerance" in out or "1002" in out or "code" in out.lower() or \
-        "код" in out.lower(), "в ERROR нет причины:\n%s" % out
+    assert "Command line error" in out, "в выводе нет причины от кодировщика:\n%s" % out
     # Многострочный stderr кодера не должен рвать таблицу отчёта.
     assert os.path.exists(rep), "нет отчёта:\n%s" % out
     text = open(rep, encoding="utf-8", errors="replace").read()
-    assert "tone_odd.wav" in text and "error" in text, "файла нет в отчёте:\n%s" % text
-    row = [l for l in text.splitlines() if l.startswith("tone_odd.wav")]
+    assert "tone.wav" in text and "error" in text, "файла нет в отчёте:\n%s" % text
+    row = [l for l in text.splitlines() if l.startswith("tone.wav")]
     assert row, "нет строки файла в отчёте:\n%s" % text
     assert row[0].count("\n") == 0, "строка отчёта многострочная:\n%s" % text
 
 
 def g2_ignore_errors_keeps_counting(d):
-    """--ignore-errors: упавший файл пропускается и ошибкой НЕ считается."""
+    """--ignore-errors: упавший файл пропускается и ошибкой НЕ считается.
+
+    Кодировщик подменён заглушкой, поэтому отказуются все варианты обоих файлов.
+    Проверяется именно контракт режима: прогон не прерывается на первом отказе
+    (оба файла обработаны, а не только первый), пропуск не считается ошибкой,
+    исходники не заменяются, код возврата 0.
+    """
     cp(os.path.join(FIX, "tone_odd.wav"), os.path.join(d, "tone_odd.wav"))
     cp(os.path.join(FIX, "tone_even.wav"), os.path.join(d, "tone_even.wav"))
-    rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
-                        "--ignore-errors", "--no-download"])
-    # Диагностика не теряется: файл и причина остаются в выводе.
-    assert "ERROR" in out, "в выводе нет ERROR:\n%s" % out
-    assert "tone_odd.wav" in out, "ERROR без имени файла:\n%s" % out
+    restore = stub_encoder(d)
+    try:
+        rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
+                            "--ignore-errors", "--no-download"])
+    finally:
+        restore()
+    # Диагностика не теряется: каждый файл и причина остаются в выводе.
+    for name in ("tone_odd.wav", "tone_even.wav"):
+        assert name in out, "ERROR без имени файла %s:\n%s" % (name, out)
+    assert out.count("Command line error") >= 2, \
+        "причина от кодировщика должна быть у обоих файлов:\n%s" % out
+    # Оба файла обработаны — прогон не прервался на первом отказе.
+    assert "Files: 2" in out, "обработано не 2 файла:\n%s" % out
+    assert "Done: 2 files processed" in out, "итог не 2 файла:\n%s" % out
     # Пропуск — ожидаемое поведение режима: в счёт не идёт и код возврата 0.
-    assert has_errors(out, 0), "пропущенный файл не должен считаться ошибкой:\n%s" % out
+    assert has_errors(out, 0), "пропущенные файлы не должны считаться ошибкой:\n%s" % out
     assert rc == 0, "с --ignore-errors ожидался rc=0:\n%s" % out
-    # Второй файл обязан быть обработан — прогон не прервался.
-    assert re.search(r"OK\s+tone_even", out), "хороший файл не обработан:\n%s" % out
-    assert os.path.exists(os.path.join(d, "tone_even.ape")), \
-        "нет результата для хорошего файла:\n%s" % out
-    assert os.path.exists(os.path.join(d, "tone_odd.wav")), \
-        "исходник упавшего файла не должен заменяться"
+    # Исходники не заменяются.
+    for name in ("tone_odd.wav", "tone_even.wav"):
+        assert os.path.exists(os.path.join(d, name)), \
+            "исходник %s не должен заменяться:\n%s" % (name, out)
+
+
+def codec_accepts_odd_length(fmt_id="monkeys_audio"):
+    """Читает из formats/<id>.json признак «принимает нечётное число сэмплов».
+
+    Признак ставится разработчиком по факту проверки кодека, а не выводится из
+    номера версии: он отвечает на вопрос о свойстве, а не о том, где мы были.
+    Пока признак не выставлен, сценарий H2 честно пропускается.
+    """
+    cfg = os.path.join(ROOT, "formats", fmt_id + ".json")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            fmt = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return bool(fmt.get("features", {}).get("odd_sample_count", False))
+
+
+def h2_odd_length_compresses(d):
+    """24-битное моно с нечётным числом сэмплов обязано кодироваться.
+
+    Регрессия на известный дефект энкодера: он отвергал такой файл с
+    Error: 1002. Дефект сообщён автору кодека, признак в formats/<id>.json
+    выставляется, когда версия кодека его больше не воспроизводит, — тогда
+    сценарий начинает проверять по-настоящему.
+    """
+    if not codec_accepts_odd_length():
+        return "пропущен: в formats/monkeys_audio.json не выставлен признак " \
+               "features.odd_sample_count — кодек ещё отвергает нечётную длину"
+    cp(os.path.join(FIX, "tone_odd.wav"), os.path.join(d, "tone_odd.wav"))
+    rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
+                        "--no-download"])
+    assert rc == 0, "нечётная длина обязана кодироваться:\n%s" % out
+    assert "ERROR" not in out, "ошибка на файле с нечётной длиной:\n%s" % out
+    assert has_errors(out, 0), "ошибок быть не должно:\n%s" % out
+    assert os.path.exists(os.path.join(d, "tone_odd.ape")), \
+        "нет результата для файла с нечётной длиной:\n%s" % out
 
 
 def h1_unknown_format_rejected(d):
@@ -289,6 +380,8 @@ SCENARIOS = [
     ("g2", "G2  сбой варианта + --ignore-errors: продолжил, пропущен, rc=0",
      g2_ignore_errors_keeps_counting),
     ("h1", "H1  неизвестный id в --formats -> rc=1, ERROR", h1_unknown_format_rejected),
+    ("h2", "H2  24-бит моно с нечётной длиной -> кодируется (по признаку кодека)",
+     h2_odd_length_compresses),
 ]
 
 RESULTS = []
@@ -298,8 +391,9 @@ def scenario(key, desc, fn):
     d = os.path.join(WORK, key)
     os.makedirs(d, exist_ok=True)
     try:
-        fn(d)
-        RESULTS.append((desc, True, "ok"))
+        # Сценарий возвращает строку — это пометка о пропуске, а не ошибка.
+        skipped = fn(d)
+        RESULTS.append((desc, True, skipped or "ok"))
     except Exception as e:
         RESULTS.append((desc, False, str(e)[:600]))
 
@@ -347,11 +441,15 @@ def main():
     print("-" * 85)
     failed = 0
     for name, ok, detail in RESULTS:
-        print("%-72s %s" % (name, "OK " if ok else "FAIL"))
-        if not ok:
+        mark = "OK " if ok else "FAIL"
+        if ok and detail and detail != "ok":
+            mark = "SKIP"
+        print("%-72s %s" % (name, mark))
+        if mark == "FAIL":
             failed += 1
             print("        " + detail.replace("\n", "\n        "))
-    print("-" * 85)
+        elif mark == "SKIP":
+            print("        " + detail)
     print("Итого: %d/%d прошло" % (len(RESULTS) - failed, len(RESULTS)))
     if not KEEP:
         shutil.rmtree(WORK, ignore_errors=True)

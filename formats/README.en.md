@@ -60,6 +60,7 @@ not take part in `check-formats`):
 | `caps.bit_depth` | array | yes | The list of supported bit depths (int). |
 | `caps.sample_rate` | object | no | `{"min": N, "max": M}`. |
 | `notes` | string | no | Explanations. |
+| `features.odd_sample_count` | bool | no | Whether the encoder accepts a WAV with an odd number of samples. Set by a maintainer after verifying it: while unset or `false` the H2 scenario in `tests/test_errors.py` is skipped, otherwise such a file must compress. |
 
 Rules:
 - Commands are arrays of strings, **without a shell** (`subprocess` without
