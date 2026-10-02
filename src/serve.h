@@ -32,7 +32,7 @@ public:
     // ev/st должны жить дольше сессии. restore_to — целевой формат для режима
     // восстановления (id из formats/*.json; дефолт "flac" см. serve.cpp main).
     DaemonSession(optimize::Options opts, EventBuffer* ev, StateMirror* st,
-                  std::string restore_to);
+                  std::string restore_to, bool update_codecs = false);
     ~DaemonSession() override;
 
     // Инициализация движка (загрузка конфигов, пул воркеров). err при сбое.
@@ -111,6 +111,7 @@ private:
 
     optimize::Options opts_;
     std::string restore_to_;  // целевой формат для restore (id из formats/*.json)
+    bool update_codecs_ = false;  // --update-codecs: обновить кодеки перед стартом
     std::string persist_path_;  // путь к queue.json (пусто = персистентность выкл)
     EventBuffer* ev_ = nullptr;
     StateMirror* st_ = nullptr;

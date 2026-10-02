@@ -68,6 +68,9 @@ std::vector<config::DownloadEntry> entries_for_os(const config::Format& fmt) {
         return false;
     };
     for (const auto& e : fmt.downloads) {
+        // `latest` — не рабочий рецепт, а шаблон для обновления (--update-codecs).
+        // Обычная установка его не рассматривает.
+        if (e.latest) continue;
         if (want(e.os)) out.push_back(e);
     }
     if (out.empty()) {
@@ -329,6 +332,324 @@ std::string cli_check_cache_path(const config::Format& fmt) {
     return util::join_path(cache_dir(fmt), ".cli-check");
 }
 
+// ---------------------------------------------------------------------------
+// Обновление кодеков (--update-codecs)
+// ---------------------------------------------------------------------------
+//
+// В formats/<id>.json лежат рецепты скачивания. Закреплённый — тот, по которому
+// работает всё, у него есть проверенный checksum. Рецепт, помеченный
+// `"latest": true`, — тот же, но без хэша и с адресом последней доступной версии;
+// по нему кодек и обновляется. Рабочим он не является (см. entries_for_os).
+//
+// Порядок действий: скачать во временный каталог, сверить справку утилиты,
+// посчитать хэш файла-источника и только потом подменить бинарники в кэше и
+// переписать закреплённый рецепт. Сверка идёт до подмены по двум причинам:
+// пользователь при расхождении остаётся с прежней рабочей версией и внятным
+// сообщением, а не со сломанным кодеком; и запись в formats/*.json не меняется
+// ни при каком исходе, кроме заведомо годного.
+//
+// Хэш считается по файлу, из которого получен бинарник: для extract7z это
+// оставленный в кэше инсталлятор. Для archive архив удаляется после распаковки,
+// и хэш бинарника не годится — пересборка архива даст другой файл при том же
+// содержимом. В этом случае запись в конфиге не обновляется и возвращается
+// failed с объяснением: записать бессмысленный хэш хуже, чем оставить старый.
+
+std::string backup_dir(const config::Format& fmt) {
+    return util::join_path(cache_dir(fmt), ".update-backup");
+}
+
+bool is_latest(const config::DownloadEntry& e) { return e.latest; }
+
+// Рецепт, по которому сейчас работает кодек: первый подходящий под ОС, кроме
+// помеченного latest.
+bool pinned_entry(const config::Format& fmt, config::DownloadEntry* out) {
+    const std::string os = util::current_os();
+    for (const auto& e : fmt.downloads) {
+        bool want = e.os == os || e.os == "any";
+#ifndef _WIN32
+        if (e.os == "windows") want = true;
+#endif
+        if (!want || is_latest(e)) continue;
+        *out = e;
+        return true;
+    }
+    return false;
+}
+
+bool latest_entry(const config::Format& fmt, config::DownloadEntry* out) {
+    for (const auto& e : fmt.downloads) {
+        if (is_latest(e)) {
+            *out = e;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Файл-источник, хэш которого можно записать в конфиг: инсталлятор extract7z
+// остаётся в кэше. Для archive такого файла нет.
+bool hashable_source(const config::Format& fmt, const config::DownloadEntry& entry,
+                     std::string* path) {
+    if (entry.kind != "extract7z") return false;
+    std::string cache = cache_dir(fmt);
+    std::string p = util::join_path(cache, download_name(entry.url));
+    if (util::file_exists(p)) {
+        *path = p;
+        return true;
+    }
+    p += ".exe";
+    if (util::file_exists(p)) {
+        *path = p;
+        return true;
+    }
+    return false;
+}
+
+// Резервная копия файлов кэша на время обновления. Внутренние файлы
+// (.binary, .cli-check, .sha256) не копируются: они описывают проверку и должны
+// пересчитаться для нового бинарника.
+bool backup_cache(const config::Format& fmt) {
+    std::string src = cache_dir(fmt);
+    std::string dst = backup_dir(fmt);
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(dst), ec);
+    if (!util::mkdirs(dst)) return false;
+    for (const auto& e :
+         std::filesystem::directory_iterator(std::filesystem::u8path(src), ec)) {
+        if (ec) return false;
+        if (!e.is_regular_file()) continue;
+        std::string name = e.path().filename().u8string();
+        if (!name.empty() && name[0] == '.') continue;
+        if (!util::copy_file(e.path().u8string(), util::join_path(dst, name)))
+            return false;
+    }
+    return true;
+}
+
+void restore_cache(const config::Format& fmt) {
+    std::string src = backup_dir(fmt);
+    std::error_code ec;
+    if (!util::dir_exists(src)) return;
+    for (const auto& e :
+         std::filesystem::directory_iterator(std::filesystem::u8path(src), ec)) {
+        if (ec) return;
+        if (!e.is_regular_file()) continue;
+        util::copy_file(e.path().u8string(),
+                        util::join_path(cache_dir(fmt), e.path().filename().u8string()));
+    }
+    std::filesystem::remove_all(std::filesystem::u8path(src), ec);
+}
+
+// Перезаписывает закреплённый рецепт в formats/<id>.json: ставит проверенный url
+// и хэш, а рядом добавляет шаблон `latest` для следующего обновления.
+//
+// Файл пересобирается целиком, но через ordered_json: он сохраняет порядок ключей
+// при разборе, поэтому dump(2) даёт исходное форматирование, и в diff видно только
+// смену версии. Обычный nlohmann::json сортирует ключи (std::map) — пересборка на
+// нём превращала бы правку одного хэша в перестановку сотен строк.
+bool repin(const config::Format& fmt, const config::DownloadEntry& latest,
+           const std::string& checksum_hex) {
+    std::string path = util::join_path(config::formats_dir(), fmt.id + ".json");
+    nlohmann::ordered_json data;
+    try {
+        data = nlohmann::ordered_json::parse(util::read_text(path));
+    } catch (const std::exception&) {
+        return false;
+    }
+    if (!data.contains("downloads") || !data["downloads"].is_array()) return false;
+
+    // Заметки прежнего закреплённого рецепта относятся к проверенной версии
+    // (там, где это единственный источник сведений о версии), поэтому
+    // сохраняются; шаблон latest получает собственные.
+    std::string pinned_notes;
+    for (const auto& dl : data["downloads"]) {
+        bool is_latest_recipe =
+            dl.contains("latest") && dl.at("latest").is_boolean() &&
+            dl.at("latest").get<bool>();
+        if (is_latest_recipe) continue;
+        if (dl.contains("notes") && dl.at("notes").is_string()) {
+            pinned_notes = dl.at("notes").get<std::string>();
+            break;
+        }
+    }
+
+    nlohmann::ordered_json fresh;
+    fresh["os"] = latest.os;
+    fresh["kind"] = latest.kind;
+    fresh["url"] = latest.url;
+    if (!latest.file_glob.empty()) fresh["file_glob"] = latest.file_glob;
+    if (!latest.files.empty()) fresh["files"] = latest.files;
+    if (!pinned_notes.empty()) fresh["notes"] = pinned_notes;
+    else if (!latest.notes.empty()) fresh["notes"] = latest.notes;
+    // Хэш закрепляем только там, где адрес указывает на конкретную версию. У
+    // вечнозелёной ссылки (…/releases/latest/…) файл меняется при каждой загрузке,
+    // и записанный хэш отверг бы следующую же установку.
+    if (latest.pin_checksum) fresh["checksum"] = {{"type", "sha256"}, {"value", checksum_hex}};
+
+    // Шаблон для следующего обновления: тот же рецепт без хэша.
+    nlohmann::ordered_json tmpl;
+    tmpl["os"] = latest.os;
+    tmpl["latest"] = true;
+    tmpl["pinned_kind"] = latest.kind;
+    if (!latest.pin_checksum) tmpl["pin_checksum"] = false;
+    tmpl["url"] = latest.url;
+    if (!latest.file_glob.empty()) tmpl["file_glob"] = latest.file_glob;
+    if (!latest.files.empty()) tmpl["files"] = latest.files;
+    if (!latest.notes.empty()) tmpl["notes"] = latest.notes;
+
+    nlohmann::ordered_json downloads = nlohmann::ordered_json::array();
+    downloads.push_back(fresh);
+    for (const auto& dl : data["downloads"]) {
+        bool is_latest_recipe =
+            dl.contains("latest") && dl.at("latest").is_boolean() &&
+            dl.at("latest").get<bool>();
+        if (is_latest_recipe) continue;
+        // Прежний рабочий рецепт с тем же url больше не нужен: он указывает на
+        // уже скачанный файл, а fresh заменил его. Без этой проверки повторное
+        // обновление накапливало бы копии одной и той же записи.
+        if (dl.value("url", std::string()) == latest.url &&
+            dl.value("kind", std::string()) == latest.kind)
+            continue;
+        downloads.push_back(dl);
+    }
+    downloads.push_back(tmpl);
+    data["downloads"] = downloads;
+    return util::write_text(path, data.dump(2) + "\n");
+}
+
+// Сбросить маркеры, описывающие прежний бинарник: .binary указывает на старый
+// файл, .cli-check закеширован по его размеру и mtime.
+void forget_marker(const config::Format& fmt) {
+    util::remove_file(util::join_path(cache_dir(fmt), ".binary"));
+    util::remove_file(util::join_path(cache_dir(fmt), ".cli-check"));
+}
+
+void clear_backup(const config::Format& fmt) {
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(backup_dir(fmt)), ec);
+}
+
+UpdateResult update_one(const config::Format& fmt, const std::atomic<bool>* kill) {
+    UpdateResult r;
+    r.id = fmt.id;
+    config::DownloadEntry pinned;
+    if (!pinned_entry(fmt, &pinned)) {
+        r.status = "failed";
+        r.message = i18n::str("no pinned download entry in the config");
+        return r;
+    }
+    config::DownloadEntry latest;
+    if (!latest_entry(fmt, &latest)) {
+        r.status = "skipped";
+        r.message = i18n::str(
+            "no 'latest' entry — add one to formats/<id>.json to make this codec updatable");
+        return r;
+    }
+    r.from = util::base_name(pinned.url);
+    r.to = util::base_name(latest.url);
+
+    std::error_code ec;
+    // Прежний хэш берём из закреплённого рецепта, а не с диска: для kind=archive
+    // архив удаляется после распаковки, и файла-источника уже нет. Хэш в конфиге
+    // — ровно то, с чем нужно сравнить новый файл.
+    const std::string before_hex = pinned.checksum;
+
+    if (!backup_cache(fmt)) {
+        r.status = "failed";
+        r.message = i18n::str("could not back up the codec cache");
+        return r;
+    }
+
+    // prepare_entry кладёт файлы прямо в bin/<id>/, поэтому откат обеспечен
+    // резервной копией: при любом неуспехе ниже файлы возвращаются на место, и
+    // прежний рабочий кодек остаётся в силе.
+    std::string message;
+    std::string path;
+    try {
+        path = prepare_entry(fmt, latest, &message, kill);
+    } catch (const std::exception& exc) {
+        restore_cache(fmt);
+        r.status = "failed";
+        r.message = util::one_line(exc.what());
+        return r;
+    }
+    if (path.empty()) {
+        restore_cache(fmt);
+        r.status = "failed";
+        r.message = message.empty() ? i18n::str("nothing to install") : util::one_line(message);
+        return r;
+    }
+
+    // Сверка справки: утилита другой версии может вести себя иначе, и запись с
+    // рабочим кодеком лучше, чем запись с непредсказуемым.
+    std::string check;
+    cli_check(fmt, path, &check, kill);
+    if (!check.empty()) {
+        restore_cache(fmt);
+        r.status = "failed";
+        r.message = i18n::fmt("the new utility does not match cli_check.expect: %s",
+                              util::one_line(check).c_str());
+        return r;
+    }
+
+    // Хэш считаем по файлу-источнику — тому же, который качается при следующей
+    // установке. Для extract7z это оставленный в кэше инсталлятор. Для archive
+    // такого файла нет (архив удаляется после распаковки), и хэш бинарника
+    // записывать нельзя: при следующей загрузке сверялся бы уже другой файл, и
+    // установка падала бы с несовпадением. Поэтому для archive хэш не пишется,
+    // и запись остаётся с пустым checksum — сверку обеспечивает сам загрузчик
+    // (digest из API GitHub).
+    std::string hash_path;
+    if (!hashable_source(fmt, latest, &hash_path)) {
+        if (!repin(fmt, latest, std::string())) {
+            restore_cache(fmt);
+            r.status = "failed";
+            r.message = i18n::fmt("could not update formats/%s.json", fmt.id.c_str());
+            return r;
+        }
+        forget_marker(fmt);
+        clear_backup(fmt);
+        r.status = "updated";
+        r.message = i18n::str(
+            "no checksum source for kind=archive — the checksum stays empty "
+            "(the downloader verifies via the GitHub digest)");
+        return r;
+    }
+    std::string hex = sha256::hex(util::read_file(hash_path));
+    if (hex.empty()) {
+        restore_cache(fmt);
+        r.status = "failed";
+        r.message = i18n::str(
+            "could not compute the checksum of the downloaded file — the config is left unchanged");
+        return r;
+    }
+
+    // Хэш совпал с прежним: это тот же файл, обновляться нечему. Для
+    // вечнозелёного адреса (pin_checksum=false) сравнивать не с чем — там
+    // «прежний» хэш в конфиге отсутствует, и каждый прогон качает заново.
+    if (latest.pin_checksum && !before_hex.empty() && hex == before_hex) {
+        restore_cache(fmt);
+        r.status = "unchanged";
+        r.message = i18n::str("the downloaded file is identical to the pinned one");
+        return r;
+    }
+
+    if (!repin(fmt, latest, hex)) {
+        restore_cache(fmt);
+        r.status = "failed";
+        r.message = i18n::fmt("could not update formats/%s.json", fmt.id.c_str());
+        return r;
+    }
+
+    forget_marker(fmt);
+    clear_backup(fmt);
+    util::write_text(util::join_path(cache_dir(fmt), ".sha256"), hex + "\n");
+
+    r.status = "updated";
+    r.message = i18n::fmt("sha256 %s", hex.c_str());
+    return r;
+}
+
 }  // namespace
 
 // Проверка готовности утилиты формата: находит бинарник (кэш bin/<id>/.binary
@@ -408,6 +729,34 @@ Status ensure(const config::Format& fmt, bool download, const std::string& log_p
     }
     st.status = "missing";
     return st;
+}
+
+std::vector<UpdateResult> update_codecs(const std::vector<config::Format>& fmts,
+                                        const std::atomic<bool>* kill) {
+    std::vector<UpdateResult> out;
+    // ffmpeg-форматы (alac/tta/mpeg4_als) делят один бинарник в bin/ffmpeg/.
+    // Скачивать его на каждый формат заново — это сотня мегабайт впустую, поэтому
+    // первым из них проходим обновление, остальным переносим тот же результат:
+    // файлы те же, сверка та же, отличается только запись в formats/<id>.json.
+    bool ffmpeg_done = false;
+    UpdateResult ffmpeg_result;
+    for (const auto& f : fmts) {
+        if (!f.enabled) continue;
+        if (kill && kill->load(std::memory_order_relaxed)) break;
+        if (f.engine_kind == "ffmpeg" && ffmpeg_done) {
+            UpdateResult r = ffmpeg_result;
+            r.id = f.id;
+            out.push_back(r);
+            continue;
+        }
+        UpdateResult r = update_one(f, kill);
+        if (f.engine_kind == "ffmpeg") {
+            ffmpeg_done = true;
+            ffmpeg_result = r;
+        }
+        out.push_back(r);
+    }
+    return out;
 }
 
 }  // namespace tool

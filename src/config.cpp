@@ -137,8 +137,16 @@ Format validate(const json::json& data) {
         e.kind = get_str(dl, "kind");
         if (e.os.empty()) throw Error(err_str(tag, i18n::str("missing field 'os'")));
         if (!is_known_os(e.os)) throw Error(err_str(tag, i18n::fmt("unknown OS '%s'", e.os.c_str())));
-        if (e.kind.empty()) throw Error(err_str(tag, i18n::str("missing field 'kind'")));
-        if (std::find(std::begin(DOWNLOAD_KINDS), std::end(DOWNLOAD_KINDS), e.kind) == std::end(DOWNLOAD_KINDS)) {
+        // У `latest`-рецепта kind хранится в pinned_kind (он ещё не проверен, и
+        // вид установки станет понятен только после загрузки), поэтому проверка
+        // kind откладывается до разбора этого блока ниже.
+        bool is_latest_recipe = dl.contains("latest") && dl.at("latest").is_boolean() &&
+                                dl.at("latest").get<bool>();
+        if (e.kind.empty() && !is_latest_recipe)
+            throw Error(err_str(tag, i18n::str("missing field 'kind'")));
+        if (!e.kind.empty() &&
+            std::find(std::begin(DOWNLOAD_KINDS), std::end(DOWNLOAD_KINDS), e.kind) ==
+                std::end(DOWNLOAD_KINDS)) {
             throw Error(err_str(tag, i18n::fmt("unknown kind '%s'", e.kind.c_str())));
         }
         if (!dl.contains("url")) throw Error(err_str(tag, i18n::str("missing field 'url'")));
@@ -152,6 +160,24 @@ Format validate(const json::json& data) {
             std::string val = get_str(cs, "value");
             if (!type.empty() && type != "sha256") throw Error(err_str(tag, i18n::str("only sha256 is supported for now")));
             e.checksum = val;
+        }
+        // Рецепт последней версии: kind хранится в pinned_kind, сам entry
+        // помечен latest. checksum у него быть не должен — версия не проверена,
+        // хэш проставляется после сверки справки утилиты (см. tool::update_codecs).
+        if (dl.contains("latest") && dl.at("latest").is_boolean() && dl.at("latest").get<bool>()) {
+            e.latest = true;
+            e.pinned_kind = get_str(dl, "pinned_kind");
+            if (e.pinned_kind.empty())
+                throw Error(err_str(tag, i18n::str("a 'latest' entry needs 'pinned_kind' (archive|extract7z)")));
+            if (std::find(std::begin(DOWNLOAD_KINDS), std::end(DOWNLOAD_KINDS), e.pinned_kind) ==
+                std::end(DOWNLOAD_KINDS))
+                throw Error(err_str(tag, i18n::fmt("unknown pinned_kind '%s'", e.pinned_kind.c_str())));
+            if (!e.checksum.empty())
+                throw Error(err_str(tag, i18n::str("a 'latest' entry must not carry a checksum: the version is not verified yet")));
+            if (dl.contains("pin_checksum") && !dl.at("pin_checksum").is_boolean())
+                throw Error(err_str(tag, i18n::str("'pin_checksum' must be true or false")));
+            e.pin_checksum = dl.value("pin_checksum", true);
+            e.kind = e.pinned_kind;
         }
         if (dl.contains("files") && dl.at("files").is_array()) {
             e.files = get_str_list(dl, "files");

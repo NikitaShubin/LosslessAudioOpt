@@ -17,6 +17,18 @@ struct DownloadEntry {
     std::string checksum;           // sha256 hex (может быть пусто)
     std::string notes;
     std::vector<std::string> files; // extract7z/archive: имена файлов для копирования в кэш
+
+    // Рецепт последней доступной версии: в JSON помечен `"latest": true`, kind
+    // приходит в pinned_kind (по нему и качать). Рабочим он не является — по нему
+    // обновляются (см. tool::update_codecs). Пустой checksum здесь обязателен:
+    // версия ещё не проверена, и хэш проставляется только после сверки справки.
+    bool latest = false;
+    std::string pinned_kind;        // kind этого рецепта, если latest
+    // Проставлять ли checksum после обновления. Нужен для адресов с версией в
+    // имени: там файл неизменяем, и хэш можно закрепить. Нельзя для вечнозелёных
+    // ссылок вида .../releases/latest/...: там хэш меняется при каждой загрузке,
+    // и запись с ним отвергла бы следующую же установку.
+    bool pin_checksum = true;
 };
 
 struct Variant {

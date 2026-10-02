@@ -41,7 +41,7 @@
 | `downloads[].kind` | string | да | `archive` \| `extract7z`. |
 | `downloads[].file_glob` | string | для `archive` | Где в архиве бинарник (glob). |
 | `downloads[].files` | array | для `extract7z` | Имена файлов, которые надо извлечь из установщика (например `["la.exe", "la-core.dll"]`). |
-| `downloads[].checksum` | object | нет | `{"type": "sha256", "value": "..."}`. |
+| `downloads[].checksum` | object | нет | `{"type": "sha256", "value": "..."}`. Пустое `"value"` = архив не сверяется по хэшу: он удаляется после распаковки (kind=archive) либо адрес вечнозелёный (kind=archive + `pin_checksum: false`). Сверку в этом случае обеспечивает сам загрузчик (digest из API GitHub) или её нет вовсе. |
 | `downloads[].notes` | string | нет | Пояснения. |
 | `cli_check` | object | нет | `{"cmd": [...], "expect": [...]}` — сверка конфига с реальным CLI утилиты (см. ниже). |
 | `encode.cmd` | array | да | Шаблон команды кодирования. Плейсхолдеры: `{input}`, `{output}`, `{params}`, `{codec}`. |

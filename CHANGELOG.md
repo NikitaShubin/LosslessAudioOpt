@@ -4,6 +4,29 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.0 — 2026-10-02
+
+### One record per file in `stats.json`
+`stats.json` used to hold one record **per candidate**, with the winner marked after the fact. That made the base impossible to reason about: a file took two or three rows, repeated runs duplicated entries, and the export could not show who won a file.
+
+One record is now one processed file: its source properties, every candidate that was tried (size, sidecar, timings, verification mode, error) and the winner. Since the whole run is recorded, any figure can be derived from the same base later instead of being frozen at the moment it was first computed.
+
+The ranking is now computed **on the files each format won** (the smallest candidate per file), not by averaging over all candidates. The old way was misleading in both directions: a format with many variants accumulated more "averages" than a format with one, and the sources behind them differed. FLAC used to show `-3.14%` savings on a real library; on the same data it is `43.78%`.
+
+### Statistics output
+`llao stats` and `llao stats --report=<file>` gained two histograms — the savings distribution and the source size distribution — and the export also carries a savings histogram **per format**, so a format with one lucky file no longer looks like a consistently better one. Files whose result grew instead of shrinking are counted in a separate `grew` bucket rather than disappearing.
+
+Both views count `cost` (file + sidecar), and both skip lossy sources: converting mp3 to lossless never shrinks anything, so counting it made the summary claim savings that did not happen.
+
+### Updating codecs
+`llao tools --update-codecs` (and `llao serve --update-codecs`, which refuses to start if an update fails) brings the codecs up to their newest available versions and rewrites the pinned download recipes in `formats/*.json`. A codec is updatable when its config has a `latest` recipe; those without one are reported as `skipped`.
+
+A new utility is checked against `cli_check.expect` before anything is replaced, and any failure restores the previous working binary and leaves the config untouched. Codecs without a hash source (a zip that is deleted after unpacking, or an evergreen `…/releases/latest/…` URL whose file changes on every download) keep an empty checksum instead of getting a meaningless one — recording it would reject the next installation.
+
+### Test isolation
+The daemon test harness did not pass `LLAO_STATS_FILE`, so every integration test wrote into the user's own `stats.json`. On a real base that had produced 39,960 out of 42,200 junk records from temporary `/tmp` files, which distorted the format ranking and the export. Tests now use their own file.
+
+
 ## 2.2.0 — 2026-09-30
 
 ### Task dots in the web UI

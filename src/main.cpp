@@ -130,8 +130,10 @@ int cmd_check_formats() {
 int cmd_tools(const std::vector<std::string>& args) {
     std::vector<std::string> ids;
     bool no_download = false;
+    bool update = false;
     for (const auto& a : args) {
         if (a == "--no-download") no_download = true;
+        else if (a == "--update-codecs") update = true;
         else ids.push_back(a);
     }
     try {
@@ -154,6 +156,24 @@ int cmd_tools(const std::vector<std::string>& args) {
                 return 1;
             }
             fmts = filtered;
+        }
+        if (update) {
+            // Обновление: скачать свежие версии, сверить справку утилиты и
+            // переписать закреплённые рецепты в formats/*.json. Ошибка одного
+            // кодека не должна отменять остальные — они независимы.
+            auto results = tool::update_codecs(fmts);
+            int failed = 0;
+            for (const auto& r : results) {
+                std::string line = i18n::fmt("  %-16s %-10s %s", r.id.c_str(),
+                                             r.status.c_str(), r.message.c_str());
+                if (r.status == "updated" && !r.from.empty())
+                    line = i18n::fmt("  %-16s %-10s %s -> %s", r.id.c_str(),
+                                     r.status.c_str(), r.from.c_str(), r.to.c_str()) +
+                           i18n::fmt("  [%s]", r.message.c_str());
+                out::text(stdout, line + "\n");
+                if (r.status == "failed") ++failed;
+            }
+            return failed == 0 ? 0 : 1;
         }
         for (const auto& f : fmts) {
             tool::Status st = tool::ensure(f, !no_download, "[" + f.id + "] ");

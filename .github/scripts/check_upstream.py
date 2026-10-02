@@ -33,6 +33,8 @@ FORMATS_DIR = os.path.join(ROOT, "formats")
 SKIP_PATH = os.path.join(ROOT, ".github", "cli-baselines", "skip-upstream.json")
 
 # Ручной источник актуальных версий (без стабильного API). Обновляется агентом.
+# Значение сверяется с версией, закреплённой в formats/<id>.json: тот берётся из
+# url закреплённого рецепта (downloads[0], без учёта рецептов latest).
 UPSTREAM_MANUAL = {
     "tak": "2.3.3",
     "optimfrog": "5.100",
@@ -57,8 +59,13 @@ def load_formats():
 
 
 def pinned_version(fmt_id, fmt):
-    downloads = fmt.get("downloads") or [{}]
-    d = downloads[0]
+    # Именно закреплённый рецепт: после `tools --update-codecs` в downloads[]
+    # есть ещё шаблон latest, и он не является опорой версии.
+    pinned = [d for d in (fmt.get("downloads") or [{}])
+              if not d.get("latest")]
+    if not pinned:
+        return None
+    d = pinned[0]
     url = d.get("url", "")
     notes = " ".join(x for x in (fmt.get("notes", ""), d.get("notes", "")) if x)
     m = re.search(r"flac-([0-9]+(?:\.[0-9]+)*)-win", url)

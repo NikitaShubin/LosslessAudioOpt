@@ -9,6 +9,7 @@
 #include "contract.h"
 #include "i18n.h"
 #include "obs.h"
+#include "out.h"
 #include "report.h"
 #include "tool.h"
 #include "util.h"
@@ -22,8 +23,12 @@ double monotonic_s() {
 }
 
 DaemonSession::DaemonSession(optimize::Options opts, EventBuffer* ev, StateMirror* st,
-                             std::string restore_to)
-    : opts_(std::move(opts)), restore_to_(std::move(restore_to)), ev_(ev), st_(st) {
+                             std::string restore_to, bool update_codecs)
+    : opts_(std::move(opts)),
+      restore_to_(std::move(restore_to)),
+      update_codecs_(update_codecs),
+      ev_(ev),
+      st_(st) {
     started_ = monotonic_s();
 }
 
@@ -62,6 +67,21 @@ int DaemonSession::start(std::string* err) {
         // прогона. Уважает --no-download (гейт не качает).
         std::vector<std::string> problems;
         bool download = !opts_.no_download;
+        // --update-codecs: сначала обновление, потом обычный гейт. Обновление
+        // идёт до ensure(), иначе ensure() увидит старый бинарник в кэше и
+        // вернёт success, не дав заглянуть в новую версию.
+        if (update_codecs_) {
+            auto results = tool::update_codecs(enabled);
+            for (const auto& r : results) {
+                if (r.status == "failed") {
+                    problems.push_back(i18n::fmt(
+                        "format %s: codec update failed (%s)", r.id.c_str(),
+                        r.message.c_str()));
+                } else if (r.status == "updated") {
+                    out::print("  %s: codec updated (%s)\n", r.id.c_str(), r.message.c_str());
+                }
+            }
+        }
         for (const auto& f : enabled) {
             tool::Status s = tool::ensure(f, download);
             std::string issue;

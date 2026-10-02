@@ -99,6 +99,7 @@ of parameters — `llao.exe variants`.
 ```
 llao.exe check-formats                        # validate the formats configuration
 llao.exe tools [fmt_id ...] [--no-download]   # status/download utilities into bin/<id>/
+                 [--update-codecs]            # fetch the latest codec versions, re-pin them
 llao.exe optimize <file|folder> [--jobs=N|M.F] # brute-force formats/parameters (recursive)
                  [--formats flac,wavpack]     # limit the set of formats (unknown id -> error)
                  [--report=<file|folder>]     # final report (or a directory for it)
@@ -132,6 +133,13 @@ the same base instead of being frozen at the moment it was first computed.
 
 The exported report also carries a savings histogram per format, so a format with
 one lucky file does not look like a consistently better one.
+
+`--update-codecs` brings the codecs up to their newest available versions and rewrites
+the pinned download recipes in `formats/*.json` (url + sha256) after checking each new
+utility against `cli_check.expect`. A codec whose update fails keeps the previous working
+binary, and the command exits non-zero. It needs the codec to have a `latest` recipe in
+its config — see [formats/README.en.md](formats/README.en.md). The server takes the same
+flag (`llao serve --update-codecs`) and refuses to start if an update fails.
 
 `--jobs=N` — an exact number of parallel processes; `--jobs=M.F` — a multiplier of
 the available cores (e.g. `--jobs=1.5` on 16 cores gives 24 processes). The default

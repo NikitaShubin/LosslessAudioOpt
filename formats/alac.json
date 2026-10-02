@@ -26,6 +26,19 @@
         "value": ""
       },
       "notes": "Свежие сборки BtbN (win64-gpl). ffmpeg.exe скачивается один раз в bin/ffmpeg/ и используется всеми ffmpeg-форматами. 'latest' — плавающий тег, поэтому SHA-256 не фиксируется."
+    },
+    {
+      "os": "windows",
+      "latest": true,
+      "pin_checksum": false,
+      "pinned_kind": "archive",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+      "file_glob": "**/ffmpeg.exe",
+      "files": [
+        "ffmpeg.exe",
+        "ffprobe.exe"
+      ],
+      "notes": "Вечнозелёный адрес BtbN: имя аксета меняется вместе с версией. pin_checksum=false — хэш здесь закреплять нельзя."
     }
   ],
   "encode": {

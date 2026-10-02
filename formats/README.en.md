@@ -45,7 +45,7 @@ not take part in `check-formats`):
 | `downloads[].kind` | string | yes | `archive` \| `extract7z`. |
 | `downloads[].file_glob` | string | for `archive` | Where the binary is in the archive (glob). |
 | `downloads[].files` | array | for `extract7z` | File names to extract from the installer (e.g. `["la.exe", "la-core.dll"]`). |
-| `downloads[].checksum` | object | no | `{"type": "sha256", "value": "..."}`. |
+| `downloads[].checksum` | object | no | `{"type": "sha256", "value": "..."}`. Empty `"value"` = the archive is not hash-verified: it is deleted after unpacking (kind=archive), or the URL is evergreen (kind=archive + `pin_checksum: false`). Verification is then provided by the downloader (GitHub digest) or not at all. |
 | `downloads[].notes` | string | no | Explanations. |
 | `cli_check` | object | no | `{"cmd": [...], "expect": [...]}` — comparison of the config with the utility's real CLI (see below). |
 | `encode.cmd` | array | yes | The encode command template. Placeholders: `{input}`, `{output}`, `{params}`, `{codec}`. |

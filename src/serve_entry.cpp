@@ -124,6 +124,8 @@ void print_help() {
     out::print("  --dry-run             do not write the result\n");
     out::print("  --no-download         do not download codecs (the startup gate only checks)\n");
     out::print("  --no-stats            do not accumulate stats.json\n");
+    out::print("  --update-codecs       update the codecs to their latest versions before\n");
+    out::print("                        starting, and refuse to start if any of them fails\n");
     out::print("  --debug               runs/*.jsonl log + debugging\n");
     out::print("  --report PATH         final report on shutdown\n");
     out::print("  --restore-to ID       target format of the restore mode (default flac)\n");
@@ -168,7 +170,8 @@ int run_daemon(const std::vector<std::string>& args) {
     std::string bind = "0.0.0.0";
     int port = 18180;
     std::string token;
-    bool no_auth = false;  // отладка: выключить Bearer-авторизацию
+    bool no_auth = false;
+    bool update_codecs = false;  // отладка: выключить Bearer-авторизацию
     std::string discovery_override;
     std::string restore_to = "flac";  // целевой формат режима восстановления
     optimize::Options opts;
@@ -203,6 +206,7 @@ int run_daemon(const std::vector<std::string>& args) {
         else if (a == "--dry-run") opts.dry_run = true;
         else if (a == "--no-download") opts.no_download = true;
         else if (a == "--no-stats") opts.no_stats = true;
+        else if (a == "--update-codecs") update_codecs = true;
         else if (a == "--debug") opts.debug = true;
         else if (a == "--report") opts.report_path = next();
         else if (a == "--restore-to") restore_to = next();
@@ -216,7 +220,7 @@ int run_daemon(const std::vector<std::string>& args) {
 
     dsvc::EventBuffer events;
     dsvc::StateMirror state;
-    dsvc::DaemonSession session(std::move(opts), &events, &state, restore_to);
+    dsvc::DaemonSession session(std::move(opts), &events, &state, restore_to, update_codecs);
 
     // Персистентность очереди: queue.json рядом с discovery-файлом.
     std::string disc = dsvc::discovery_path(discovery_override);
