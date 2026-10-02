@@ -112,6 +112,10 @@ private:
     optimize::Options opts_;
     std::string restore_to_;  // целевой формат для restore (id из formats/*.json)
     bool update_codecs_ = false;  // --update-codecs: обновить кодеки перед стартом
+    // Идёт восстановление очереди из queue.json: до его конца файл очереди не
+    // переписывается, иначе прерванная перезагрузка оставила бы усечённую
+    // очередь (см. DaemonSession::persist).
+    bool reloading_ = false;
     std::string persist_path_;  // путь к queue.json (пусто = персистентность выкл)
     EventBuffer* ev_ = nullptr;
     StateMirror* st_ = nullptr;

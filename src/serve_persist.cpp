@@ -73,6 +73,15 @@ void DaemonSession::persist(bool final) {
     // без вложенных блокировок движка/сессии.
     std::lock_guard<std::mutex> lk(persist_m_);
     if (shutting_down_.load() && !final) return;  // после shutdown — только финальный
+    // Пока идёт восстановление очереди из queue.json, файл не переписывается.
+    // Восстановление добавляет строки по одной, а persist() к тому моменту
+    // вызывается уже и воркерами движка (файл начали обрабатывать), и с
+    // RPC-потоков. Любая из этих записей сохраняла бы в queue.json только
+    // восстановленный на этот момент префикс — а если демон в этот миг падает,
+    // префикс остаётся в файле навсегда: при следующем старте демон
+    // восстанавливает уже усечённую очередь, и остальные строки исчезают
+    // бесследно. На реальной библиотеке это стоило 4 745 строк из 5 256.
+    if (reloading_ && !final) return;
     persist_rows(snapshot_for_persist(final));
 }
 
@@ -91,6 +100,22 @@ void DaemonSession::load_persisted(std::string* err) {
         return;
     }
     if (rows.empty()) return;
+
+    // Прежний queue.json сохраняем рядом: перезапись начнётся сразу после
+    // восстановления, и если что-то пойдёт не так (обрыв, битая запись),
+    // исходный состав очереди останется доступен для ручного возврата.
+    {
+        std::error_code ec;
+        util::copy_file(persist_path_, persist_path_ + ".bak");
+        (void)ec;
+    }
+
+    reloading_ = true;
+    struct ReloadGuard {
+        bool* flag;
+        ~ReloadGuard() { *flag = false; }
+    } reload_guard{&reloading_};
+
     size_t rid = kRestoredIdBase;
     std::vector<size_t> order;  // итоговый порядок строк в зеркале
     order.reserve(rows.size());
@@ -157,6 +182,43 @@ void DaemonSession::load_persisted(std::string* err) {
         return true;
     };
 
+    // Очередь восстанавливается пачками, а не по одной строке: add_locked на
+    // каждую строку заново проверяет путь, эмитит события и пишет в зеркало, а
+    // движок на 5+ тысяч строк так не восстановить — reload занимал минуты, и
+    // всё это время файл очереди оставался незаписанным. Пачка собирается из
+    // подряд идущих строк с одинаковыми mode/target_dir (это и есть add-ка,
+    // которым их и добавляли), чтобы порядок в очереди сохранился.
+    std::vector<std::string> batch_paths;
+    std::vector<const persist::Row*> batch_rows;  // параллельно batch_paths
+    std::string batch_mode, batch_target;
+    auto flush_batch = [&]() {
+        if (batch_paths.empty()) return;
+        nlohmann::json tmp = {{"added", nlohmann::json::array()},
+                              {"rejected", nlohmann::json::array()}};
+        std::vector<size_t> nids;
+        add_locked(batch_paths, batch_mode, batch_target, tmp, nids);
+        for (size_t nid : nids) order.push_back(nid);
+        // Полный путь (из движка) в зеркало, а отображение/персист — по
+        // сохранённому rel и корню (иначе rel заменился бы на имя файла, и
+        // очередь перестала бы быть независимой от cwd).
+        if (!nids.empty()) {
+            auto snap = engine_->snapshot();
+            for (size_t i = 0; i < nids.size() && i < batch_rows.size(); i++) {
+                const size_t nid = nids[i];
+                for (const auto& f : snap)
+                    if (f.idx == nid && !f.path.empty()) {
+                        st_->set_path(nid, f.path);
+                        break;
+                    }
+                st_->set_label(nid, batch_rows[i]->path);
+                st_->set_root(nid, batch_rows[i]->root);
+                set_had_sidecar(nid, batch_paths[i]);
+            }
+        }
+        batch_paths.clear();
+        batch_rows.clear();
+    };
+
     for (const auto& pr : rows) {
         std::string full = full_path(pr);
         if (pr.state == "queued") {
@@ -165,41 +227,24 @@ void DaemonSession::load_persisted(std::string* err) {
             // в зеркале со статусом stopped и причиной, в движок не заносится.
             std::string why;
             if (!source_ok(full, pr.had_sidecar, &why)) {
+                flush_batch();
                 restore_to_mirror(pr, full, "stopped", why);
                 continue;
             }
-            nlohmann::json tmp = {{"added", nlohmann::json::array()},
-                                  {"rejected", nlohmann::json::array()}};
-            std::vector<size_t> nids;
-            add_locked({full}, pr.mode, pr.target_dir, tmp, nids);
-            if (!nids.empty()) {
-                // Строка попала в движок: движок уже эмитил begin_file/добавил
-                // в зеркало. Позиция в порядке очереди — по persist-порядку.
-                for (size_t nid : nids) order.push_back(nid);
-                // Полный путь (из движка) в зеркало, а отображение/персист —
-                // по сохранённому rel и корню (иначе rel заменился бы на имя
-                // файла после повторного add).
-                for (size_t nid : nids) {
-                    auto snap = engine_->snapshot();
-                    for (const auto& f : snap)
-                        if (f.idx == nid && !f.path.empty()) {
-                            st_->set_path(nid, f.path);
-                            st_->set_label(nid, pr.path);
-                            st_->set_root(nid, pr.root);
-                            set_had_sidecar(nid, f.path);
-                            break;
-                        }
-                }
-                ev_->push("restored", {{"type", "queued"}, {"id", nids.front()},
-                                       {"path", pr.path}});
-                continue;
+            if (batch_paths.empty()) {
+                batch_mode = pr.mode;
+                batch_target = pr.target_dir;
+            } else if (pr.mode != batch_mode || pr.target_dir != batch_target) {
+                flush_batch();
+                batch_mode = pr.mode;
+                batch_target = pr.target_dir;
             }
-            std::string reason =
-                !tmp["rejected"].empty() && tmp["rejected"][0].contains("reason")
-                    ? tmp["rejected"][0]["reason"].get<std::string>()
-                    : "не удалось восстановить задачу из queue.json";
-            restore_to_mirror(pr, full, "stopped", reason);
-        } else if (pr.state == "ok") {
+            batch_paths.push_back(full);
+            batch_rows.push_back(&pr);
+            continue;
+        }
+        flush_batch();
+        if (pr.state == "ok") {
             // Итог проверяем по out_path (и по sidecar, если has_sidecar).
             std::string why;
             if (!pr.out_path.empty()) {
@@ -230,6 +275,7 @@ void DaemonSession::load_persisted(std::string* err) {
             restore_to_mirror(pr, full, pr.state, pr.last_error);
         }
     }
+    flush_batch();
 
     // Итоговый порядок очереди по строкам из queue.json (движок-строки уже в
     // зеркале в порядке add; восстановленные — в порядке обхода).
@@ -238,6 +284,8 @@ void DaemonSession::load_persisted(std::string* err) {
     if (err) *err = std::string();
     // Сразу пишем consolidated-состояние, чтобы в файле была одна актуальная
     // картина (новые id вместо персист-состояний) — но только если есть движок.
+    // Флаг reloading_ к этому моменту уже снят (ReloadGuard), иначе запись
+    // была бы подавлена вместе со всеми остальными.
     persist(false);
 }
 

@@ -4,6 +4,15 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.3 — 2026-10-02
+
+### A restart no longer truncates the queue
+Restoring the queue from `queue.json` added the files one at a time, while `persist()` was already being called by the engine's workers and by RPC threads. Every one of those writes saved only the part restored so far — so a daemon that died mid-restore left a truncated file behind, and the next start dutifully restored that truncated queue. On a 5,256-file library this silently lost 4,745 rows; the files themselves were untouched, but the work list was gone.
+
+`persist()` no longer writes the queue file while a restore is in progress, so an interrupted restore leaves the previous file intact and the next start simply does it again. The previous file is also copied to `queue.json.bak` before the first rewrite.
+
+The restore itself is now batched: files added in one `add` call (same mode and target folder) go back into the engine in one batch instead of one by one, which is what made the reload take minutes.
+
 ## 2.3.2 — 2026-10-02
 
 ### The daemon is intolerant to errors again

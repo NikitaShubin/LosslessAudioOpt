@@ -15,6 +15,8 @@
   P7  повторный запуск на той же discovery не дублирует строки (дедуп по пути)
   P8  относительное добавление папки: в queue.json root(абсолютный)+path(rel);
       перезапуск из другой cwd распознаёт строки по root и доходит до ok
+  P9  перезапуск не теряет очередь: состав строк до и после совпадает, а
+      queue.json.bak хранит предыдущий состав
 
 Требует: собранный llao-linux, ffmpeg в PATH. Без ffmpeg — SKIP.
 Демон поднимается свой, на случайном порту (--no-auth), 18180 не трогает.
@@ -30,6 +32,8 @@ import time
 import zipfile
 
 import _daemon_harness as H
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FAILURES = []
 
@@ -323,6 +327,54 @@ def main():
                   f"{label}: path в /api/state — полный путь (tooltip): "
                   f"{row and row[0].get('path')}")
         d9.stop()
+
+        # P9. Перезапуск не должен урезать очередь. Раньше восстановление шло
+        # по одной строке, а persist() к тому моменту вызывался уже воркерами
+        # движка, поэтому в queue.json попадал только восстановленный на этот
+        # момент префикс: если демон в этот миг падал, следующий старт
+        # восстанавливал усечённую очередь, и остальные строки исчезали навсегда.
+        # На реальной библиотеке это стоило 4745 строк из 5256.
+        p10dir = workdir + "/p10"
+        os.makedirs(p10dir, exist_ok=True)
+        d10 = H.Daemon(binary, p10dir, jobs=2.0, cwd=ROOT).start()
+        bulk = os.path.join(workdir, "p10src")
+        os.makedirs(bulk, exist_ok=True)
+        many = []
+        for i in range(40):
+            p = os.path.join(bulk, "m%02d.wav" % i)
+            H.gen_wav(p, 300 + i * 5)
+            many.append(p)
+        r10 = d10.rpc("add", {"paths": many})
+        check(len(r10["result"]["added"]) == 40,
+              "P9: добавлено 40 строк: %d" % len(r10["result"]["added"]))
+        d10.rpc("pause", {})
+        # Даём персисту устояться: строк в файле должно быть 40.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            q10 = read_queue(d10)
+            if q10 and len(q10.get("rows", [])) == 40:
+                break
+            time.sleep(0.5)
+        q10 = read_queue(d10)
+        check(q10 is not None and len(q10.get("rows", [])) == 40,
+              "P9: в queue.json 40 строк до перезапуска: %s"
+              % (q10 and len(q10.get("rows", []))))
+        d10.stop()
+
+        d10b = H.Daemon(binary, p10dir, jobs=2.0, cwd=ROOT).start()
+        # Бэкап прежнего состава создаётся при восстановлении, то есть уже во
+        # время старта второго демона.
+        bak = queue_path(d10) + ".bak"
+        check(os.path.exists(bak), "P9: предыдущий queue.json сохранён как .bak")
+        q10b = read_queue(d10b)
+        n10b = len(q10b.get("rows", [])) if q10b else 0
+        check(n10b == 40, "P9: после перезапуска очередь не урезана: %d из 40" % n10b)
+        # В queue.json строки хранят относительный путь в поле path (label —
+        # это поле зеркала в /api/state).
+        labels10 = {r.get("path") for r in (q10b or {}).get("rows", [])}
+        check(len(labels10) == 40, "P9: все 40 строк на месте после перезапуска: %d"
+              % len(labels10))
+        d10b.stop()
 
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
