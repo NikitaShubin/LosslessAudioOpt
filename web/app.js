@@ -177,6 +177,9 @@ async function loadFormats(){
     const fmts = j.formats || [];
     formatsMaxTasks = fmts.reduce((s,f)=> s + (Number.isFinite(f.variants) ? f.variants : 0), 0);
   } catch(e){ /* 401 или сеть — оставим 0, строки без плана не в счёте */ }
+  // Оценка объёма появилась позже первой отрисовки: пересчитываем статусбар.
+  // renderQueue() делает это сам на каждом проходе, но пока форматы не
+  // загружены, строки без плана считались как нулевой объём — здесь доведём.
   updateStatusbar(currentRows);
 }
 function updateStatusbar(rows){
@@ -328,6 +331,11 @@ function renderQueue(rows){
   if (isDragging) return;
   currentRows = rows || [];
   for (let id of [...selectedIds]) if (!currentRows.find(r=>r.id===id)) selectedIds.delete(id);
+  // Статусбар обновляется здесь, до любых ранних выходов, а не в конце функции:
+  // пустая очередь тоже должна пересчитать его, иначе после удаления последних
+  // строк бар остаётся со старыми числами и чинится только перезагрузкой
+  // страницы (F5 вызывал updateStatusbar из loadFormats — случайный третий путь).
+  updateStatusbar(currentRows);
   if (!rows || rows.length===0) {
     queueBody.innerHTML = `<tr><td colspan="7" class="empty">Очередь пуста</td></tr>`;
     updateSelectionUI();
@@ -388,7 +396,8 @@ function renderQueue(rows){
     b.addEventListener("click", async ()=>{
       const id = parseInt(b.getAttribute("data-remove"),10);
       if (!confirm(`Удалить файл #${id} из очереди? Если он обрабатывается, обработка будет прервана.`)) return;
-      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); }
+      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); return; }
+      pollState();
     });
   });
   queueBody.querySelectorAll("[data-clear]").forEach(b=>{
@@ -396,7 +405,8 @@ function renderQueue(rows){
       const id = parseInt(b.getAttribute("data-clear"),10);
       const r = currentRows.find(x=>x.id===id);
       if (!r || r.state!=="ok") return;
-      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); }
+      try { await rpc("remove", {id}); selectedIds.delete(id); } catch(e){ opmsg(e.message, "err"); return; }
+      pollState();
     });
   });
   queueBody.querySelectorAll("[data-restart]").forEach(b=>{
@@ -511,7 +521,6 @@ function renderQueue(rows){
     }
   });
   document.addEventListener("contextmenu", e=>{ if (isDragging) e.preventDefault(); });
-  updateStatusbar(currentRows);
   maybeAutoScroll();
 }
 
@@ -683,7 +692,8 @@ btnClearCompleted.addEventListener("click", async ()=>{
   try {
     const res = await rpc("clear-done", {});
     opmsg("Удалено завершённых: "+(res.removed||0), "ok");
-  } catch(e){ opmsg(e.message, "err"); }
+  } catch(e){ opmsg(e.message, "err"); return; }
+  pollState();
 });
 btnBatchStop.addEventListener("click", async ()=>{
   const ids = [...selectedIds].filter(id=>{
@@ -714,8 +724,9 @@ btnBatchDelete.addEventListener("click", async ()=>{
   const ids = [...selectedIds];
   if (!ids.length) return;
   if (!confirm(`Удалить ${ids.length} выделенных файлов? Если какие-то обрабатываются, обработка будет прервана.`)) return;
-  try { await rpc("bulk-remove", {ids}); } catch(e){ opmsg(e.message, "err"); }
+  try { await rpc("bulk-remove", {ids}); } catch(e){ opmsg(e.message, "err"); return; }
   selectedIds.clear();
+  pollState();
 });
 const headMove = (btn, dir)=>{
   btn && btn.addEventListener("click", async ()=>{

@@ -4,6 +4,16 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.1 — 2026-10-02
+
+### The overall status bar kept stale numbers after the queue was emptied
+The bar showing overall queue progress is computed in the browser from the rows, and `renderQueue()` updated it at the *end* of the function. The empty-queue branch returned earlier, so removing the last rows left the bar showing the previous figures (`100% (42/42)`) next to an empty table. A page reload fixed it — not because the data differed, but because the initial load happened to reach `updateStatusbar()` from `loadFormats()`, a third path that only runs once.
+
+`renderQueue()` now updates the status bar before any early return, so an emptied queue hides the bar immediately.
+
+### Removal refreshes the list at once
+Removing a row (per-row 🗑, per-row 🧹, «remove completed», or a bulk delete of selected rows) now re-reads the state right after the RPC succeeds instead of waiting for the next one-second poll.
+
 ## 2.3.0 — 2026-10-02
 
 ### One record per file in `stats.json`
