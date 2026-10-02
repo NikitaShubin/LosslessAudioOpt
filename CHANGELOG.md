@@ -23,6 +23,13 @@ Both views count `cost` (file + sidecar), and both skip lossy sources: convertin
 
 A new utility is checked against `cli_check.expect` before anything is replaced, and any failure restores the previous working binary and leaves the config untouched. Codecs without a hash source (a zip that is deleted after unpacking, or an evergreen `…/releases/latest/…` URL whose file changes on every download) keep an empty checksum instead of getting a meaningless one — recording it would reject the next installation.
 
+### Monkey's Audio 13.27
+Monkey's Audio is updated to **13.27** (the official release, built from the binaries its author sent ahead of time). It fixes the encoder refusing any source with an odd total number of PCM samples: 24-bit mono with an odd sample count used to fail with `Error: 1002`, while the decoder read such files without trouble. Odd lengths now compress, and the round-trip is byte-for-byte identical to the source.
+
+Verified on the shipped binary: 24-bit mono at 1 / 3 / 4799 / 4801 / 96001 samples, `data` chunk sizes that are not a multiple of 3, a declared `data` size larger than the file, 16-bit mono and 24-bit stereo with an odd frame count. The new codec also handles what `caps` previously ruled out — **8 channels and 32-bit** are now in the comparison set instead of being excluded up front.
+
+`llao tools --update-codecs` is what put the version in place: the file was fetched, its `--help` checked against `cli_check.expect`, and only then the pinned recipe in `formats/monkeys_audio.json` was rewritten.
+
 ### Test isolation
 The daemon test harness did not pass `LLAO_STATS_FILE`, so every integration test wrote into the user's own `stats.json`. On a real base that had produced 39,960 out of 42,200 junk records from temporary `/tmp` files, which distorted the format ranking and the export. Tests now use their own file.
 
