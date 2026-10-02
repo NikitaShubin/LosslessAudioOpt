@@ -29,6 +29,12 @@ bool is_replaygain(const std::string& k);
 // Добавление поля в группу (канонические ключи, дедупликация значений).
 void g_put(Group& g, const std::string& key, const std::string& value);
 
+// Разбор значения числового тега вида "номер" или "номер/всего" (track, disc).
+// Возвращает false, если строка не разбирается целиком: частичное значение
+// («3» из «3/13») в бокс писать нельзя — потеря «всего» потом всплывает как
+// «поле не выжило».
+bool parse_pair(const std::string& val, unsigned* num, unsigned* total);
+
 // Разбор/построение FLAC/Vorbis comment (tags_vorbis.cpp).
 void build_vorbis_comment(const Group& g, const std::map<std::string, std::string>& key_map,
                           std::vector<uint8_t>& out);

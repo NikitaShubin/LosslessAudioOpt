@@ -4,6 +4,21 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.2 — 2026-10-02
+
+### The daemon is intolerant to errors again
+The daemon defaulted to `--verify=winner`, so a candidate that failed was simply excluded from the contest and the file was reported as done. On a real library run this is what it looked like: files delivered successfully while half of their candidates had been dropped for reasons nobody could see — and a candidate that disappears silently can cost a file its real best result, because the next format by size may be larger than the one that would have won.
+
+`llao serve` now defaults to `--verify=all`, like the CLI: every variant is checked, and a failure in any of them aborts the file instead of being swallowed. `--verify=winner` is still there for speed.
+
+### Track and disc in the `number/total` form survive the move to M4A
+`track=3/13` and `disc=1/2` — the form almost every album uses — were lost in both directions when writing or reading M4A, so the ALAC candidate was rejected on every such file with "field 'track' did not survive":
+
+- the writer used `std::stoul("3/13")`, which parses the leading digits and **stops at the slash without throwing**, so `trkn` got `3/0` — the exception that was  to catch a bad value never fired;
+- the reader took only the first 16-bit number out of `trkn`/`disk` and discarded the second, reading back `3` instead of `3/13`.
+
+Both are fixed: the value is split on `/` and both numbers are written, and the reader assembles the pair back into `num/total` (or just `num` when there is no total, which is how APEv2, Vorbis and ID3 write a lone value). Two new scenarios in `tests/test_tags.py` check the result through **ffprobe**, not through our own parser — a reader and a writer that are wrong in the same way would otherwise agree with each other and pass.
+
 ## 2.3.1 — 2026-10-02
 
 ### The overall status bar kept stale numbers after the queue was emptied

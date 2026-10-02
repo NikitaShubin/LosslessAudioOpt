@@ -684,6 +684,18 @@ def gen_fixtures():
                                            ("TPE1", "Track Artist"),
                                            ("TRCK", "01")], enc=1))
 
+    # pair_slash.wav: то же, но track и disc в форме «номер/всего» (TRCK=3/13,
+    # TPOS=1/2). M4A хранит их бинарной парой, и именно эта форма терялась в
+    # обе стороны: писатель клал в trkn только номер (std::stoul молча
+    # останавливался на «/»), а читатель выбрасывал «всего». Регрессия
+    # «поле track/disc не сохранилось» на каждом альбоме с такой разметкой.
+    pair_slash = os.path.join(FIX, "pair_slash.wav")
+    ffmpeg(["-i", mix, "-c:a", "pcm_s16le", pair_slash], cwd=FIX)
+    strip_wav_list(pair_slash)
+    inject_id3_chunk(pair_slash, build_id3v2([("TIT2", "Pair Slash"),
+                                               ("TRCK", "3/13"),
+                                               ("TPOS", "1/2")], enc=1))
+
     ffmpeg(["-i", mix, "-c:a", "libmp3lame", "-write_id3v1", "0",
             "-metadata", "title=MP3 Title",
             "-metadata", "artist=MP3 Artist",
@@ -776,6 +788,32 @@ def o2b_flac_to_alac_track_zero(d):
     assert m4a, "в m4a нет тегов"
     assert_subset({"title": ["Track Zero"], "artist": ["Track Artist"],
                    "track": ["1"]}, m4a["fields"], "O2B m4a")
+
+
+def o2c_slash_pair_survives_alac(d):
+    """track=3/13, disc=1/2 -> alac: «всего» не теряется ни при записи, ни при чтении."""
+    cp(os.path.join(FIX, "pair_slash.wav"), os.path.join(d, "src.wav"))
+    rc, out = run_tool(["optimize", d, "--formats=alac", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O2C", out)
+    assert os.path.exists(os.path.join(d, "src.m4a")), "нет src.m4a"
+    m4a = read_m4a(os.path.join(d, "src.m4a"))
+    assert m4a, "в m4a нет тегов"
+    # ffprobe — сторонний читатель, а не наш парсер: если бы писатель и читатель
+    # ошибались одинаково, проверка на себе бы это пропустила.
+    assert_subset({"track": ["3/13"], "disc": ["1/2"]}, m4a["fields"], "O2C m4a")
+
+
+def o2c2_slash_pair_survives_wavpack(d):
+    """Та же форма в wv: APEv2 хранит track текстом, там ничего не теряется —
+    контроль, что правка не сломала путь, который раньше был исправен."""
+    cp(os.path.join(FIX, "pair_slash.wav"), os.path.join(d, "src.wav"))
+    rc, out = run_tool(["optimize", d, "--formats=wavpack", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O2C2", out)
+    wv = read_apev2(os.path.join(d, "src.wv"))
+    assert wv, "в wv нет APEv2"
+    assert_subset({"track": ["3/13"], "disc": ["1/2"]}, wv["fields"], "O2C2 wv")
 
 
 def o3_wv_to_flac(d):
@@ -1123,6 +1161,8 @@ SCENARIOS = [
     ("o1", "O1  flac(vorbis) -> tta: ID3v2 embed, без sidecar, все поля+ReplayGain", o1_flac_to_tta),
     ("o2", "O2  flac(vorbis) -> wavpack: APEv2 embed, без sidecar", o2_flac_to_wavpack),
     ("o2b", "O2B wav(id3v2) -> alac(m4a): track «01» (ведущий ноль) проходит валидацию, в m4a читается как «1» (trkn бинарный)", o2b_flac_to_alac_track_zero),
+    ("o2c", "O2C track=3/13, disc=1/2 -> alac(m4a): «номер/всего» не теряется", o2c_slash_pair_survives_alac),
+    ("o2c2", "O2C2 та же форма -> wavpack: APEv2 хранит текстом, контроль", o2c2_slash_pair_survives_wavpack),
     ("o3", "O3  wv(apev2) -> flac: vorbis embed, без sidecar", o3_wv_to_flac),
     ("o4", "O4  mp3(id3v2) -> flac (restore, lossy): vorbis embed", o4_mp3_to_flac),
     ("o5", "O5  wav(riff+id3v2 конфликт) -> flac: всё в sidecar, embed нет", o5_wav_conflict_to_flac),

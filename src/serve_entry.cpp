@@ -116,7 +116,7 @@ void print_help() {
     out::print("\n");
     out::print("Session options (optimization defaults):\n");
     out::print("  --jobs N|M.M          thread count or core multiplier (default 2.0)\n");
-    out::print("  --verify MODE         all|winner (default winner)\n");
+    out::print("  --verify MODE         all|winner (default all)\n");
     out::print("  --ignore-errors       do not abort a file because of a variant failure: skip\n"
                 "                        the variant, and if the winner fails verification —\n"
                 "                        fall through to the next candidates (default: off,\n"
@@ -176,9 +176,15 @@ int run_daemon(const std::vector<std::string>& args) {
     std::string restore_to = "flac";  // целевой формат режима восстановления
     optimize::Options opts;
     opts.mode = optimize::SessionMode::Daemon;
-    // Демон по умолчанию валидирует только победителя (winner): валидация
-    // промежуточных вариантов была прерогативой CLI.
-    opts.verify = optimize::Verify::Winner;
+    // Демон по умолчанию нетерпим к ошибкам, как и CLI: проверяются все
+    // варианты (verify=all), и сбой любого из них прерывает файл. Прежний
+    // дефолт winner проверял только победителя, а сбой промежуточного варианта
+    // просто исключал его из отбора — на прогоне реальной библиотеки это
+    // выглядело как «файл обработан», хотя половина кандидатов отвалилась по
+    // причинам, которые никто не видел. Тихая потеря кандидата в конкурсе тем
+    // хуже, что следующий формат может оказаться больше победителя и быть
+    // отдан неправильно. --verify=winner возвращает быстрый режим.
+    opts.verify = optimize::Verify::All;
 
     for (size_t i = 1; i < args.size(); i++) {
         const std::string& a = args[i];

@@ -33,6 +33,21 @@ std::vector<M4aBox> m4a_children(const uint8_t* d, uint64_t start, uint64_t end)
     return out;
 }
 
+// Числовой тег MP4 приходит парой 16-битных чисел: номер и «всего». Раньше
+// читался только номер (rd16be(val+2)), а «всего» выбрасывалось, поэтому из
+// "3/13" получалось "3" — и сверка тегов объявляла поле не выжившим, хотя
+// файл был записан правильно. Теперь пара собирается обратно в исходную
+// форму; если «всего» нет (ноль), остаётся только номер, как его пишут APEv2,
+// Vorbis и ID3 для одиночного значения.
+static std::string mp4_pair(const uint8_t* val, uint32_t len) {
+    unsigned num = rd16be(val + 2);
+    unsigned total = len >= 6 ? rd16be(val + 4) : 0;
+    char buf[24];
+    if (total) snprintf(buf, sizeof(buf), "%u/%u", num, total);
+    else snprintf(buf, sizeof(buf), "%u", num);
+    return buf;
+}
+
 // Парсит картинки из moov>udta>meta>ilst (covr) и теги.
 void mp4_ilst_parse(const uint8_t* d, size_t n, Group& g) {
     size_t moov = 0;
@@ -67,14 +82,10 @@ void mp4_ilst_parse(const uint8_t* d, size_t n, Group& g) {
                             pic.mime = flags == 13 ? "image/jpeg" : "image/png";
                             pic.data.assign(val, val + len);
                             g.pictures.push_back(std::move(pic));
-                        } else if (key == "trkn" && len >= 8) {
-                            char buf[16];
-                            snprintf(buf, sizeof(buf), "%u", rd16be(val + 2));
-                            g.fields["track"].push_back(buf);
+                        } else if (key == "trkn" && len >= 6) {
+                            g_put(g, "track", mp4_pair(val, len));
                         } else if (key == "disk" && len >= 6) {
-                            char buf[16];
-                            snprintf(buf, sizeof(buf), "%u", rd16be(val + 2));
-                            g.fields["disc"].push_back(buf);
+                            g_put(g, "disc", mp4_pair(val, len));
                         } else if (len > 0) {
                             std::string s((const char*)val, len);
                             if (key == "----") {

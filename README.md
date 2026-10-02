@@ -217,7 +217,9 @@ llao serve [options]
 Session options (optimization defaults):
 
 - `--jobs N|M.F` — thread count or core multiplier (2.0 by default);
-- `--verify all|winner|none` — candidate verification mode (winner by default);
+- `--verify all|winner|none` — candidate verification mode (**all** by default);
+  `winner` checks only the winning candidate, which is faster but lets a failing
+  intermediate candidate disappear from the contest unnoticed;
 - `--dry-run` — do not write the result;
 - `--no-download` — do not download codecs (the startup gate only checks);
 - `--no-stats` — do not accumulate `stats.json`;

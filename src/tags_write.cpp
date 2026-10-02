@@ -1,5 +1,6 @@
 #include "tags_internal.h"
 
+#include <cctype>
 #include <cstring>
 
 #include "i18n.h"
@@ -10,6 +11,28 @@ namespace tags {
 // ---------------------------------------------------------------------------
 // Запись встроенных тегов (одна группа)
 // ---------------------------------------------------------------------------
+
+bool parse_pair(const std::string& val, unsigned* num, unsigned* total) {
+    auto digits = [](const std::string& s, size_t from, size_t to, unsigned* out) -> bool {
+        if (from >= to) return false;
+        unsigned v = 0;
+        for (size_t i = from; i < to; i++) {
+            if (!isdigit((unsigned char)s[i])) return false;
+            v = v * 10 + (unsigned)(s[i] - '0');
+            if (v > 0xFFFF) v = 0xFFFF;   // в бокс MP4 входят 16 бит
+        }
+        *out = v;
+        return true;
+    };
+    std::string s = util::trim(val);
+    size_t slash = s.find('/');
+    if (slash == std::string::npos) {
+        *total = 0;
+        return digits(s, 0, s.size(), num);
+    }
+    if (slash + 1 >= s.size()) return false;
+    return digits(s, 0, slash, num) && digits(s, slash + 1, s.size(), total);
+}
 
 std::string write_group(const std::string& path, const config::Format& fmt, TagType type,
                         const Group& g) {
@@ -164,14 +187,28 @@ std::string write_group(const std::string& path, const config::Format& fmt, TagT
                                        fmt.tag_numeric_fields.end(), key) !=
                              fmt.tag_numeric_fields.end();
             if (is_binary) {
+                // Числовые поля MP4 хранятся бинарной парой: номер и «всего».
+                // Значение приходит текстом в форме "номер" или "номер/всего"
+                // (APEv2, Vorbis и ID3 пишут оба варианта), поэтому оно
+                // разбирается по '/'. Раньше здесь стоял std::stoul(val): он
+                // разбирает ведущие цифры и молча останавливается на '/',
+                // не бросая исключения, — в trkn уходил номер с нулём вместо
+                // «всего», и track вида "3/13" терял половину смысла. Исключение
+                // не спасало: stoul на "3/13" просто возвращает 3.
                 for (const auto& val : values) {
-                    unsigned n = 0;
-                    try { n = (unsigned)std::stoul(val); } catch (...) {}
-                    std::vector<uint8_t> v(8, 0);
-                    v[2] = (uint8_t)(n >> 8);
-                    v[3] = (uint8_t)n;
-                    if (key == "track") { v.resize(8); add_item("trkn", 0, v); }
-                    else if (key == "disc") { v.resize(6); add_item("disk", 0, v); }
+                    unsigned num = 0, total = 0;
+                    if (!parse_pair(val, &num, &total))
+                        return i18n::fmt("cannot parse the numeric tag '%s' = '%s' for M4A",
+                                         key.c_str(), util::one_line(val).c_str());
+                    // trkn: 2 байта reserved, по 2 байта номер/всего, 2 reserved.
+                    // disk: 2 байта reserved, по 2 байта номер/всего.
+                    const size_t box = (key == "track") ? 8 : 6;
+                    std::vector<uint8_t> v(box, 0);
+                    v[2] = (uint8_t)(num >> 8);
+                    v[3] = (uint8_t)num;
+                    v[4] = (uint8_t)(total >> 8);
+                    v[5] = (uint8_t)total;
+                    add_item(key == "track" ? "trkn" : "disk", 0, v);
                 }
             } else if (is_replaygain(key)) {
                 return i18n::str("ReplayGain is not supported in M4A (use a sidecar)");
