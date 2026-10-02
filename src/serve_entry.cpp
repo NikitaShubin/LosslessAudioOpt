@@ -201,9 +201,14 @@ int run_daemon(const std::vector<std::string>& args) {
             std::string v = next();
             opts.jobs = std::atof(v.c_str());
             opts.jobs_float = v.find('.') != std::string::npos;
-        } else if (a == "--verify") {
+        } else if (a == "--verify" || a.rfind("--verify=", 0) == 0) {
+            // Принимаются обе формы, как в CLI: `--verify winner` и
+            // `--verify=winner`. Раньше `=`-форма не распознавалась и демон
+            // падал с «unknown option» на ровно том написании, что показано в
+            // README для optimize.
             bool ok = false;
-            opts.verify = dsvc::parse_verify(next(), &ok);
+            std::string mode = (a.rfind("--verify=", 0) == 0) ? a.substr(9) : next();
+            opts.verify = dsvc::parse_verify(mode, &ok);
             if (!ok) {
                 std::fprintf(stderr, "ERROR: bad --verify (all|winner)\n");
                 return 1;

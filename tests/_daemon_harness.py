@@ -145,8 +145,15 @@ class Daemon:
         self.log = os.path.join(workdir, "daemon.log")
         self.stats_file = os.path.join(workdir, "stats.json")
         self.proc = None
+        # --verify=winner задан явно, чтобы тесты не зависели от дефолта
+        # демона. С 2.3.2 дефолт verify=all: каждый вариант декодируется и
+        # сверяется, файл идёт в разы дольше, и сценарии очереди, ждущие
+        # ухода строки из queued за 20 с, начинают срабатывать от нагрузки, а не
+        # от смысла. Эти тесты проверяют механику демона (очередь, persist,
+        # перезапуск), а не глубину сверки кандидатов; глубину проверяют
+        # test_errors.py и test_tags.py.
         self.cmd = [binary, "serve", "--port", str(self.port), "--no-auth",
-                    "--jobs", str(jobs), *extra]
+                    "--jobs", str(jobs), "--verify", "winner", *extra]
 
     def start(self, extra=(), ready="state"):
         """Поднимает процесс и ждёт готовности (state или rpc ping)."""
