@@ -102,8 +102,8 @@ void usage() {
     out::print("             [--allow-lossy]\n");
     out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
     out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
-    out::print("  stats --report=<file> writes the same ranking as a shareable text table; the\n");
-    out::print("    stats.json path can be overridden with the LLAO_STATS_FILE env var\n");
+    out::print("  stats --report=<file> writes the same ranking plus savings and size histograms as\n");
+    out::print("    a shareable text table; stats.json path can be overridden with LLAO_STATS_FILE\n");
     out::print("  optimize --verify: all = check every candidate (default); winner = check only the\n");
     out::print("    best by size; none = no verification at all. Any file error aborts the run unless\n");
     out::print("    --ignore-errors is given (then such files are skipped and the run continues).\n");

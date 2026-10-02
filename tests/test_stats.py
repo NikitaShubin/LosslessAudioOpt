@@ -26,6 +26,9 @@ id форматов, числа и проценты, локализации не
     S10 запись без winner (файл не отдан) в рейтинг не попадает
     S11 прогон optimize пишет ровно одну запись на файл и указывает победителя
     S12 lossy-исходник в рейтинг не попадает (конвертация в lossless не экономит)
+    S13 гистограмма экономии: файлы раскладываются по бинам, «вырос» отдельно
+    S14 гистограмма размеров: файлы по мощной шкале, бины не перекрываются
+    S15 гистограммы в выгрузке --report, в том числе по каждому формату
 
 Путь к базе переопределяется переменной LLAO_STATS_FILE, поэтому тест не
 трогает настоящий stats.json рядом с бинарником.
@@ -35,6 +38,7 @@ id форматов, числа и проценты, локализации не
     python3 tests/test_stats.py --keep   # не удалять scratch_stats
 """
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -108,6 +112,26 @@ RECORDS = [
 ]
 
 EXPECTED_ORDER = ["monkeys_audio", "wavpack", "flac"]
+
+
+def parse_hist(text, title):
+    """Разбирает блок гистограммы в словарь {метка бина: число файлов}."""
+    rows = {}
+    started = False
+    for ln in text.splitlines():
+        if ln.strip() == title:
+            started = True
+            continue
+        if not started:
+            continue
+        if not ln.strip():
+            break
+        m = re.match(r"^\s+(\S[^ ]*(?: [^ ]+)?)\s+(\d+)\s*(#*)\s*$", ln)
+        if m:
+            rows[m.group(1).strip()] = int(m.group(2))
+        elif rows:
+            break
+    return rows
 
 
 def expected_savings(fmt):
@@ -398,6 +422,95 @@ def s12_lossy_source_not_ranked():
                 "в рейтинг попал mp3-исходник:\n%s" % text
 
 
+def s13_savings_histogram():
+    """Экономия раскладывается по бинам; выросшие файлы — отдельный бин."""
+    # 15% → 10-20%, 35% → 30-40%, 95% → 90-100%, 120% → «grew».
+    recs = [
+        record("/music/a.flac", 100, "flac", "8", 85, extra=[cand("flac", "8", 85)]),
+        record("/music/b.flac", 100, "flac", "8", 65, extra=[cand("flac", "8", 65)]),
+        record("/music/c.flac", 100, "flac", "8", 5, extra=[cand("flac", "8", 5)]),
+        record("/music/d.flac", 100, "flac", "8", 120,
+               extra=[cand("flac", "8", 120)]),
+    ]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r13.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    assert "Savings distribution (files won)" in text, "нет гистограммы экономии:\n%s" % text
+    rows = parse_hist(text, "Savings distribution (files won):")
+    assert rows["10-20%"] == 1, "15%% должен лежать в 10-20%%: %r\n%s" % (rows, text)
+    assert rows["30-40%"] == 1, "35%% должен лежать в 30-40%%: %r\n%s" % (rows, text)
+    assert rows["90-100%"] == 1, "95%% должен лежать в 90-100%%: %r\n%s" % (rows, text)
+    assert rows["grew"] == 1, "выросший файл должен быть в отдельном бине: %r\n%s" % (rows, text)
+    assert sum(rows.values()) == 4, "в бинах не все файлы: %r" % rows
+    # Без локализации: отчёт идёт автору кодека.
+    assert not any(ord(ch) > 0x400 and ord(ch) < 0x500 for ch in text), \
+        "в гистограмме неожиданная кириллица:\n%s" % text
+
+
+def s14_size_histogram():
+    """Размеры по мощной шкале; границы бинов не перекрываются."""
+    recs = [
+        record("/music/a.flac", 512 * 1024, "flac", "8", 100,
+               extra=[cand("flac", "8", 100)]),
+        record("/music/b.flac", 3 * MB, "flac", "8", 100, extra=[cand("flac", "8", 100)]),
+        record("/music/c.flac", 20 * MB, "flac", "8", 100,
+               extra=[cand("flac", "8", 100)]),
+        record("/music/d.flac", 500 * MB, "flac", "8", 100,
+               extra=[cand("flac", "8", 100)]),
+    ]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r14.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    assert "Source size distribution" in text, "нет гистограммы размеров:\n%s" % text
+    rows = parse_hist(text, "Source size distribution:")
+    assert rows["<1 MB"] == 1, "0.5 МБ в первый бин: %r" % rows
+    assert rows["2-3 MB"] == 1, "3 МБ в бин 2-3: %r" % rows
+    assert rows["16-31 MB"] == 1, "20 МБ в бин 16-31: %r" % rows
+    assert rows["64+ MB"] == 1, "500 МБ в открытый бин: %r" % rows
+    assert sum(rows.values()) == 4, "в бинах не все файлы: %r" % rows
+    # Шкала удваивается без разрыва и без наложения: следующий бин начинается там,
+    # где предыдущий кончается. Раньше тут был бин «64-127 MB», накрывавшийся
+    # следующим, и файлы от 100 МБ попадали в два бина сразу.
+    # Шкала удваивается без разрыва и без наложения. Раньше тут был бин
+    # «64-127 MB», накрывавшийся следующим, и файлы от 100 МБ попадали в два
+    # бина сразу. Сверяем весь набор меток, а не наличие отдельных.
+    expect_labels = ["<1 MB", "2-3 MB", "4-7 MB", "8-15 MB", "16-31 MB",
+                     "32-63 MB", "64+ MB"]
+    assert list(rows) == expect_labels, \
+        "набор бинов размеров разошёлся: %r" % (list(rows),)
+
+
+def s15_histograms_in_report_per_format():
+    """В выгрузке гистограммы по всем файлам и отдельно по каждому формату."""
+    recs = [
+        record("/music/a.flac", 10 * MB, "flac", "8", 2000000,
+               extra=[cand("flac", "8", 2000000)]),
+        record("/music/b.wav", 10 * MB, "wavpack", "x1", 8000000,
+               extra=[cand("wavpack", "x1", 8000000)]),
+    ]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r15.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    assert "Savings distribution: flac" in text, "нет гистограммы по flac:\n%s" % text
+    assert "Savings distribution: wavpack" in text, \
+        "нет гистограммы по wavpack:\n%s" % text
+    # 2.0 МБ из 10 = 80%, 8.0 МБ из 10 = 20%. Граница бина включается в верхний:
+    # ровно 80% — это «80-90», а не «70-80».
+    fl = parse_hist(text, "Savings distribution: flac")
+    wv = parse_hist(text, "Savings distribution: wavpack")
+    assert fl["80-90%"] == 1, "flac: ровно 80%% должен лежать в 80-90%%: %r" % fl
+    assert fl["70-80%"] == 0, "flac: ровно 80%% не должен попасть в 70-80%%: %r" % fl
+    assert wv["20-30%"] == 1, "wavpack: ровно 20%% должен лежать в 20-30%%: %r" % wv
+    assert sum(fl.values()) == 1 and sum(wv.values()) == 1, \
+        "по формату должен быть ровно один файл: %r %r" % (fl, wv)
+
+
 SCENARIOS = [
     ("S1", "S1  пустая база -> rc=0, «нет статистики»", s1_empty_base),
     ("S2", "S2  сводка: записи, статусы, порядок рейтинга", s2_summary_with_records),
@@ -411,6 +524,10 @@ SCENARIOS = [
     ("S10", "S10 файл без победителя не попадает в рейтинг", s10_record_without_winner_not_ranked),
     ("S11", "S11 прогон optimize: одна запись на файл", s11_optimize_writes_one_record_per_file),
     ("S12", "S12 lossy-исходник не попадает в рейтинг", s12_lossy_source_not_ranked),
+    ("S13", "S13 гистограмма экономии по бинам", s13_savings_histogram),
+    ("S14", "S14 гистограмма размеров, бины не перекрываются", s14_size_histogram),
+    ("S15", "S15 гистограммы в отчёте, в том числе по формату",
+     s15_histograms_in_report_per_format),
 ]
 
 

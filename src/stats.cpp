@@ -284,6 +284,14 @@ void print_summary(const std::vector<json::json>& items) {
                        r.savings * 100.0, r.files, r.total_in / 1048576.0,
                        r.total_out / 1048576.0, i18n::str("MB").c_str());
         }
+
+        // Гистограммы по всем файлам: распределение экономии показывает, насколько
+        // однороден материал, а по размерам — чем он вообще является. Рейтинг выше
+        // даёт среднее по формату, здесь видно, из чего оно сложилось.
+        out::print("\n%s\n", i18n::str("Savings distribution (files won):").c_str());
+        out::print("%s", histogram_text("", savings_histogram(items)).c_str());
+        out::print("\n%s\n", i18n::str("Source size distribution:").c_str());
+        out::print("%s", histogram_text("", size_histogram(items)).c_str());
     }
 }
 
@@ -323,6 +331,128 @@ std::string build_report(const std::vector<json::json>& items) {
                      rk.total_in / 1048576.0, rk.total_out / 1048576.0);
             r += buf;
         }
+
+        // Гистограммы идут в отчёт без локализации — там только числа, метки
+        // бинов и id форматов, чтобы выгрузку можно было отдать как есть.
+        r += "\n";
+        r += histogram_text("Savings distribution (files won):", savings_histogram(items));
+        r += "\n";
+        r += histogram_text("Source size distribution:", size_histogram(items));
+
+        // По каждому формату — отдельно, чтобы видеть, у кого разброс узкий, а
+        // у кого один выигранный файл вытягивает среднее.
+        std::map<std::string, uint64_t> files_by_fmt;
+        for (const auto& rk : ranks) files_by_fmt[rk.format] += (uint64_t)rk.files;
+        for (const auto& [fmt, _n] : files_by_fmt) {
+            r += "\n";
+            r += histogram_text("Savings distribution: " + fmt,
+                                savings_histogram(items, fmt));
+        }
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Гистограммы
+// ---------------------------------------------------------------------------
+
+// Проходит по записям, отдавая выигранный cost. Фильтры те же, что и у
+// рейтинга: без lossy-исходников и без файлов, которые не были отданы.
+template <typename F>
+static void for_each_won(const std::vector<json::json>& items, const std::string& fmt,
+                         F fn) {
+    for (const auto& it : items) {
+        Record r;
+        if (!from_json(it, &r)) continue;
+        if (!r.has_winner || r.winner_cost == 0 || r.source_size == 0) continue;
+        if (lossy_source(r)) continue;
+        if (!fmt.empty() && r.winner_format != fmt) continue;
+        fn(r);
+    }
+}
+
+// Границы бинов экономии. Последний бин — «вырос»: провал сжатия не должен
+// теряться среди нормальных значений, у него экономия отрицательная.
+static const double kSavingsEdges[] = {0.10, 0.20, 0.30, 0.40, 0.50,
+                                       0.60, 0.70, 0.80, 0.90};
+
+std::vector<HistBin> savings_histogram(const std::vector<json::json>& items,
+                                       const std::string& fmt) {
+    std::vector<HistBin> bins;
+    double prev = 0.0;
+    for (double e : kSavingsEdges) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%2.0f-%2.0f%%", prev * 100, e * 100);
+        bins.push_back({buf, 0});
+        prev = e;
+    }
+    bins.push_back({"90-100%", 0});
+    bins.push_back({"grew", 0});
+
+    for_each_won(items, fmt, [&](const Record& r) {
+        double s = 1.0 - (double)r.winner_cost / (double)r.source_size;
+        if (s < 0.0) {
+            ++bins.back().count;
+            return;
+        }
+        if (s >= 1.0) s = 0.999999;
+        size_t idx = 0;
+        while (idx < sizeof(kSavingsEdges) / sizeof(kSavingsEdges[0]) &&
+               s >= kSavingsEdges[idx])
+            ++idx;
+        ++bins[idx].count;
+    });
+    return bins;
+}
+
+std::vector<HistBin> size_histogram(const std::vector<json::json>& items,
+                                    const std::string& fmt) {
+    // Мощная шкала: 1 МБ, потом 2-4, 4-8, ... Для музыкальной библиотеки это
+    // читаемее, чем равномерные килобайты: файлы разбросаны по порядкам.
+    std::vector<HistBin> bins;
+    const uint64_t mb = 1048576;
+    bins.push_back({"<1 MB", 0});
+    // Цикл до 32: последний закрытый бин 32-63 МБ, дальше открытый «64+ МБ».
+    for (uint64_t lo = 2; lo <= 32; lo *= 2) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%llu-%llu MB", (unsigned long long)lo,
+                 (unsigned long long)(lo * 2 - 1));
+        bins.push_back({buf, 0});
+    }
+    // Последний бин открытый: «64+ MB», а не «64-127» — иначе он накрывается
+    // следующим и файлы от 100 МБ попадают в два бина сразу.
+    bins.push_back({"64+ MB", 0});
+
+    for_each_won(items, fmt, [&](const Record& r) {
+        uint64_t s = r.source_size / mb;
+        size_t idx = 0;
+        if (s >= 1) {
+            idx = 1;
+            for (uint64_t lo = 2; lo <= 32 && s >= lo * 2; lo *= 2) ++idx;
+            if (idx >= bins.size()) idx = bins.size() - 1;
+        }
+        ++bins[idx].count;
+    });
+    return bins;
+}
+
+std::string histogram_text(const std::string& title, const std::vector<HistBin>& bins) {
+    // Пустой заголовок — вызывающий уже напечатал свой (в терминале он локализован).
+    std::string r = title.empty() ? std::string() : title + "\n";
+    int maxc = 0;
+    for (const auto& b : bins) maxc = std::max(maxc, b.count);
+    if (maxc == 0) {
+        r += "  (no files)\n";
+        return r;
+    }
+    for (const auto& b : bins) {
+        // Ширина столбика нормирована на максимальный бин, иначе редкий класс
+        // вроде «вырос» не виден вовсе.
+        int n = maxc > 0 ? (int)((int64_t)b.count * 50 / maxc) : 0;
+        char buf[160];
+        snprintf(buf, sizeof(buf), "  %-10s %7d  %s\n", b.label.c_str(), b.count,
+                 std::string(n, '#').c_str());
+        r += buf;
     }
     return r;
 }

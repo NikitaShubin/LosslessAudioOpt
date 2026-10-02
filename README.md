@@ -118,9 +118,10 @@ llao.exe variants                             # list formats and compression var
 ```
 
 `llao.exe stats` prints the accumulated statistics: how many files were processed
-and replaced, and the format ranking by average savings **on the files each format
-won**. `llao.exe stats --report=<file>` writes the same ranking as a plain text
-table with no localization — a compact, shareable summary of how each codec
+and replaced, the format ranking by average savings **on the files each format
+won**, and two histograms — the savings distribution and the source size
+distribution. `llao.exe stats --report=<file>` writes the same thing as a plain
+text table with no localization — a compact, shareable summary of how each codec
 performs on your material. The `stats.json` path can be overridden with the
 `LLAO_STATS_FILE` environment variable.
 
@@ -128,6 +129,9 @@ One record in `stats.json` is one processed file: its source properties, every
 candidate that was tried (size, sidecar, timings, verification mode, error), and
 the winner. Since the whole run is recorded, any figure can be derived later from
 the same base instead of being frozen at the moment it was first computed.
+
+The exported report also carries a savings histogram per format, so a format with
+one lucky file does not look like a consistently better one.
 
 `--jobs=N` — an exact number of parallel processes; `--jobs=M.F` — a multiplier of
 the available cores (e.g. `--jobs=1.5` on 16 cores gives 24 processes). The default

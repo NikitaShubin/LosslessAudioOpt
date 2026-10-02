@@ -71,6 +71,28 @@ bool append_all(const std::vector<nlohmann::json>& items);
 // Краткая сводка накопленной статистики (для `llao.exe stats`).
 void print_summary(const std::vector<nlohmann::json>& items);
 
+// Один столбик гистограммы: метка бина и сколько файлов в него попало.
+struct HistBin {
+    std::string label;
+    int count = 0;
+};
+
+// Распределение экономии по бинам. Экономия файла = 1 - cost/source_size;
+// файлы, которые не были отданы, и lossy-исходники не учитываются (иначе в
+// нулевом бине копятся ошибки кодеков, а не результат).
+std::vector<HistBin> savings_histogram(const std::vector<nlohmann::json>& items,
+                                       const std::string& fmt = std::string());
+
+// Распределение исходных размеров по бинам. Бины кратны 2, начиная с 1 МБ:
+// для музыкальной библиотеки это читаемее, чем равномерная шкала в килобайтах.
+std::vector<HistBin> size_histogram(const std::vector<nlohmann::json>& items,
+                                    const std::string& fmt = std::string());
+
+// Текст гистограммы в ASCII-столбиках, нормированных на максимальный бин.
+// Без локализации, как и отчёт: тот же текст предназначен для передачи автору
+// кодека.
+std::string histogram_text(const std::string& title, const std::vector<HistBin>& bins);
+
 // Текст файла-отчёта (для `llao.exe stats --report=<file>`). Пустая строка,
 // если записей нет: отчёт без данных бесполезен. Формат табличный и без
 // локализации — в нём только id форматов, числа и проценты, — чтобы его можно
