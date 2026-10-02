@@ -50,7 +50,20 @@ BIN = os.path.join(ROOT, "bin")
 KEEP = "--keep" in sys.argv
 FORCE_BUILD = "--build" in sys.argv
 
-NATIVE_LINUX = os.path.isfile(LLAO_NATIVE) and not os.path.isfile(LLAO_EXE)
+# Тестируем то, что собрано последним: нативный linux-бинарник приоритетнее
+# windows-сборки. Раньше выбор был «llao.exe есть — значит wine», и устаревший
+# llao.exe (собранный до правок) молча перебивал свежий llao-linux: тесты про
+# новую схему статистики падали на старом коде, а S11 насчитывал 152 записи
+# вместо двух.
+def _pick_native():
+    if not os.path.isfile(LLAO_NATIVE):
+        return False
+    if not os.path.isfile(LLAO_EXE):
+        return True
+    return os.path.getmtime(LLAO_NATIVE) >= os.path.getmtime(LLAO_EXE)
+
+
+NATIVE_LINUX = _pick_native()
 LLAO = LLAO_NATIVE if NATIVE_LINUX else LLAO_EXE
 
 

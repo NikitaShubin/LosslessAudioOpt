@@ -117,12 +117,17 @@ llao.exe stats [--report=<file>]               # show accumulated statistics
 llao.exe variants                             # list formats and compression variants
 ```
 
-`llao.exe stats` prints the accumulated statistics: how many candidates each format
-produced, how many files were replaced, and the format ranking by average savings
-over successful candidates. `llao.exe stats --report=<file>` writes the same
-ranking as a plain text table with no localization — a compact, shareable summary
-of how each codec performs on your material. The `stats.json` path can be
-overridden with the `LLAO_STATS_FILE` environment variable.
+`llao.exe stats` prints the accumulated statistics: how many files were processed
+and replaced, and the format ranking by average savings **on the files each format
+won**. `llao.exe stats --report=<file>` writes the same ranking as a plain text
+table with no localization — a compact, shareable summary of how each codec
+performs on your material. The `stats.json` path can be overridden with the
+`LLAO_STATS_FILE` environment variable.
+
+One record in `stats.json` is one processed file: its source properties, every
+candidate that was tried (size, sidecar, timings, verification mode, error), and
+the winner. Since the whole run is recorded, any figure can be derived later from
+the same base instead of being frozen at the moment it was first computed.
 
 `--jobs=N` — an exact number of parallel processes; `--jobs=M.F` — a multiplier of
 the available cores (e.g. `--jobs=1.5` on 16 cores gives 24 processes). The default
@@ -352,8 +357,8 @@ honestly report unfinished work instead of showing a false "done".
    - the winner = the candidate of minimal size.
 4. The winner replaces the source (with the correct extension), a `.tags.zip`
    sidecar is placed next to it if needed.
-5. Every candidate feeds the local `stats.json` statistics — they determine the
-   search order in subsequent runs.
+5. The file is written to the local `stats.json` statistics with all of its
+   candidates — they determine the search order in subsequent runs.
 6. Everything is logged and summarized into a report: a format table, savings,
    exclusion reasons.
 

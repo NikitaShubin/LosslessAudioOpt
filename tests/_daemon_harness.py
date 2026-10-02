@@ -143,6 +143,7 @@ class Daemon:
         self.port = free_port()
         self.disc = os.path.join(workdir, "daemon.json")
         self.log = os.path.join(workdir, "daemon.log")
+        self.stats_file = os.path.join(workdir, "stats.json")
         self.proc = None
         self.cmd = [binary, "serve", "--port", str(self.port), "--no-auth",
                     "--jobs", str(jobs), *extra]
@@ -151,9 +152,14 @@ class Daemon:
         """Поднимает процесс и ждёт готовности (state или rpc ping)."""
         cmd = list(self.cmd) + list(extra)
         with open(self.log, "w") as log:
+            # Статистика демона пишется рядом с бинарником. Без переопределения
+            # каждый интеграционный тест дописывал в боевой stats.json пользователя
+            # записи о временных файлах в /tmp — на деле их набралось 39 960 из
+            # 42 200, то есть почти вся база состояла из мусора тестов.
             self.proc = subprocess.Popen(
                 cmd, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT,
-                env={**os.environ, "LLAO_DISCOVERY": self.disc})
+                env={**os.environ, "LLAO_DISCOVERY": self.disc,
+                     "LLAO_STATS_FILE": self.stats_file})
         _ALIVE.append(self)
         # Стартовый гейт кодеков (cli_check через wine на Linux) может занимать
         # заметно больше 15 с — особенно когда префикс только что разогревался.

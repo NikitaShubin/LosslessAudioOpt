@@ -179,7 +179,6 @@ void Runner::count_error_locked(FileJob& j) {
 // ---------------------------------------------------------------------------
 
 void Runner::report_error_before_abort(FileJob& j, const std::string& verr) {
-    std::vector<nlohmann::json> records;
     {
         std::lock_guard<std::mutex> jl(*j.m);
         j.summary.path = j.path;
@@ -195,9 +194,40 @@ void Runner::report_error_before_abort(FileJob& j, const std::string& verr) {
             error_line(j, reason);
             j.error_reported = true;
         }
-        records = std::move(j.stat_records);
+        write_stats(j, "error", j.summary.detail);
     }
-    if (!opts->no_stats && !records.empty()) stats::append_all(records);
+}
+
+// Сборка одной записи базы по файлу. Кандидаты копируются целиком: в базу
+// попадает всё, что известно про файл и про каждого кандидата, чтобы любую
+// статистику можно было вывести позже, а не пересчитывать по мелочи.
+void Runner::write_stats(FileJob& j, const std::string& status, const std::string& detail) {
+    if (opts->no_stats) return;
+    stats::Record rec;
+    rec.ts = stats::now_iso();
+    rec.run_id = stats::run_id();
+    rec.file = j.path;
+    rec.status = status;
+    rec.detail = util::one_line(detail);
+    rec.source_format = j.probe.format_name;
+    rec.codec_name = j.probe.codec_name;
+    rec.source_size = j.probe.size;
+    rec.channels = j.probe.channels;
+    rec.sample_rate = j.probe.sample_rate;
+    rec.bits = j.bits;
+    rec.duration = j.probe.duration;
+    rec.has_tags = j.ts.present;
+    rec.candidates = j.stat_candidates;
+    if (j.best_valid && status == "ok") {
+        rec.has_winner = true;
+        rec.winner_format = j.best.format;
+        rec.winner_variant = j.best.variant;
+        rec.winner_cost = j.best.cost;
+    }
+    // Ошибок не было, но и отдавать нечего (всё крупнее исходника, кандидатов
+    // не осталось) — запись всё равно нужна: она объясняет, почему файл цел.
+    if (rec.candidates.empty() && status == "ok") return;
+    stats::append_all({stats::to_json(rec)});
 }
 
 void Runner::error_line(FileJob& j, const std::string& reason) {
@@ -613,33 +643,25 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
     std::string candidate = j.session->candidate_path(f.id, v.id, f.extension);
     util::remove_file(candidate);
 
-    nlohmann::json rec = {
-        {"file", j.path},
-        {"source_format", j.probe.format_name},
-        {"codec_name", j.probe.codec_name},
-        {"source_size", j.probe.size},
-        {"channels", j.probe.channels},
-        {"sample_rate", j.probe.sample_rate},
-        {"bits", j.bits},
-        {"duration", j.probe.duration},
-        {"format", f.id},
-        {"variant", v.id},
-        {"task", task_idx},
-        {"verify", verify_name(opts.verify)},
-        {"prep_wall_ms", j.prep_wall_ms},
-        {"decode_wall_ms", j.decode_wall_ms},
-    };
+    optimize::Candidate rec;
+    rec.format = f.id;
+    rec.variant = v.id;
+    rec.order = task_idx;  // детерминированный порядок == индекс задачи
+    rec.task = task_idx;
+    rec.verify = verify_name(opts.verify);
+    rec.prep_wall_ms = j.prep_wall_ms;
+    rec.decode_wall_ms = j.decode_wall_ms;
 
     auto record_error = [&](const std::string& err) {
         std::lock_guard<std::mutex> lk(*j.m);
         j.failures.push_back(f.id + "/" + v.id + ": " + err);
         j.variant_errors++;
-        rec["status"] = "error";
-        rec["error"] = err;
-        rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
-        rec["wall_ms"] = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - wall0)
-                             .count();
+        rec.status = "error";
+        rec.error = err;
+        rec.cpu_ms = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
+        rec.wall_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - wall0)
+                          .count();
         if (logger) {
             logger->event({{"type", "candidate"},
                            {"file", j.path},
@@ -647,10 +669,10 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
                            {"variant", v.id},
                            {"status", "error"},
                            {"error", err},
-                           {"cpu_ms", rec["cpu_ms"]},
-                           {"wall_ms", rec["wall_ms"]}});
+                           {"cpu_ms", rec.cpu_ms},
+                           {"wall_ms", rec.wall_ms}});
         }
-        j.stat_records.push_back(std::move(rec));
+        j.stat_candidates.push_back(rec);
     };
 
     proc::OutputMonitor mon;
@@ -761,15 +783,15 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
         }
     }
 
-    rec["result_size"] = cand.size;
-    rec["sidecar_size"] = cand.sidecar;
-    rec["cost"] = cand.cost;
-    rec["has_tags"] = cand.has_tags;
-    rec["status"] = "ok";
-    rec["cpu_ms"] = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
-    rec["wall_ms"] = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
-                         std::chrono::steady_clock::now() - wall0)
-                         .count();
+    rec.size = cand.size;
+    rec.sidecar = cand.sidecar;
+    rec.cost = cand.cost;
+    rec.has_tags = cand.has_tags;
+    rec.status = "ok";
+    rec.cpu_ms = proc::child_cpu_ms() + proc::thread_cpu_ms() - cpu0;
+    rec.wall_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - wall0)
+                      .count();
     if (logger) {
         logger->event({{"type", "candidate"},
                        {"file", j.path},
@@ -779,8 +801,8 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
                        {"size", cand.size},
                        {"sidecar", cand.sidecar},
 {"cost", cand.cost},
-                        {"cpu_ms", rec["cpu_ms"]},
-                        {"wall_ms", rec["wall_ms"]}});
+                        {"cpu_ms", rec.cpu_ms},
+                        {"wall_ms", rec.wall_ms}});
     }
 
     {
@@ -791,7 +813,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
             j.best_order = cand.order;
             j.best_valid = true;
             j.any_passed = true;
-            j.stat_records.push_back(std::move(rec));
+            j.stat_candidates.push_back(rec);
             return VariantOutcome::Ok;
         }
         if (cand.cost >= j.probe.size) {
@@ -799,7 +821,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
             if (!keep_for_target) {
                 util::remove_file(candidate);
                 j.any_passed = true;
-                j.stat_records.push_back(std::move(rec));
+                j.stat_candidates.push_back(rec);
                 return VariantOutcome::Ok;
             }
         }
@@ -817,7 +839,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
             util::remove_file(candidate);
         }
         j.any_passed = true;
-        j.stat_records.push_back(std::move(rec));
+        j.stat_candidates.push_back(rec);
     }
     return VariantOutcome::Ok;
 }
@@ -832,7 +854,7 @@ VariantOutcome Runner::run_variant(FileJob& j, size_t task_idx, bool force_best)
 // кандидат: предыдущий удаляется при переходе к следующему.
 // ---------------------------------------------------------------------------
 bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
-                                std::vector<nlohmann::json>& records,
+                                std::vector<optimize::Candidate>& candidates,
                                 std::string& reason) {
     struct Retry {
         size_t task = 0;
@@ -840,15 +862,12 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
         std::string format;
         std::string variant;
     };
-    // Список берём из локальных записей прогона: он есть всегда, независимо от
-    // --no-stats, в отличие от stats.json.
+    // Список берём из локальных кандидатов прогона: он есть всегда, независимо
+    // от --no-stats, в отличие от stats.json.
     std::vector<Retry> todo;
-    for (const auto& r : records) {
-        if (r.value("status", std::string()) != "ok") continue;
-        if (!r.contains("task") || !r.contains("cost")) continue;
-        todo.push_back({r["task"].get<size_t>(), r["cost"].get<uint64_t>(),
-                        r.value("format", std::string()),
-                        r.value("variant", std::string())});
+    for (const auto& c : candidates) {
+        if (c.status != "ok") continue;
+        todo.push_back({c.task, c.cost, c.format, c.variant});
     }
     std::sort(todo.begin(), todo.end(), [](const Retry& a, const Retry& b) {
         if (a.cost != b.cost) return a.cost < b.cost;
@@ -900,12 +919,12 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
             // Перекодирование не удалось: исходная запись «ok» в stats больше не
             // соответствует reality (файла кандидата на диске уже нет), поэтому
             // честно переводим её в error, иначе прогон выглядит успешным.
-            for (auto& r : records) {
-                if (r.value("task", size_t(SIZE_MAX)) != c.task) continue;
-                if (r.value("status", std::string()) != "ok") continue;
-                r["status"] = "error";
-                r["error"] = verr.empty() ? i18n::str("re-encode failed") : verr;
-                r["retry"] = true;
+            for (auto& cand_rec : candidates) {
+                if (cand_rec.task != c.task) continue;
+                if (cand_rec.status != "ok") continue;
+                cand_rec.status = "error";
+                cand_rec.error = verr.empty() ? i18n::str("re-encode failed") : verr;
+                cand_rec.retry = true;
                 break;
             }
             obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
@@ -927,29 +946,47 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
             proc::aborted())
             return false;
 
-        nlohmann::json vf;
-        for (auto& r : records) {
-            if (r.value("task", size_t(SIZE_MAX)) == c.task) {
-                vf = r;
+        // Кандидат уже лежит в списке прогона: правим его на месте, а не
+        // добавляем вторую запись. Раньше здесь дописывалась копия
+        // (verify_fail поверх ok), из-за чего на файл появлялось две записи.
+        optimize::Candidate* vc = nullptr;
+        for (auto& cand_rec : candidates) {
+            if (cand_rec.task == c.task) {
+                vc = &cand_rec;
                 break;
             }
         }
-        if (vf.is_null()) {
-            vf = {{"file", j.path}, {"format", c.format}, {"variant", c.variant},
-                  {"task", c.task}, {"source_size", j.probe.size}};
+        if (vc == nullptr) {
+            // Кандидата нет в списке только если его запись не дошла до базы
+            // (--no-stats не влияет на список, но отказ после prep — может).
+            optimize::Candidate fresh;
+            fresh.format = c.format;
+            fresh.variant = c.variant;
+            fresh.size = j.best.size;
+            fresh.sidecar = j.best.sidecar;
+            fresh.cost = j.best.cost;
+            fresh.task = c.task;
+            fresh.status = "ok";
+            fresh.verify = verify_name(Verify::Winner);
+            fresh.prep_wall_ms = j.prep_wall_ms;
+            fresh.decode_wall_ms = j.decode_wall_ms;
+            fresh.retry = true;
+            candidates.push_back(fresh);
+            vc = &candidates.back();
         }
-        vf["verify"] = verify_name(Verify::Winner);
-        vf["retry"] = true;
-        vf["cost"] = j.best.cost;
+        vc->verify = verify_name(Verify::Winner);
+        vc->retry = true;
+        vc->cost = j.best.cost;
+        vc->size = j.best.size;
+        vc->sidecar = j.best.sidecar;
 
         if (werr.empty()) {
             // Спустились и нашли кандидата, который прошёл сверку: в stats он
             // обязан лежать как обычный успех с пометкой retry, а не как
             // verify_fail с пустой ошибкой.
-            vf["status"] = "ok";
-            vf.erase("error");
+            vc->status = "ok";
+            vc->error.clear();
             obs::sink()->task(j.idx, c.task, obs::TaskState::Ok);
-            records.push_back(std::move(vf));
             if (logger)
                 logger->event({{"type", "candidate"},
                                {"file", j.path},
@@ -962,12 +999,11 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
             reason.clear();
             return true;
         }
-        vf["status"] = "verify_fail";
-        vf["error"] = werr;
+        vc->status = "verify_fail";
+        vc->error = werr;
         obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
         notes += notes.empty() ? "" : "; ";
         notes += i18n::fmt("%s/%s: %s", c.format.c_str(), c.variant.c_str(), werr.c_str());
-        records.push_back(std::move(vf));
     }
 
     reason = notes.empty() ? i18n::str("no other candidate could be verified") : notes;
@@ -983,11 +1019,13 @@ void Runner::finalize_file(FileJob& j) {
     j.finalizing.store(true, std::memory_order_relaxed);
 
     std::unique_lock<std::mutex> lk(*j.m);
-    std::vector<nlohmann::json> records = std::move(j.stat_records);
+    std::vector<optimize::Candidate> candidates = j.stat_candidates;
+    j.stat_candidates.clear();
     if (j.cancelled) {
         j.summary.path = j.path;
         j.summary.status = "stopped";
         j.summary.detail = i18n::str("removed from queue");
+        write_stats(j, "stopped", j.summary.detail);
         discard_job_tmp(j);
         if (logger) {
             logger->event({{"type", "file_done"},
@@ -1010,10 +1048,11 @@ void Runner::finalize_file(FileJob& j) {
                                  : j.crash_reason;
         j.summary.detail = reason;
         if (j.best_valid) util::remove_file(j.best.path);
+        j.stat_candidates = candidates;
+        write_stats(j, "error", reason);
         discard_job_tmp(j);
         error_line(j, reason);
         j.error_reported = true;
-        if (!opts.no_stats) stats::append_all(records);
         if (logger) {
             logger->event({{"type", "file_done"},
                            {"file", j.path},
@@ -1056,7 +1095,8 @@ void Runner::finalize_file(FileJob& j) {
         j.summary.detail = i18n::str("already in the target format");
         msg = i18n::fmt("OK   %s: already %s — nothing to do\n", j.base.c_str(),
                         j.restore_to.c_str());
-        if (!opts.no_stats) stats::append_all(records);
+        j.stat_candidates = candidates;
+        write_stats(j, "ok", j.summary.detail);
         if (logger) {
             logger->event({{"type", "file_done"},
                            {"file", j.path},
@@ -1072,7 +1112,8 @@ void Runner::finalize_file(FileJob& j) {
             j.summary.detail = reason;
             error_line(j, reason);
             j.error_reported = true;
-            if (!opts.no_stats) stats::append_all(records);
+            j.stat_candidates = candidates;
+            write_stats(j, "error", reason);
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
@@ -1088,7 +1129,8 @@ void Runner::finalize_file(FileJob& j) {
             j.summary.best = best_cost;
             j.summary.savings_pct = savings;
             msg = "OK   " + j.base + " — " + reason + "\n";
-            if (!opts.no_stats) stats::append_all(records);
+            j.stat_candidates = candidates;
+            write_stats(j, "ok", reason);
             if (logger) {
                 logger->event({{"type", "file_done"},
                                {"file", j.path},
@@ -1107,7 +1149,8 @@ void Runner::finalize_file(FileJob& j) {
         j.summary.detail = reason;
         error_line(j, reason);
         j.error_reported = true;
-        if (!opts.no_stats) stats::append_all(records);
+        j.stat_candidates = candidates;
+        write_stats(j, "error", reason);
         if (logger) {
             logger->event({{"type", "file_done"},
                            {"file", j.path},
@@ -1147,26 +1190,19 @@ void Runner::finalize_file(FileJob& j) {
                                         best.format.c_str(), best.variant.c_str(),
                                         werr.c_str());
                 j.failures.insert(j.failures.begin(), winner_fail);
-                // Провал сверки пишем отдельной записью: иначе в статистике
-                // кандидат остаётся с status=ok, и по выгрузке нельзя понять,
-                // что файл отдан после спуска по списку.
-                nlohmann::json vf;
-                for (const auto& r : records) {
-                    if (r.value("format", std::string()) == best.format &&
-                        r.value("variant", std::string()) == best.variant) {
-                        vf = r;
-                        break;
-                    }
+                // Провал сверки правим в самом кандидате, а не дописываем
+                // записью: отдельная запись означала, что на один файл в базе
+                // приходилось две строки, а победителя приходилось потом
+                // расставлять перебором.
+                for (auto& cand_rec : candidates) {
+                    if (cand_rec.format != best.format || cand_rec.variant != best.variant)
+                        continue;
+                    cand_rec.status = "verify_fail";
+                    cand_rec.error = werr;
+                    cand_rec.verify = verify_name(Verify::Winner);
+                    cand_rec.cost = best.cost;
+                    break;
                 }
-                if (vf.is_null()) {
-                    vf = {{"file", j.path}, {"format", best.format},
-                          {"variant", best.variant}, {"source_size", j.probe.size}};
-                }
-                vf["status"] = "verify_fail";
-                vf["error"] = werr;
-                vf["verify"] = verify_name(Verify::Winner);
-                vf["cost"] = best.cost;
-                records.push_back(std::move(vf));
                 obs::sink()->task(j.idx, j.best_order, obs::TaskState::Failed);
             }
         }
@@ -1177,7 +1213,7 @@ void Runner::finalize_file(FileJob& j) {
             // tolerant-режим сходится: при verify=all сверка победителя не
             // выполнялась, спускаться неоткуда.
             std::string dreason;
-            if (descend_candidates(j, lk, records, dreason)) {
+            if (descend_candidates(j, lk, candidates, dreason)) {
                 winner_fail.clear();
             } else {
                 winner_fail += "; " + dreason;
@@ -1186,10 +1222,8 @@ void Runner::finalize_file(FileJob& j) {
         }
 
         if (!winner_fail.empty()) {
-            for (auto& r : records) {
-                if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
-            }
-            if (!opts.no_stats) stats::append_all(records);
+            j.stat_candidates = candidates;
+            write_stats(j, "error", winner_fail);
             j.summary.status = "error";
             j.summary.detail = winner_fail;
             error_line(j, winner_fail);
@@ -1207,10 +1241,8 @@ void Runner::finalize_file(FileJob& j) {
         } else {
             double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
             if (savings < 0.0 && j.mode != JobMode::Restore) savings = 0.0;
-            for (auto& r : records) {
-                if (r["format"] == best.format && r["variant"] == best.variant) r["winner"] = true;
-            }
-            if (!opts.no_stats) stats::append_all(records);
+            j.stat_candidates = candidates;
+            write_stats(j, "ok", "");
 
             if (j.mode == JobMode::Restore) {
                 snprintf(buf, sizeof(buf), "%s",

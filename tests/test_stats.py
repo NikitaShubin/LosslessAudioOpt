@@ -9,15 +9,23 @@
 текстовой таблицей — её удобно отдать автору кодека как есть (в отчёте только
 id форматов, числа и проценты, локализации нет).
 
+Запись в базе — один обработанный файл со всеми кандидатами (см. stats::Record),
+победитель записан явно в поле winner.
+
 Покрытие:
     S1  stats на пустой базе: rc=0, «нет статистики»
-    S2  stats с фикстурой: сводка и рейтинг по средней экономии (порядок строк)
+    S2  stats с фикстурой: сводка и рейтинг по выигранным файлам (порядок строк)
     S3  stats --report: файл создан, содержит рейтинг, id форматов и проценты
     S4  stats --report на пустой базе: rc=1, отчёт не создан
     S5  stats --report в несуществующий каталог: rc=1
     S6  неизвестная опция: rc=2
     S7  LLAO_STATS_FILE перекрывает путь к stats.json (иначе файл читается
         рядом с бинарником — это боевой файл пользователя)
+    S8  один файл = одна запись: у выигранного файла ровно один победитель
+    S9  рейтинг считает cost (файл + sidecar), сводка сходится с рейтингом
+    S10 запись без winner (файл не отдан) в рейтинг не попадает
+    S11 прогон optimize пишет ровно одну запись на файл и указывает победителя
+    S12 lossy-исходник в рейтинг не попадает (конвертация в lossless не экономит)
 
 Путь к базе переопределяется переменной LLAO_STATS_FILE, поэтому тест не
 трогает настоящий stats.json рядом с бинарником.
@@ -38,24 +46,81 @@ LLAO_NATIVE = os.path.join(ROOT, "llao-linux")
 WORK = os.path.join(ROOT, "scratch_stats")
 
 KEEP = "--keep" in sys.argv
-NATIVE_LINUX = os.path.isfile(LLAO_NATIVE) and not os.path.isfile(LLAO_EXE)
+# Тестируем то, что собрано последним: нативный linux-бинарник приоритетнее
+# windows-сборки. Раньше выбор был «llao.exe есть — значит wine», и устаревший
+# llao.exe (собранный до правок) молча перебивал свежий llao-linux: тесты про
+# новую схему статистики падали на старом коде, а S11 насчитывал 152 записи
+# вместо двух.
+def _pick_native():
+    if not os.path.isfile(LLAO_NATIVE):
+        return False
+    if not os.path.isfile(LLAO_EXE):
+        return True
+    return os.path.getmtime(LLAO_NATIVE) >= os.path.getmtime(LLAO_EXE)
+
+
+NATIVE_LINUX = _pick_native()
 LLAO = LLAO_NATIVE if NATIVE_LINUX else LLAO_EXE
 
-# Фикстура: четыре формата с разной экономией, плюс одна ошибка. Ожидаемый
-# порядок рейтинга — по убыванию средней экономии: monkeys_audio, wavpack,
-# flac. tta дешевле всех и в рейтинг не попадает (нет успешных кандидатов).
+def cand(fmt, var, cost, status="ok", sidecar=0):
+    return {"format": fmt, "variant": var, "task": 0, "status": status,
+            "cost": cost, "result_size": cost - sidecar, "sidecar_size": sidecar,
+            "has_tags": False, "wall_ms": 10, "cpu_ms": 9,
+            "prep_wall_ms": 5, "decode_wall_ms": 6, "verify": "all"}
+
+
+def record(path, size, winner_fmt=None, winner_var="", winner_cost=0,
+           codec_name="flac", extra=(), status="ok"):
+    r = {"ts": "2026-10-02T10:00:00Z", "run_id": "test-run", "file": path,
+         "status": status,
+         "source": {"format": "wav", "codec_name": codec_name, "size": size,
+                    "channels": 2, "sample_rate": 48000, "bits": 16,
+                    "duration": 1.0, "has_tags": False},
+         "candidates": list(extra)}
+    if winner_fmt:
+        r["winner"] = {"format": winner_fmt, "variant": winner_var,
+                       "cost": winner_cost}
+    return r
+
+
+MB = 1048576
+
+# Фикстура: четыре выигранных файла. Рейтинг по убыванию экономии на выигранных
+# файлах: monkeys_audio выиграл два файла (85% и 70%, среднее 77.5%), wavpack
+# один (70%), flac один (50%). tta ни разу не выиграла и в рейтинг не попадает.
 RECORDS = [
-    {"format": "monkeys_audio", "status": "ok", "source_size": 10 * 1048576,
-     "result_size": 1500000, "winner": True},
-    {"format": "wavpack", "status": "ok", "source_size": 10 * 1048576,
-     "result_size": 3000000, "winner": False},
-    {"format": "flac", "status": "ok", "source_size": 20 * 1048576,
-     "result_size": 10000000, "winner": True},
-    {"format": "tta", "status": "error", "source_size": 1048576,
-     "result_size": 0, "winner": False},
+    record("/music/a.flac", 10 * MB, "monkeys_audio", "c3000", 1500000,
+           extra=[cand("monkeys_audio", "c3000", 1500000),
+                  cand("wavpack", "x1", 3000000),
+                  cand("flac", "8", 2600000),
+                  cand("tta", "default", 0, status="error")]),
+    record("/music/b.flac", 10 * MB, "monkeys_audio", "c3000", 3000000,
+           extra=[cand("monkeys_audio", "c3000", 3000000),
+                  cand("wavpack", "x1", 3200000)]),
+    record("/music/c.flac", 10 * MB, "wavpack", "x1", 3000000,
+           extra=[cand("wavpack", "x1", 3000000),
+                  cand("flac", "8", 5000000)]),
+    record("/music/d.flac", 10 * MB, "flac", "8", 5000000,
+           extra=[cand("flac", "8", 5000000)]),
+    # Файл не отдан: победителя нет, в рейтинг не должен попасть ни один формат
+    record("/music/e.flac", 10 * MB, status="error",
+           extra=[cand("flac", "8", 0, status="error")]),
 ]
 
 EXPECTED_ORDER = ["monkeys_audio", "wavpack", "flac"]
+
+
+def expected_savings(fmt):
+    """Средняя экономия формата по выигранным файлам — эталон для тестов."""
+    tot = 0.0
+    n = 0
+    for r in RECORDS:
+        w = r.get("winner")
+        if not w or w["format"] != fmt:
+            continue
+        tot += 1.0 - w["cost"] / float(r["source"]["size"])
+        n += 1
+    return tot / n if n else 0.0
 
 
 def run_tool(args, stats_file=None, timeout=600):
@@ -111,9 +176,10 @@ def s2_summary_with_records():
     p = base(RECORDS)
     rc, out = run_tool(["stats"], stats_file=p)
     assert rc == 0, "сводка должна давать rc=0:\n%s" % out
-    assert "Total records: 4" in out, "нет числа записей:\n%s" % out
-    assert "Winners (files replaced): 2" in out, "неверное число победителей:\n%s" % out
+    assert "Total records: 5" in out, "нет числа записей:\n%s" % out
+    assert "Files replaced: 4" in out, "неверное число победителей:\n%s" % out
     assert "By status:" in out and "error" in out, "нет разбивки по статусам:\n%s" % out
+    assert "Runs: 1" in out, "прогоны не сгруппированы:\n%s" % out
     # Рейтинг только по успешным кандидатам, порядок — по убыванию экономии.
     ranked = [ln.split()[0] for ln in out.splitlines()
               if ln.strip().startswith(("monkeys_audio", "wavpack", "flac", "tta"))
@@ -121,13 +187,21 @@ def s2_summary_with_records():
     assert len(ranked) == len(EXPECTED_ORDER), \
         "в рейтинге лишние/пропущенные форматы: %r\n%s" % (ranked, out)
     assert ranked == EXPECTED_ORDER, "неверный порядок рейтинга: %r\n%s" % (ranked, out)
-    # Экономия monkeys_audio = 1 - 1.5/10 = 85%.
+    # monkeys_audio выиграла два файла, средняя экономия считается по ним.
+    # Ожидаемое значение вычисляем из фикстуры, а не вписываем: иначе смена
+    # чисел в фикстуре тихо ломала бы тест или, наоборот, проходила не по делу.
+    expect = expected_savings("monkeys_audio")
     for ln in out.splitlines():
         if ln.strip().startswith("monkeys_audio") and "%" in ln:
-            assert "85." in ln, "неверная средняя экономия:\n%s" % out
+            assert "%.2f" % (expect * 100) in ln, \
+                "неверная средняя экономия по выигранным файлам (ждали %.2f%%):\n%s" % (
+                    expect * 100, out)
             break
     else:
         raise AssertionError("нет строки рейтинга monkeys_audio:\n%s" % out)
+    for ln in out.splitlines():
+        if ln.strip().startswith("tta") and "%" in ln:
+            raise AssertionError("tta без побед не должна быть в рейтинге:\n%s" % out)
 
 
 def s3_report_written():
@@ -142,8 +216,10 @@ def s3_report_written():
     assert "Format ranking" in text, "в отчёте нет рейтинга:\n%s" % text
     for fmt in EXPECTED_ORDER:
         assert fmt in text, "в отчёте нет формата %s:\n%s" % (fmt, text)
-    assert "Records: 4" in text, "в отчёте нет числа записей:\n%s" % text
-    assert "85." in text, "в отчёте нет средней экономии:\n%s" % text
+    assert "Records: 5" in text, "в отчёте нет числа записей:\n%s" % text
+    assert "%.2f" % (expected_savings("monkeys_audio") * 100) in text, \
+        "в отчёте нет средней экономии по выигранным файлам:\n%s" % text
+    assert "files-won" in text, "в отчёте нет колонки выигранных файлов:\n%s" % text
     # Отчёт отдаётся наружу (автору кодека) — локализации в нём быть не должно,
     # чтобы его можно было прочитать без перевода.
     assert not any(ord(ch) > 0x400 and ord(ch) < 0x500 for ch in text), \
@@ -190,7 +266,136 @@ def s7_env_override_used():
         "проверь LLAO_STATS_FILE:\n%s" % out
     # С оверрайдом читается именно фикстура.
     rc, out = run_tool(["stats"], stats_file=p)
-    assert "Total records: 4" in out, "оверрайд не подхватился:\n%s" % out
+    assert "Total records: 5" in out, "оверрайд не подхватился:\n%s" % out
+
+
+def s8_one_record_per_file():
+    """У выигранного файла ровно один победитель, и он совпадает с cost кандидата."""
+    p = base(RECORDS)
+    rc, out = run_tool(["stats", "--report=" + os.path.join(out_dir(), "r8.txt")],
+                       stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    with open(p, encoding="utf-8") as f:
+        recs = json.load(f)
+    won = [r for r in recs if r.get("winner")]
+    assert len(won) == 4, "победитель должен быть ровно у %d файлов, а не у %d" % (
+        len(won), sum(1 for r in recs if r.get("winner")))
+    for r in won:
+        assert r["winner"]["cost"] > 0, "победитель с нулевым cost:\n%s" % r
+        match = [c for c in r["candidates"]
+                 if c["format"] == r["winner"]["format"]
+                 and c["variant"] == r["winner"]["variant"]]
+        assert match, "победитель %s/%s не лежит среди кандидатов:\n%s" % (
+            r["winner"]["format"], r["winner"]["variant"], r)
+        assert match[0]["cost"] == r["winner"]["cost"], \
+            "cost победителя разошёлся с кандидатом:\n%s" % r
+
+
+def s9_ranking_uses_cost_with_sidecar():
+    """Рейтинг и сводка считают одно и то же: cost = файл + sidecar."""
+    recs = [
+        record("/music/s.flac", 10 * MB, "wavpack", "x1", 1000000,
+               extra=[cand("wavpack", "x1", 1000000, sidecar=900000)]),
+        record("/music/t.flac", 10 * MB, "flac", "8", 5000000,
+               extra=[cand("flac", "8", 5000000)]),
+    ]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r9.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    # Экономия wavpack считается по cost (1.0 МБ из 10 МБ), а sidecar в неё входит.
+    # Проверяем именно это: если бы рейтинг считал по result_size, получилось бы
+    # 10%, потому что result_size здесь 100 000 байт.
+    expect_wv = 1.0 - 1000000 / float(10 * MB)
+    assert "%.2f" % (expect_wv * 100) in text, \
+        "экономия без учёта sidecar:\n%s" % text
+    # Сводка обязана считать ту же величину, что и рейтинг: обе суммы по cost.
+    tot_out = 1000000 + 5000000
+    expect_tot = 100.0 * tot_out / (20.0 * MB)
+    assert "%.2f%% of source" % expect_tot in text, \
+        "сводка разошлась с рейтингом:\n%s" % text
+    rc, out = run_tool(["stats"], stats_file=p)
+    assert "%.2f%%" % expect_tot in out, \
+        "сводка в терминале разошлась с отчётом:\n%s" % out
+
+
+def s10_record_without_winner_not_ranked():
+    """Файл, который не отдан, не даёт формату победу."""
+    recs = [record("/music/e.flac", 10 * MB, status="error",
+                   extra=[cand("flac", "8", 0, status="error")])]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r10.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    assert "Format ranking" not in text, \
+        "формат без побед не должен появляться в рейтинге:\n%s" % text
+    assert "Files replaced: 0" in text, "неотданный файл посчитан побеждой:\n%s" % text
+
+
+def s11_optimize_writes_one_record_per_file():
+    """Реальный прогон: одна запись на файл, победитель указан."""
+    import math
+    import struct
+    src = os.path.join(WORK, "src")
+    os.makedirs(src, exist_ok=True)
+    n, ch, bps = 24000, 2, 2
+    data = bytearray()
+    for i in range(n * ch):
+        v = int(9000 * math.sin(2 * math.pi * 440 * i / 48000))
+        data += int(v).to_bytes(bps, "little", signed=True)
+    hdr = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " +
+           struct.pack("<IHHIIHH", 16, 1, ch, 48000, 48000 * ch * bps, ch * bps, 16) +
+           b"data" + struct.pack("<I", len(data)))
+    for name in ("a.wav", "b.wav"):
+        with open(os.path.join(src, name), "wb") as f:
+            f.write(hdr + bytes(data))
+
+    stats_file = os.path.join(WORK, "run", "stats.json")
+    os.makedirs(os.path.dirname(stats_file), exist_ok=True)
+    rc, out = run_tool(["optimize", src, "--jobs=2", "--no-download"], stats_file=stats_file)
+    assert rc == 0, "прогон должен удаться:\n%s" % out
+    with open(stats_file, encoding="utf-8") as f:
+        recs = json.load(f)
+    assert len(recs) == 2, "ожидались 2 записи (по одной на файл), получено %d:\n%s" % (
+        len(recs), out)
+    for r in recs:
+        assert r["status"] == "ok", "неуспешный статус:\n%s" % r
+        assert r.get("winner"), "нет победителя:\n%s" % r
+        assert r["run_id"], "нет run_id:\n%s" % r
+        assert r["ts"], "нет метки времени:\n%s" % r
+        assert r["source"]["size"] > 0, "нет размера исходника:\n%s" % r
+        assert len(r["candidates"]) > 1, "кандидаты не сохранены:\n%s" % r
+        best = min(c["cost"] for c in r["candidates"] if c["status"] == "ok")
+        assert r["winner"]["cost"] <= best, \
+            "победитель дороже лучшего кандидата:\n%s" % r
+
+
+def s12_lossy_source_not_ranked():
+    """Lossy-исходник в рейтинг не попадает: конвертация в lossless не экономит."""
+    recs = [
+        record("/music/l.mp3", 10 * MB, "flac", "8", 12000000, codec_name="mp3",
+               extra=[cand("flac", "8", 12000000)]),
+        record("/music/n.flac", 10 * MB, "flac", "8", 5000000, codec_name="flac",
+               extra=[cand("flac", "8", 5000000)]),
+    ]
+    p = base(recs)
+    dest = os.path.join(out_dir(), "r12.txt")
+    rc, out = run_tool(["stats", "--report=" + dest], stats_file=p)
+    assert rc == 0, "--report должен давать rc=0:\n%s" % out
+    text = open(dest, encoding="utf-8").read()
+    # Учитывается только flac-исходник: 5.0 МБ из 10 МБ.
+    expect = 100.0 * 5000000 / (10.0 * MB)
+    assert "Files replaced: 1" in text, "посчитан файл без отданного победителя:\n%s" % text
+    assert "%.2f%% of source" % expect in text, \
+        "сводка не должна учитывать mp3-исходник:\n%s" % text
+    assert "files-won" in text, "нет заголовка рейтинга:\n%s" % text
+    expect_rank = 1.0 - 5000000 / float(10 * MB)
+    for ln in text.splitlines():
+        if ln.strip().startswith("flac") and "%" in ln:
+            assert "%.2f" % (expect_rank * 100) in ln, \
+                "в рейтинг попал mp3-исходник:\n%s" % text
 
 
 SCENARIOS = [
@@ -201,6 +406,11 @@ SCENARIOS = [
     ("S5", "S5  --report в несуществующий каталог -> rc=1", s5_report_unwritable),
     ("S6", "S6  неизвестная опция -> rc=2", s6_unknown_option),
     ("S7", "S7  LLAO_STATS_FILE перекрывает путь к базе", s7_env_override_used),
+    ("S8", "S8  один файл = одна запись, один победитель", s8_one_record_per_file),
+    ("S9", "S9  рейтинг и сводка считают cost (с sidecar)", s9_ranking_uses_cost_with_sidecar),
+    ("S10", "S10 файл без победителя не попадает в рейтинг", s10_record_without_winner_not_ranked),
+    ("S11", "S11 прогон optimize: одна запись на файл", s11_optimize_writes_one_record_per_file),
+    ("S12", "S12 lossy-исходник не попадает в рейтинг", s12_lossy_source_not_ranked),
 ]
 
 

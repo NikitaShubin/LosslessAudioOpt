@@ -267,7 +267,9 @@ struct FileJob {
     bool best_valid = false;
     Candidate best;
     size_t best_order = SIZE_MAX;
-    std::vector<nlohmann::json> stat_records;
+    // Кандидаты, готовые к записи в базу. Типизированные — сборка записи для
+    // stats.json делается один раз, в конце обработки файла (см. stats::Record).
+    std::vector<optimize::Candidate> stat_candidates;
     std::vector<std::string> failures;
     std::vector<std::string> exclusions;
     std::vector<obs::ExcludedVariant> excluded_variants;
@@ -336,6 +338,11 @@ struct Runner {
     // Диагностика файла, чей вариант упал в строгом режиме: пишется ДО аборта,
     // потому что после abort_all() finalize_file уже не вызовется.
     void report_error_before_abort(FileJob& j, const std::string& verr);
+    // Собирает одну запись базы по файлу и дописывает её. Единственная точка
+    // записи в stats.json: и формат записи, и правило «кто победил» заданы
+    // здесь, поэтому дальше по коду статус записей не правится задним числом.
+    // Вызывается под замком файла.
+    void write_stats(FileJob& j, const std::string& status, const std::string& detail);
     // Строка «ERROR <файл> — <причина>» с приведённой к одной строке причиной.
     void error_line(FileJob& j, const std::string& reason);
     bool variant_launchable_locked();
@@ -349,8 +356,9 @@ struct Runner {
     // меньшего к большему, и обычное жадное сравнение cost удалило бы кандидата.
     VariantOutcome run_variant(FileJob& j, size_t task_idx, bool force_best = false);
     // Спуск по ранее успешным кандидатам, пока не найдётся прошедший сверку.
+    // candidates — типизированный список прогона (не запись в базе).
     bool descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
-                            std::vector<nlohmann::json>& records,
+                            std::vector<optimize::Candidate>& candidates,
                             std::string& reason);
     void finalize_file(FileJob& j);
     void worker();
