@@ -38,7 +38,7 @@ SKIP_PATH = os.path.join(ROOT, ".github", "cli-baselines", "skip-upstream.json")
 UPSTREAM_MANUAL = {
     "tak": "2.3.3",
     "optimfrog": "5.100",
-    "monkeys_audio": "13.26",
+    "monkeys_audio": "13.27",
 }
 
 GITHUB = {
@@ -77,9 +77,19 @@ def pinned_version(fmt_id, fmt):
     m = re.search(r"TAK_([0-9]+(?:\.[0-9]+)*)", url)
     if m:
         return m.group(1)
+    # MAC_1327_x64.exe: в имени файла автора версия без точки. Приводим к
+    # каноническому виду 13.27, в котором она значится в UPSTREAM_MANUAL и в
+    # примечаниях к конфигу, иначе сравнение 1327 с 13.27 даёт ложное отставание.
+    m = re.search(r"MAC_([0-9]+)_", url)
+    if m:
+        digits = m.group(1)
+        if len(digits) > 2 and "." not in digits:
+            return "%s.%s" % (digits[:-2], digits[-2:])
+        return digits
     m = re.search(r"v([0-9]+\.[0-9]+)", notes)
     if m:
         return m.group(1)
+    # Актуальная версия из примечаний автора кода: «Monkey's Audio 13.27».
     m = re.search(r"Monkey's Audio\s+([0-9]+(?:\.[0-9]+)*)", notes)
     if m:
         return m.group(1)
