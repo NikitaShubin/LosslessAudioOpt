@@ -27,6 +27,7 @@ void DaemonSink::begin_file(size_t id, const std::string& label,
 }
 
 void DaemonSink::prep(size_t id) {
+    if (on_active_) on_active_(id, true);
     emit(id, "prep");
     st_->set_state(id, "prep");
     if (on_change_) on_change_();
@@ -81,6 +82,7 @@ void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
 }
 
 void DaemonSink::end_file(size_t id, double pct) {
+    if (on_active_) on_active_(id, false);
     emit(id, "end_file", {{"pct", pct}});
     st_->set_state(id, "ok");
     st_->set_pct(id, pct);
@@ -88,12 +90,14 @@ void DaemonSink::end_file(size_t id, double pct) {
 }
 
 void DaemonSink::mark_stopped(size_t id) {
+    if (on_active_) on_active_(id, false);
     emit(id, "stopped");
     st_->set_state(id, "stopped");
     if (on_change_) on_change_();
 }
 
 void DaemonSink::error_file(size_t id, const std::string& reason) {
+    if (on_active_) on_active_(id, false);
     emit(id, "error_file", {{"reason", reason}});
     st_->set_state(id, "error");
     st_->set_last_error(id, reason);

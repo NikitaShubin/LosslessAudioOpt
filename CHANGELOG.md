@@ -14,6 +14,11 @@ The page now asks for changes only — `/api/events?since=`, which is a few hund
 ### A dropped connection no longer empties the list
 A truncated or empty response produced a bare `Unexpected end of JSON input` in the status line and nothing else, which tells the user neither what went wrong nor whether their work is still running. Responses are now checked before parsing, so the status line names the cause (empty response, or how many bytes arrived unparseable), and the previously received list stays on screen instead of being replaced by an empty one — a broken connection is visible as a broken connection, not as a lost queue.
 
+### A kill -9 no longer silently restarts an interrupted file
+`queue.json` is rewritten in full on every change, so on a real library the write lags behind the daemon's own view: the API can already show a file as `prep` while the file on disk still says `queued`. Killing the daemon inside that window left the interrupted file marked as never started, and the next launch put it back into the queue and processed it again without asking — the exact opposite of what an interrupted file is supposed to do.
+
+A small `queue.active.json` next to `queue.json` now records the paths the engine has taken up, written synchronously at the moment a file enters `prep` and before the mirror is updated. On restart, a `queued` row whose path is in that file is restored as `stopped` with the reason "остановлено при перезапуске", exactly like an explicitly interrupted row. The marker is cleared when the reload finishes and on a graceful shutdown, so a completed file is never mistaken for an interrupted one.
+
 ## 2.3.4 — 2026-10-02
 
 ### Cancelling a file no longer locks its path in the queue

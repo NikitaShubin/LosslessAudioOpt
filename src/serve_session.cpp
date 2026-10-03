@@ -115,6 +115,11 @@ int DaemonSession::start(std::string* err) {
     // движка (в т.ч. под qm на некоторых путях mark_stopped), поэтому persist()
     // не должен трогать движок — только зеркало и свой мьютекс.
     sink_->set_on_change([this] { persist(false); });
+    // Отметка «файл в работе» — синхронно и до обновления зеркала (см.
+    // DaemonSession::mark_active): без неё kill -9 в момент между «демон
+    // показал prep» и «queue.json перезаписан» приводит к тихой перезаписи
+    // прерванного файла при следующем старте.
+    sink_->set_on_active([this](size_t id, bool active) { mark_active(id, active); });
 
     engine_ = std::make_unique<optimize::Engine>();
     if (int rc = engine_->init(opts_, {}, err); rc != 0) return rc;
@@ -186,6 +191,11 @@ void DaemonSession::shutdown() {
         std::lock_guard<std::mutex> lk(persist_m_);
         persist_rows(snapshot_for_persist(true));
     }
+
+    // Штатная остановка: активные файлы переведены в queue.json как queued,
+    // маркер «в работе» больше не нужен — иначе следующий старт увидит в нём
+    // пути уже завершённых файлов и восстановит их как stopped.
+    clear_active();
 
     if (engine_) engine_->shutdown();
 

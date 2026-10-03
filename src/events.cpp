@@ -208,6 +208,14 @@ void StateMirror::set_has_sidecar(size_t id, bool has_sidecar) {
     r.has_sidecar = has_sidecar;
 }
 
+bool StateMirror::row_path(size_t id, std::string& out) const {
+    std::lock_guard<std::mutex> lk(m_);
+    auto it = rows_.find(id);
+    if (it == rows_.end()) return false;
+    out = it->second.path;
+    return true;
+}
+
 void StateMirror::remove(size_t id) {
     std::lock_guard<std::mutex> lk(m_);
     rows_.erase(id);

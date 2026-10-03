@@ -128,6 +128,10 @@ public:
     // sidecar известен по диску, не трогая had_sidecar).
     void set_has_sidecar(size_t id, bool has_sidecar);
     void remove(size_t id);
+    // Полный путь исходника строки по id (пусто, если строки нет или путь ещё
+    // не известен). Нужен DurableActive: пометить «файл в работе» нужно ДО
+    // того, как строка станет видна как prep/running.
+    bool row_path(size_t id, std::string& out) const;
     // Жива ли строка (не удалена). Для подавления запоздалых событий воркера
     // по снятой строке: зеркало уже защищено tombstone, а буфер событий — нет.
     bool alive(size_t id) const;

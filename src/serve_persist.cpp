@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include "contract.h"
@@ -85,6 +86,59 @@ void DaemonSession::persist(bool final) {
     persist_rows(snapshot_for_persist(final));
 }
 
+// queue.active.json: пути файлов, которые движок взял в работу (prep/running).
+// Маленький файл рядом с queue.json, пишется синхронно в prep() ДО обновления
+// зеркала, поэтому «файл в работе» всегда переживает kill -9 и не зависит от
+// того, успел ли переписаться многостраничный queue.json.
+void DaemonSession::mark_active(size_t id, bool active) {
+    if (persist_path_.empty()) return;
+    std::string path;
+    if (!st_->row_path(id, path) || path.empty()) return;
+    std::lock_guard<std::mutex> lk(active_m_);
+    const size_t before = active_paths_.size();
+    if (active)
+        active_paths_.insert(path);
+    else
+        active_paths_.erase(path);
+    if (active_paths_.size() == before && before == 0) return;  // нечего писать
+    write_active_locked();
+}
+
+void DaemonSession::write_active_locked() {
+    const std::string path = persist_path_ + ".active";
+    util::mkdirs(util::dir_name(path));
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : active_paths_) arr.push_back(p);
+    const std::string tmp = path + ".llao-tmp";
+    if (util::write_text(tmp, arr.dump(1))) {
+        util::replace_file(path, tmp);
+    } else {
+        util::remove_file(tmp);
+    }
+}
+
+std::set<std::string> DaemonSession::read_active() const {
+    std::set<std::string> out;
+    if (persist_path_.empty()) return out;
+    const std::string text = util::read_text(persist_path_ + ".active");
+    if (text.empty()) return out;
+    // Битый файл не должен блокировать старт: пустой набор означает «прерванных
+    // нет», очередь просто продолжится с начала — как и до этого механизма.
+    nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+    if (!j.is_array()) return out;
+    for (const auto& v : j)
+        if (v.is_string()) out.insert(v.get<std::string>());
+    return out;
+}
+
+void DaemonSession::clear_active() {
+    if (persist_path_.empty()) return;
+    std::lock_guard<std::mutex> lk(active_m_);
+    if (active_paths_.empty()) return;
+    active_paths_.clear();
+    write_active_locked();
+}
+
 void DaemonSession::set_had_sidecar(size_t id, const std::string& full_path) {
     bool had = util::file_exists(persist::sidecar_path_for(full_path));
     st_->set_sidecar_flags(id, had, false);
@@ -100,6 +154,10 @@ void DaemonSession::load_persisted(std::string* err) {
         return;
     }
     if (rows.empty()) return;
+    // Пути, которые на момент падения были в работе: их состояние в queue.json
+    // может быть устаревшим (queued), и без этой проверки перезапуск продолжил бы
+    // прерванный файл сам, без участия пользователя.
+    const std::set<std::string> was_active = read_active();
 
     // Прежний queue.json сохраняем рядом: перезапись начнётся сразу после
     // восстановления, и если что-то пойдёт не так (обрыв, битая запись),
@@ -221,6 +279,16 @@ void DaemonSession::load_persisted(std::string* err) {
 
     for (const auto& pr : rows) {
         std::string full = full_path(pr);
+        if (pr.state == "queued" && was_active.count(full)) {
+            // Файл был в работе, когда демон упал, но queue.json этого ещё не
+            // успел записать. Обработка прервана — восстанавливаем как
+            // остановленную с причиной, как и для явных prep/running.
+            flush_batch();
+            restore_to_mirror(pr, full, "stopped",
+                              "остановлено при перезапуске (обработка не завершена)");
+            ev_->push("restored", {{"type", "interrupted"}, {"path", pr.path}});
+            continue;
+        }
         if (pr.state == "queued") {
             // Продолжаем только файлы, до которых очередь ещё не дошла; все
             // проверки — как в add_locked. При любой неудаче строка остаётся
@@ -276,6 +344,11 @@ void DaemonSession::load_persisted(std::string* err) {
         }
     }
     flush_batch();
+
+    // Всё, что было отмечено как «в работе», теперь либо в очереди (queued), либо
+    // восстановлено как stopped — маркер больше не нужен и на следующем старте
+    // только мешал бы.
+    clear_active();
 
     // Итоговый порядок очереди по строкам из queue.json (движок-строки уже в
     // зеркале в порядке add; восстановленные — в порядке обхода).

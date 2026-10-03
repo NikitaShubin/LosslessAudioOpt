@@ -20,6 +20,12 @@ public:
     // обновления зеркала, без блокировок события; реализация должна быть
     // потокобезопасна (движок зовёт из воркеров).
     void set_on_change(std::function<void()> cb) { on_change_ = std::move(cb); }
+    // Устойчивая отметка «файл в работе»: (id, true) при входе в prep,
+    // (id, false) при выходе из работы. Вызывается ДО обновления зеркала —
+    // очередь.json переписывается целиком и может отстать, а «файл в работе»
+    // после падения демона обязан быть виден сразу, иначе перезапуск снова
+    // поставит файл в очередь сам (см. DaemonSession::mark_active).
+    void set_on_active(std::function<void(size_t, bool)> cb) { on_active_ = std::move(cb); }
 
     void begin_file(size_t id, const std::string& label,
                     const std::string& root = std::string()) override;
@@ -56,6 +62,7 @@ private:
     EventBuffer* ev_ = nullptr;
     StateMirror* st_ = nullptr;
     std::function<void()> on_change_;
+    std::function<void(size_t, bool)> on_active_;
 };
 
 }  // namespace dsvc

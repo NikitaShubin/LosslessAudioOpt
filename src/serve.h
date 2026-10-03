@@ -109,6 +109,24 @@ private:
     // Записать снапшот в persist_path_ (lenient: при пустом пути — no-op).
     void persist_rows(const std::vector<persist::Row>& rows);
 
+    // Устойчивая отметка «файл в работе» (queue.active.json рядом с queue.json).
+    // queue.json переписывается целиком и на большой библиотеке это мегабайты,
+    // поэтому файл успевает отстать от зеркала: демон показывает prep, а в
+    // queue.json строка ещё queued. После kill -9 такая строка при следующем
+    // старте снова попадает в очередь и продолжает работу молча, хотя её
+    // обработка была прервана и требовала явного «Запустить». Здесь пишется
+    // маленький список путей, синхронно и до обновления зеркала, поэтому
+    // состояние «в работе» переживает падение без гонки с большой записью.
+    void mark_active(size_t id, bool active);
+    // Перезаписать queue.active.json текущим набором путей (под active_m_).
+    void write_active_locked();
+    // Прочитать queue.active.json; отсутствие/битость файла — пустой набор.
+    std::set<std::string> read_active() const;
+    // Снять все отметки (после reload и при штатной остановке): файл, который
+    // пережил перезапуск как stopped, больше не «в работе», иначе следующий
+    // старт увидит в маркере путь уже завершённого файла.
+    void clear_active();
+
     optimize::Options opts_;
     std::string restore_to_;  // целевой формат для restore (id из formats/*.json)
     bool update_codecs_ = false;  // --update-codecs: обновить кодеки перед стартом
@@ -117,6 +135,9 @@ private:
     // очередь (см. DaemonSession::persist).
     bool reloading_ = false;
     std::string persist_path_;  // путь к queue.json (пусто = персистентность выкл)
+    std::set<std::string> active_paths_;  // под active_m_: пути файлов в работе
+    mutable std::mutex active_m_;         // не путать с persist_m_: запись
+                                          // active-файла не блокирует очередь
     EventBuffer* ev_ = nullptr;
     StateMirror* st_ = nullptr;
     std::unique_ptr<optimize::Engine> engine_;
