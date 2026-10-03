@@ -4,6 +4,18 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.4 — 2026-10-02
+
+### Cancelling a file no longer locks its path in the queue
+`cancel-file` (and the bulk/cancel-all variants) mark the row as `stopped` and leave it in the list, but the path stayed in the daemon's de-duplication set. Re-adding that file then hit the stale entry: on a running queue the add was refused as "already in queue", and on a finished row it created a second row for the same path. Both outcomes mean the list, the queue file and the actual work drift apart — the same class of inconsistency as the truncated queue in 2.3.3.
+
+The paths of cancelled rows are now released, exactly as `remove` already did.
+
+### Reordering the list can no longer half-apply
+`reorder` received the visible list's order and passed it straight to the engine, which holds cancelled "zombie" rows the visible list never shows. The engine therefore rejected most real reorder requests, and the visible list could be left reordered while the engine kept its own order — the two diverging silently, and the file order surviving a restart differently from what the UI showed.
+
+Reorder now translates the visible order into the engine's own positions and rejects only genuinely invalid input: duplicate ids, or ids the list does not contain. The visible list and the queue file are always updated together or not at all.
+
 ## 2.3.3 — 2026-10-02
 
 ### A restart no longer truncates the queue

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -151,10 +152,17 @@ bool DaemonSession::cancel_file(uint64_t id) {
         if (f.idx == (size_t)id) {
             bool active = !(f.state == "ok" || f.state == "stopped" ||
                             f.state == "error" || f.state == "removed");
+            std::string path = f.path;
             engine_->remove((size_t)id);
             if (active) {
                 ev_->push_for(id, "stopped");
                 st_->set_state(id, "stopped");
+                // Строка остаётся в списке как stopped, поэтому путь больше не
+                // считается «занятым в очереди»: иначе повторный add того же
+                // файла натыкался бы на неё и накапливал дубли в списке и в
+                // queue.json — ровно то, что приводит к расхождению очереди с
+                // тем, что видит пользователь.
+                if (!path.empty()) added_paths_.erase(path);
             }
             persist(false);
             return true;
@@ -216,16 +224,21 @@ uint64_t DaemonSession::bulk_cancel(const std::vector<size_t>& ids) {
     uint64_t cancelled = 0;
     for (size_t id : ids) {
         bool active = false;
+        std::string path;
         for (const auto& f : snap)
             if (f.idx == id) {
                 active = !(f.state == "ok" || f.state == "stopped" ||
                            f.state == "error" || f.state == "removed");
+                path = f.path;
                 break;
             }
         if (!active) continue;
         engine_->remove(id);
         ev_->push_for(id, "stopped");
         st_->set_state(id, "stopped");
+        // Как и в cancel_file: строка остаётся в списке как stopped, поэтому
+        // путь освобождается — иначе файл нельзя вернуть в очередь.
+        if (!path.empty()) added_paths_.erase(path);
         cancelled++;
     }
     persist(false);
@@ -244,6 +257,7 @@ uint64_t DaemonSession::cancel_all_active() {
         engine_->remove(f.idx);
         ev_->push_for(f.idx, "stopped");
         st_->set_state(f.idx, "stopped");
+        if (!f.path.empty()) added_paths_.erase(f.path);
         cancelled++;
     }
     persist(false);
@@ -270,6 +284,10 @@ size_t DaemonSession::sort_by_path() {
         if (pb.empty()) return true;
         return pa < pb;
     });
+    // Порядок двигается по его же снимку (в нём есть «зомби»-строки, которых
+    // нет в зеркале), а видимый список переставляется только если движок принял
+    // перестановку — иначе UI показал бы один порядок, а persist записал бы
+    // другой.
     if (!engine_->reorder(order)) return 0;
     st_->reorder(order);
     ev_->push("reordered", {{"order", order}});
@@ -461,13 +479,46 @@ bool DaemonSession::restart(uint64_t id) {
 
 bool DaemonSession::reorder(const std::vector<size_t>& order) {
     if (!engine_) return false;
-    bool ok = engine_->reorder(order);
-    if (ok) {
-        st_->reorder(order);
-        ev_->push("reordered", {{"order", order}});
-        persist(false);
+    // Порядок приходит из браузера и относится к ВИДИМОМУ списку (зеркалу):
+    // там строки и завершённые, и восстановленные из queue.json, а движок держит
+    // ещё и «зомби»-отменённые. Поэтому engine_->reorder() на полном зеркальном
+    // порядке всегда отвергал бы его — переупорядочиваем движок по его же
+    // позициям, а зеркало — по пришедшему порядку.
+    //
+    // Перестановка может прийти неполной (интерфейс двигает выделенный блок и
+    // передаёт состав видимой части), поэтому состав проверяется только на
+    // недопустимое: дубль id или id, которого в зеркале нет. Такое отвергается
+    // целиком, иначе UI и persist разошлись бы с тем, что в списке на самом деле.
+    auto rows = st_->snapshot();
+    if (!order.empty()) {
+        std::set<size_t> seen;
+        for (size_t id : order) {
+            if (!seen.insert(id).second) return false;  // дубль
+            bool known = false;
+            for (const auto& r : rows)
+                if (r.id == id) { known = true; break; }
+            if (!known) return false;  // неизвестный зеркалу id
+        }
     }
-    return ok;
+    bool engine_ok = true;
+    if (!order.empty()) {
+        auto snap = engine_->snapshot();
+        std::vector<size_t> eorder;
+        eorder.reserve(snap.size());
+        std::vector<size_t> pos(snap.size(), SIZE_MAX);
+        for (size_t k = 0; k < snap.size(); k++) pos[snap[k].idx] = k;
+        for (size_t id : order)
+            if (id < pos.size() && pos[id] != SIZE_MAX) eorder.push_back(id);
+        for (const auto& f : snap)
+            if (std::find(eorder.begin(), eorder.end(), f.idx) == eorder.end())
+                eorder.push_back(f.idx);
+        engine_ok = engine_->reorder(eorder);
+    }
+    if (!engine_ok) return false;
+    if (!order.empty()) st_->reorder(order);
+    ev_->push("reordered", {{"order", order}});
+    persist(false);
+    return true;
 }
 
 }  // namespace dsvc

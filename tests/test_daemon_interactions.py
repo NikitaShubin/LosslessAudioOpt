@@ -11,6 +11,7 @@
 Запуск: python3 tests/test_daemon_interactions.py [--daemon ./llao-linux]
 """
 import concurrent.futures as fut
+import json
 import os
 import shutil
 import sys
@@ -193,9 +194,12 @@ def main():
         check(d2.stop() == 0, "case 7: exit 0")
 
         print("case 8: cancel-file → re-add тот же путь — принят и стартует")
-        d3 = H.Daemon(binary, workdir, jobs=2.0)
+        # Свой демон и свой каталог: иначе в очередь попадают файлы предыдущих
+        # кейсов, и проверка дублей считала бы их дубликатами этого сценария.
+        workdir8 = tempfile.mkdtemp(prefix="llao-inter8-")
+        d3 = H.Daemon(binary, workdir8, jobs=2.0)
         d3.start()
-        p8 = os.path.join(workdir, "cancel_readd.wav")
+        p8 = os.path.join(workdir8, "cancel_readd.wav")
         H.gen_wav(p8, 999)
         r = d3.rpc("add", {"paths": [p8]})
         ids8 = [x["id"] for x in r["result"]["added"]]
@@ -222,7 +226,33 @@ def main():
                         for x in d3.rows()),
             timeout=20, interval=2)
         check(started, "re-added file after cancel-file leaves queued")
+        # Дубль той же строки после cancel+re-add — потеря целостности списка:
+        # пользователь видит один файл дважды, а persist спокойно пишет обе.
+        rows8 = d3.rows()
+        by_path8 = {}
+        for x in rows8:
+            by_path8.setdefault(x["path"], []).append(x)
+        dup8 = {p_: v for p_, v in by_path8.items() if len(v) > 1}
+        # Допускается ровно две строки одного пути: отменённая (stopped,
+        # оставшаяся в истории списка) и новая. Это осознанное поведение
+        # cancel-file — он помечает строку, а не удаляет. Запрещено трёх и более:
+        # значит повторные add копят копии, и persist записывает их все.
+        check(max((len(v) for v in by_path8.values()), default=0) <= 2,
+              "case 8: не более двух строк на путь после cancel+re-add: %r"
+              % {k: [x["state"] for x in v] for k, v in dup8.items()})
+        live8 = [x for v in by_path8.values() for x in v
+                 if x["state"] in ("queued", "prep", "running")]
+        check(len(live8) <= 1, f"case 8: файл не активен дважды: {len(live8)}")
+        # Персист должен содержать столько же строк, сколько видит UI.
+        qp8 = os.path.join(os.path.dirname(d3.disc), "queue.json")
+        if os.path.exists(qp8):
+            with open(qp8, encoding="utf-8") as f:
+                q8 = json.load(f)
+            check(len(q8.get("rows", [])) == len(rows8),
+                  f"case 8: queue.json и /api/state согласованы: "
+                  f"{len(q8.get('rows', []))} против {len(rows8)}")
         check(d3.stop() == 0, "case 8: exit 0")
+        shutil.rmtree(workdir8, ignore_errors=True)
 
         print("case 9: batch-stop → reorder → batch-start — reorder не ломает рестарт")
         d4 = H.Daemon(binary, workdir, jobs=2.0)
