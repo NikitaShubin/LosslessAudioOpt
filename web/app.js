@@ -35,6 +35,13 @@ let autoScrollOn = false;
 let autoScrollBoost = false;
 let lastAutoGoal = -1;
 const POLL_PERIOD_MS = 1000;                 // фиксированный период полла (setInterval)
+// Полный /api/state на большой библиотеке весит megabytes (task_infos на каждую
+// строку), а по узкому каналу — тем более: список либо не доходит, либо приходит
+// обрезанным, и страница показывает «пусто». Поэтому опрос идёт дельтами через
+// /api/events?since=<seq> — там 45 байт, когда ничего не изменилось, а полный
+// состояние запрашивается только когда демон сам просит об этом (resync).
+let lastSeq = 0;
+let needFullState = true;
 
 function showLogin(msg) {
   loginDiv.classList.remove("hidden");
@@ -78,9 +85,24 @@ async function api(path, opts) {
   if (r.status === 401) { showLogin("Неверный токен (401). Введите корректный токен."); throw new Error("401"); }
   return r;
 }
+// Разбор json с внятной диагностикой вместо «Unexpected end of JSON input».
+// Пустое или оборванное тело — обычное дело для узкого канала и обрыва связи,
+// и молчаливый SyntaxError от fetch здесь неинформативен: видно только, что
+// «список пуст», хотя демон отвечал нормально секунду назад.
+async function jsonOf(r, what){
+  const text = await r.text();
+  if (!text || !text.trim())
+    throw new Error((what||"ответ") + ": пустой ответ сервера (соединение оборвано или ответ не дошёл)");
+  try {
+    return JSON.parse(text);
+  } catch(e){
+    throw new Error((what||"ответ") + ": не разобран JSON (" + text.length +
+      " байт, " + String(e.message || e).slice(0,60) + ")");
+  }
+}
 async function rpc(cmd, args) {
   const r = await api("/rpc", {method:"POST", body:{cmd, args: args||{}}});
-  const j = await r.json();
+  const j = await jsonOf(r, "rpc " + cmd);
   if (!j.ok) throw new Error(j.error || j.code || "rpc failed");
   return j.result;
 }
@@ -173,7 +195,7 @@ let formatsLoaded = false;
 async function loadFormats(){
   try {
     const r = await api("/api/formats");
-    const j = await r.json();
+    const j = await jsonOf(r, "/api/formats");
     const fmts = j.formats || [];
     formatsMaxTasks = fmts.reduce((s,f)=> s + (Number.isFinite(f.variants) ? f.variants : 0), 0);
   } catch(e){ /* 401 или сеть — оставим 0, строки без плана не в счёте */ }
@@ -527,8 +549,25 @@ function renderQueue(rows){
 async function pollState(){
   if (isDragging) return;
   try {
+    // Сначала дельта: пустой ответ означает «изменений нет», и полный
+    // состояние тогда не качаем вовсе.
+    if (!needFullState) {
+      const er = await api("/api/events?since=" + lastSeq);
+      const ed = await jsonOf(er, "/api/events");
+      if (!ed.resync && !(ed.events && ed.events.length)){
+        setConn(true, isPaused ? "Пауза" : "Подключено");
+        return;
+      }
+      if (ed.resync) needFullState = true;   // клиент отстал больше ёмкости буфера
+      else lastSeq = ed.last_seq != null ? ed.last_seq : lastSeq;
+      // Дельты могут содержать изменения без полного состояния — тогда state
+      // всё равно нужен, но last_seq уже актуален и перезапрашивать дельты
+      // с того же места не нужно.
+    }
     const r = await api("/api/state");
-    const j = await r.json();
+    const j = await jsonOf(r, "/api/state");
+    needFullState = false;
+    if (j.last_seq != null) lastSeq = j.last_seq;
     versionEl.textContent = j.version ? "v"+j.version : "";
     const c = j.counters||{}; cTotal.textContent=c.total||0; cDone.textContent=c.done||0; cFailed.textContent=c.failed||0;
     isPaused = !!j.paused;
@@ -555,7 +594,11 @@ async function pollState(){
     if (btnLogout) btnLogout.classList.toggle("hidden", !!j.no_auth);
   } catch(e){
     if (String(e.message)==="401") return;
-    setConn(false, "Ошибка: "+e.message);
+    // Список не трогаем: при обрыве канала он остаётся таким, каким был
+    // последним успешным ответом, а не превращается в пустой. Иначе при
+    // первом же неполном ответе по узкому каналу пользователь видит «список
+    // пуст» и не может отличить это от «очередь потеряна».
+    setConn(false, "Ошибка: " + e.message);
   }
 }
 function startPoll(){

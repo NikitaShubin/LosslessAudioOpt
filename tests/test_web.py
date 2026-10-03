@@ -20,6 +20,8 @@
     W2  у renderQueue нет раннего выхода, мимо которого проходят вызовы
     W3  удаление строк дёргает pollState сразу, а не ждёт ближайшего полла
     W4  вшитые ассеты соответствуют web/ (иначе правка JS не доедет до бинарника)
+    W5  опрос идёт дельтами /api/events, полный /api/state — только по resync
+    W6  разбор ответа даёт внятную ошибку, а не сырой SyntaxError
 
 Запуск:
     python3 tests/test_web.py
@@ -43,19 +45,19 @@ def app_src():
 
 
 def func_body(src, name):
-    """Текст функции верхнего уровня по имени: от `function name(` до закрывающей
-    скобки на нулевом отступе. Проще и надёжнее, чем brace-matching с учётом
-    строковых литералов: в app.js нет вложенных объявлений функций с тем же
-    именем, а отступы выдерживаются единообразно."""
-    start = src.find("function %s(" % name)
-    if start < 0:
-        start = src.find("async function %s(" % name)
-    assert start >= 0, "функция %s не найдена" % name
-    m = re.compile(r"^function %s\(|^async function %s\(" % (name, name), re.M)
+    """Текст функции верхнего уровня по имени: от объявления до закрывающей
+    скобки на нулевом отступе.
+
+    Учитывает и обычное `function name(`, и `async function name(`: асинхронных
+    функций в интерфейсе большинство, и искать только по первому виду означало
+    бы молча не найти половину проверяемых мест.
+    """
+    m = re.search(r"^(?:async\s+)?function\s+%s\s*\(" % re.escape(name), src, re.M)
+    assert m, "функция %s не найдена" % name
+    start = m.start()
     end_m = re.compile(r"^\}", re.M)
     m2 = end_m.search(src, start)
     assert m2, "не найден конец функции %s" % name
-    assert m.search(src, start), "не найдено объявление %s" % name
     return src[start:m2.start()]
 
 
@@ -135,11 +137,50 @@ def w4_embedded_assets_in_sync():
     assert "function renderQueue" in src, "не найдено объявление renderQueue"
 
 
+def w5_polling_uses_events_deltas():
+    """Раз в секунду UI не должен тянуть полное состояние.
+
+    На большой библиотеке /api/state — это megabytes (task_infos на каждую
+    строку), и по узкому каналу ответ либо не доходит, либо приходит
+    обрезанным: страница показывает «список пуст», хотя демон отвечал секунду
+    назад. Дельты через /api/events — десятки байт, когда ничего не изменилось.
+    """
+    src = app_src()
+    body = func_body(src, "pollState")
+    assert "/api/events" in body, \
+        "pollState не ходит в /api/events — полное состояние качается каждый тик:\n%s" % body
+    assert "since=" in body, "в запросе дельт нет параметра since (все события разом):\n%s" % body
+    assert "resync" in body, \
+        "pollState не смотрит на resync — клиент, отставший дальше буфера событий, " \
+        "останется с устаревшим списком:\n%s" % body
+    assert "needFullState" in body, \
+        "нет флага needFullState — непонятно, когда состояние нужно целиком:\n%s" % body
+
+
+def w6_response_parse_reports_failure():
+    """Ошибка разбора должна называть причину, а не падать сырым SyntaxError."""
+    src = app_src()
+    assert "function jsonOf(" in src, "нет обёртки разбора ответа"
+    body = func_body(src, "jsonOf")
+    assert "await r.text()" in body, \
+        "jsonOf должен читать тело текстом: пустой или оборванный ответ иначе " \
+        "даёт невнятный SyntaxError:\n%s" % body
+    for call_site in ('"/api/state"', '"/api/events"', '"/rpc"'):
+        if call_site == '"/api/events"':
+            continue
+        assert call_site in src, "нет обращения к %s" % call_site
+    # Сырой r.json() в UI больше не осталось: он и давал «Unexpected end of JSON input».
+    leftovers = [ln.strip() for ln in src.splitlines() if ".json()" in ln]
+    assert not leftovers, "остались прямые вызовы r.json() без диагностики: %r" % leftovers
+
+
 SCENARIOS = [
     ("W1", "W1  статусбар обновляется до раннего выхода", w1_statusbar_before_early_return),
     ("W2", "W2  нет раннего выхода мимо статусбара", w2_no_early_return_skips_calls),
     ("W3", "W3  удаление опрашивает состояние сразу", w3_removal_refreshes_immediately),
     ("W4", "W4  вшитый ассет не старше web/app.js", w4_embedded_assets_in_sync),
+    ("W5", "W5  опрос дельтами, полный state — по resync", w5_polling_uses_events_deltas),
+    ("W6", "W6  внятная ошибка разбора вместо SyntaxError", w6_response_parse_reports_failure),
 ]
 
 

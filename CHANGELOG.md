@@ -4,6 +4,16 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.5 — 2026-10-03
+
+### The browser no longer downloads the whole list every second
+The page refreshed itself by fetching the complete daemon state once per second. That state carries the per-variant plan (`task_infos`) for every row, so on a real library it is megabytes — 4.7 MB for 5,300 files, and growing with the library. Over a narrow port forward (or any slow link) the response does not arrive intact: the browser fails to parse it, and the page then shows an empty list, as if the queue had been lost. The daemon was answering correctly the whole time.
+
+The page now asks for changes only — `/api/events?since=`, which is a few hundred bytes while work is running and empty when nothing moved — and downloads the full state only when the daemon reports that the page has fallen behind its event buffer (`resync`) or on the first load. A 5,300-file library drops from roughly 4.7 MB per second to a few hundred bytes per second.
+
+### A dropped connection no longer empties the list
+A truncated or empty response produced a bare `Unexpected end of JSON input` in the status line and nothing else, which tells the user neither what went wrong nor whether their work is still running. Responses are now checked before parsing, so the status line names the cause (empty response, or how many bytes arrived unparseable), and the previously received list stays on screen instead of being replaced by an empty one — a broken connection is visible as a broken connection, not as a lost queue.
+
 ## 2.3.4 — 2026-10-02
 
 ### Cancelling a file no longer locks its path in the queue
