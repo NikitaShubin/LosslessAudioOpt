@@ -1111,6 +1111,40 @@ def e4_triple_conflict_optimize_tta(d):
             assert x["pictures"] == 1, "ape-картинка в sidecar: %d" % x["pictures"]
 
 
+def u1_lowercase_cover_bad_utf8(d):
+    # Регрессия 2.3.6: обложка с ключом "Cover Art (front)" (строчная f) не
+    # распознавалась как picture и уходила в текстовое поле целиком (с JPEG).
+    # Значение содержало байты 0xF4 0xAB 0xB5 0x9E (кодовая точка > U+10FFFF,
+    # которую nlohmann::json отвергает в dump). LA не умеет встраивать картинки —
+    # группа уходила в sidecar, write_sidecar падал с type_error.316. Теперь
+    # ключ разбирается без учёта регистра, а sanitize_utf8 вычищает такой диапазон.
+    # build_apev2() всегда пишет "Cover Art (Back)" — строчную обложку собираем
+    # вручную (именно так её написала внешняя программа-риппер в реальном файле).
+    jpg = make_jpeg1x1() + b"\xf4\xab\xb5\x9e" + bytes(32)
+    val = b"Cover Art (front).jpg\x00" + jpg
+    body = struct.pack("<II", len(val), 0x2) + b"Cover Art (front)\x00" + val
+    tag_size = len(body) + 32
+    def hdr(flags):
+        return b"APETAGEX" + struct.pack("<IIII", 2000, tag_size, 1, flags) + b"\x00" * 8
+    tag = hdr(0xA0000000) + body + hdr(0xC0000000)
+    cp(os.path.join(FIX, "single.flac"), os.path.join(d, "src.flac"))
+    append_apev2(os.path.join(d, "src.flac"), tag)
+    rc, out = run_tool(["optimize", d, "--formats=la", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("U1", out)
+    assert os.path.exists(os.path.join(d, "src.la")), "нет src.la"
+    g = read_sidecar_groups(os.path.join(d, "src.tags.zip"))
+    assert g, "пустой sidecar: %s" % g
+    pics = {x["type"]: x["pictures"] for x in g}
+    assert pics.get("apev2") == 1, "картинка не сохранена в sidecar: %s" % pics
+    assert not any("coverart" in k.lower() or "front" in k.lower()
+                   for x in g for k in x["fields"]), \
+        "обложка попала в текстовые поля: %s" % g
+    z = zipfile.ZipFile(os.path.join(d, "src.tags.zip"))
+    blob = z.read("pictures/0.jpg")
+    assert b"\xf4\xab\xb5\x9e" in blob, "JPEG не тот: %d байт" % len(blob)
+
+
 def e5_triple_conflict_roundtrip(d):
     # Конфликтующий набор из 3 типов через optimize(wavpack)->restore(flac):
     # apev2 встраивается в wv, riff+id3v2 (с картинкой) в sidecar; при restore
@@ -1179,6 +1213,7 @@ SCENARIOS = [
     ("e3", "E3  3 типа тегов (riff+id3v2+apev2) согласованы -> restore tta: merge в ID3v2, уникальные поля + 2 картинки, без sidecar", e3_triple_match_merge_to_tta),
     ("e4", "E4  3 типа тегов, apev2 конфликтует -> optimize tta: id3v2 embed, riff+apev2 в sidecar", e4_triple_conflict_optimize_tta),
     ("e5", "E5  3 типа тегов конфликт -> wv->flac round trip: конфликт и обе картинки сохраняются", e5_triple_conflict_roundtrip),
+    ("u1", "U1  обложка 'Cover Art (front)' (строчная f) с байтами F4 AB B5 9E -> optimize la: картинка в sidecar, без crash invalid UTF-8", u1_lowercase_cover_bad_utf8),
 ]
 
 

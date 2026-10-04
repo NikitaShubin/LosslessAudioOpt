@@ -4,6 +4,16 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.6 — 2026-10-04
+
+### An APE cover with a non-standard key no longer crashes the run
+Some rippers write the cover-art key as `Cover Art (front)` with a lowercase letter. The parser matched the key exactly against `Cover Art (Front)` / `Cover Art (Back)`, so such an image was not recognised as a picture and went into a text field with all of its JPEG bytes. For a format without native picture support the group moves to a sidecar, and writing that sidecar failed with `[json.exception.type_error.316] invalid UTF-8 byte at index 4041: 0xAB`, aborting the variant.
+
+The cover key is now matched case-insensitively, so the image is stored as a picture (inside the archive) rather than a text field.
+
+### The UTF-8 sanitizer no longer lets values above U+10FFFF through
+`sanitize_utf8` checked for overlong encodings (`F0` + byte under `0x90`) and illegal leading bytes (above `F4`), but not the upper bound: `F4` followed by a byte above `0x8F` encodes a codepoint greater than U+10FFFF, which the strict JSON writer rejects. One of the affected covers contained exactly such a sequence (`F4 AB B5 9E`), so even sanitised tags failed to dump. Such sequences are now scrubbed like any other invalid byte.
+
 ## 2.3.5 — 2026-10-03
 
 ### The browser no longer downloads the whole list every second

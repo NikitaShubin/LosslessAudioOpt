@@ -804,6 +804,7 @@ std::string sanitize_utf8(const std::string& s) {
         if (ok && need == 3 && c == 0xE0 && (unsigned char)s[i + 1] < 0xA0) ok = false;
         if (ok && need == 3 && c == 0xED && (unsigned char)s[i + 1] > 0x9F) ok = false;
         if (ok && need == 4 && c == 0xF0 && (unsigned char)s[i + 1] < 0x90) ok = false;
+        if (ok && need == 4 && c == 0xF4 && (unsigned char)s[i + 1] > 0x8F) ok = false;
         if (ok && need == 4 && c > 0xF4) ok = false;
         for (size_t k = 1; ok && k < need; k++) {
             if (((unsigned char)s[i + k] & 0xC0) != 0x80) ok = false;

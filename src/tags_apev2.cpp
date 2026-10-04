@@ -97,10 +97,14 @@ bool apev2_parse(const uint8_t* d, size_t n, Group& g) {
         if (o + vsize > items_end) break;
         std::string value((const char*)o, vsize);
         o += vsize;
-        if (key == "Cover Art (Front)" || key == "Cover Art (Back)") {
+        // Ключи картинок не стандартизированы по регистру (бывают
+        // "Cover Art (front)" со строчной буквой) — сравниваем без учёта.
+        std::string kl = key;
+        for (char& ch : kl) ch = (char)tolower((unsigned char)ch);
+        if (kl == "cover art (front)" || kl == "cover art (back)") {
             size_t nul = value.find('\0');
             Picture pic;
-            pic.type = key == "Cover Art (Front)" ? 3 : 4;
+            pic.type = kl == "cover art (front)" ? 3 : 4;
             pic.mime = "image/jpeg";
             size_t datastart = 0;
             if (nul != std::string::npos) {
