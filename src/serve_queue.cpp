@@ -306,8 +306,24 @@ uint64_t DaemonSession::clear_done() {
     return removed;
 }
 
-bool DaemonSession::restart(uint64_t id) {
-    if (!engine_) return false;
+// Вызывается ТОЛЬКО под mt_ (restart/restart_many) — сама мьютекс не берёт.
+RestartOutcome DaemonSession::restart_one(uint64_t id) {
+    if (!engine_) return RestartOutcome::Failed;
+    // Строка должна быть ВИДНА в зеркале — это список, с которым работает
+    // пользователь. Движок же хранит «зомби»-строки отменённых файлов (см.
+    // reorder), и поиск по движку находит такой id снова: restart протухшего id
+    // «успешно» создавал вторую строку на тот же файл (проверено: cancel →
+    // restart → restart давал две строки на одном файле). Невидимая строка
+    // недоступна для перезапуска по id — следовательно Gone.
+    {
+        bool visible = false;
+        for (const auto& r : st_->snapshot())
+            if (r.id == (size_t)id) {
+                visible = true;
+                break;
+            }
+        if (!visible) return RestartOutcome::Gone;
+    }
     // Универсальный перезапуск: активный файл сначала останавливается
     // (cancel + мгновенный kill процессов), ожидается завершение. Затем
     // НОВАЯ строка добавляется СНАЧАЛА, и только после успешного добавления
@@ -342,7 +358,9 @@ bool DaemonSession::restart(uint64_t id) {
                     break;
                 }
         }
-        if (path.empty()) return false;
+        // id не найден ни в движке, ни в зеркале: строка уже перезапущена
+        // прошлым запросом (у неё новый id) или удалена. Не ошибка батча.
+        if (path.empty()) return RestartOutcome::Gone;
         if (in_engine && was_active) engine_->remove((size_t)id);  // cancel + kill, без зеркала
         if (in_engine && was_active) {
             bool settled = false;
@@ -356,26 +374,25 @@ bool DaemonSession::restart(uint64_t id) {
                 if (settled) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
-            if (!settled) return false;
+            if (!settled) return RestartOutcome::Failed;
         } else if (in_engine) {
             // Готовая строка (ok/stopped/error): процессов нет, но повторное
             // добавление спотыкается о seen_paths_ движка, поэтому старую строку
             // убираем СРАЗУ (до add); позицию восстановим в хвосте restart.
-            {
-                std::lock_guard<std::mutex> lk(mt_);
-                auto s2 = engine_->snapshot();
-                for (const auto& f : s2)
-                    if (f.idx == (size_t)id) {
-                        engine_->remove((size_t)id);
-                        break;
-                    }
-            }
+            // mt_ уже держит вызывающий (restart/restart_many) — второй захват
+            // здесь был бы дедлоком на нерекурсивном мьютексе.
+            auto s2 = engine_->snapshot();
+            for (const auto& f : s2)
+                if (f.idx == (size_t)id) {
+                    engine_->remove((size_t)id);
+                    break;
+                }
         }
     }
     // Исходник должен существовать: после успешной обработки (ok) файл
     // заменён другим форматом, перезапускать нечего.
-    if (!util::dir_exists(path) && !util::file_exists(path)) return false;
-    std::lock_guard<std::mutex> lk(mt_);
+    if (!util::dir_exists(path) && !util::file_exists(path))
+        return RestartOutcome::Failed;
     nlohmann::json tmp = {{"added", nlohmann::json::array()},
                           {"rejected", nlohmann::json::array()}};
     std::vector<size_t> new_ids;
@@ -383,7 +400,7 @@ bool DaemonSession::restart(uint64_t id) {
     // остаётся optimize, restore — restore в ту же папку), иначе семантика
     // задания изменилась бы «под ногами» пользователя.
     add_locked({path}, mode, target_dir, tmp, new_ids);
-    if (new_ids.empty()) return false;  // старую строку не трогаем
+    if (new_ids.empty()) return RestartOutcome::Failed;  // старую строку не трогаем
     size_t new_id = new_ids.front();
     // Полный путь новой строки — из движка (label — только rel). Без него
     // snapshot_for_persist() уйдёт в label, и после перезапуска демона с
@@ -473,8 +490,41 @@ bool DaemonSession::restart(uint64_t id) {
     // Ручной перезапуск при остановленной очереди должен снимать паузу,
     // иначе файл добавится и останется в «queued» навсегда.
     if (paused_.load()) set_paused(false);
+    // Персист здесь НЕ делаем: батч перезапусков пишет очередь один раз в
+    // restart_many(). На каждый id это лишние ~0.6 с сериализации 28 МБ.
+    return RestartOutcome::Restarted;
+}
+
+RestartOutcome DaemonSession::restart(uint64_t id) {
+    std::lock_guard<std::mutex> lk(mt_);
+    RestartOutcome r = restart_one(id);
     persist(false);
-    return true;
+    return r;
+}
+
+std::vector<RestartOutcome> DaemonSession::restart_many(
+    const std::vector<uint64_t>& ids) {
+    // Один захват mt_ на весь батч: два одинаковых запроса, посланные клиентом
+    // повторно после таймаута, не могут разобрать работу между собой. Раньше
+    // батч из 9 id на живой очереди писал 28 МБ девять раз подряд и не
+    // укладывался в таймаут клиента — тот слал повтор и получал в ответе
+    // «перезапущено 2 из 9», хотя перезапущены были все девять.
+    std::vector<RestartOutcome> out;
+    out.reserve(ids.size());
+    bool any = false;
+    {
+        std::lock_guard<std::mutex> lk(mt_);
+        for (uint64_t id : ids) {
+            RestartOutcome r = restart_one(id);
+            if (r == RestartOutcome::Restarted) any = true;
+            out.push_back(r);
+        }
+        // Персист один на батч, и только если что-то изменилось: Gone на весь
+        // батч — это повтор поверх уже сделанной работы, переписывать файл
+        // незачем.
+        if (any) persist(false);
+    }
+    return out;
 }
 
 bool DaemonSession::reorder(const std::vector<size_t>& order) {

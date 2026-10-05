@@ -216,9 +216,20 @@ struct FakeDaemon : Daemon {
         cancelled_id = id;
         return cancel_exists;
     }
-    bool restart(uint64_t id) override {
+    dsvc::RestartOutcome restart(uint64_t id) override {
         cancelled_id = id;
-        return cancel_exists;
+        return cancel_exists ? dsvc::RestartOutcome::Restarted
+                             : dsvc::RestartOutcome::Gone;
+    }
+    std::vector<dsvc::RestartOutcome> restart_many(
+        const std::vector<uint64_t>& ids) override {
+        std::vector<dsvc::RestartOutcome> out;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            cancelled_id = ids[i];
+            out.push_back(cancel_exists ? dsvc::RestartOutcome::Restarted
+                                        : dsvc::RestartOutcome::Gone);
+        }
+        return out;
     }
     uint64_t bulk_remove(const std::vector<size_t>& ids) override {
         return ids.size();

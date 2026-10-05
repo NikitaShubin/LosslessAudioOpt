@@ -196,10 +196,24 @@ nlohmann::json call(Daemon& d, const std::string& cmd, const nlohmann::json& arg
         } else {
             return err("bad_args", "missing ids array");
         }
-        nlohmann::json done = nlohmann::json::array();
-        for (uint64_t id : ids)
-            if (d.restart(id)) done.push_back(id);
-        return ok({{"restarted", std::move(done)}});
+        // Отчёт по каждому id, а не только «успешные»: клиент, повторивший
+        // запрос после сетевого таймаута, обязан видеть, что Gone — это «уже
+        // перезапущено прошлым запросом», а не «потеряли». Раньше повтор
+        // возвращал 2 id вместо 9, и это читалось как частичная потеря работы.
+        std::vector<RestartOutcome> res = d.restart_many(ids);
+        nlohmann::json restarted = nlohmann::json::array();
+        nlohmann::json gone = nlohmann::json::array();
+        nlohmann::json failed = nlohmann::json::array();
+        for (size_t i = 0; i < ids.size(); ++i) {
+            switch (res[i]) {
+                case RestartOutcome::Restarted: restarted.push_back(ids[i]); break;
+                case RestartOutcome::Gone:      gone.push_back(ids[i]);      break;
+                case RestartOutcome::Failed:    failed.push_back(ids[i]);    break;
+            }
+        }
+        return ok({{"restarted", std::move(restarted)},
+                   {"gone", std::move(gone)},
+                   {"failed", std::move(failed)}});
     }
 
     if (cmd == "cancel-all") {

@@ -310,6 +310,14 @@ name="llao" dir=in action=allow protocol=TCP localport=18180`). On Linux:
 `bulk-cancel`, `bulk-remove`, `clear-done`, `sort`, `restart`,
 `pause`/`cancel-all`, `resume`, `reorder`, `shutdown`, `formats`, `debug`.
 
+`restart` отчитывается по каждому id: `restarted`, `gone` (id больше не
+известен — обычно потому, что более ранний такой же запрос уже перезапустил
+строку) и `failed` (строка найдена, но исходника нет). Такое разбиение делает
+повтор после клиентского таймаута однозначным: без него повторный батч выглядит
+как молчаливая потеря части работы. Персист пишется один раз на весь батч, а не
+на каждый id, и весь батч идёт под одной блокировкой — два одинаковых запроса
+не могут разделить работу между собой.
+
 Discovery-файл — `%LOCALAPPDATA%/llao/daemon.json` на Windows,
 `$XDG_DATA_HOME/llao/daemon.json` на Linux (переопределяется `--discovery`
 или env `LLAO_DISCOVERY`). Содержит `port`, `token`, `pid`, `version` —

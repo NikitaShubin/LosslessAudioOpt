@@ -314,6 +314,14 @@ All requests except `GET /` and `/static/*` require the
 `bulk-cancel`, `bulk-remove`, `clear-done`, `sort`, `restart`,
 `pause`/`cancel-all`, `resume`, `reorder`, `shutdown`, `formats`, `debug`.
 
+`restart` reports the outcome per id — `restarted`, `gone` (the id is no longer
+known, typically because an earlier identical request already restarted it) and
+`failed` (the row was found but the source is gone). The three-way split makes a
+retry after a client-side timeout unambiguous: without it a repeated batch looks
+like it silently lost part of its work. The whole batch is persisted once, not
+once per id, and is processed under a single lock so two identical requests
+cannot split the work between them.
+
 The discovery file is `%LOCALAPPDATA%/llao/daemon.json` on Windows,
 `$XDG_DATA_HOME/llao/daemon.json` on Linux (overridden by `--discovery` or the
 `LLAO_DISCOVERY` env var). It contains `port`, `token`, `pid`, `version` — allowing

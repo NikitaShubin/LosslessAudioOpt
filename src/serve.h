@@ -69,7 +69,9 @@ public:
              nlohmann::json& result) override;
     bool cancel_file(uint64_t id) override;
     bool remove(uint64_t id) override;
-    bool restart(uint64_t id) override;
+    RestartOutcome restart(uint64_t id) override;
+    std::vector<RestartOutcome> restart_many(
+        const std::vector<uint64_t>& ids) override;
     uint64_t bulk_remove(const std::vector<size_t>& ids) override;
     uint64_t bulk_cancel(const std::vector<size_t>& ids) override;
     uint64_t cancel_all_active() override;
@@ -94,6 +96,9 @@ private:
                     const std::string& mode, const std::string& target_dir,
                     nlohmann::json& result, std::vector<size_t>& new_ids);
     bool remove_locked(uint64_t id);
+    // Один перезапуск без персиста и без захвата mt_ — вызывается из
+    // restart_many() под mt_ (весь батч) и из restart() под mt_.
+    RestartOutcome restart_one(uint64_t id);
 
     // Инкрементная персистентность: снять снапшоты зеркала и движка
     // ОТДЕЛЬНО (без вложенных блокировок — см. деадлок-осторожность) и

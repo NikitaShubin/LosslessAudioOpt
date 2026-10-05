@@ -51,17 +51,25 @@ SERVER_SRCS := src/events.cpp \
 # Веб-ассеты вшиваются в единый бинарник.
 WEB_ASSETS_SRCS := src/web_assets.cpp src/web_assets_data.cpp
 
+# Очередь непринятых соединений у listen(). Вендоренный httplib.h задаёт
+# CPPHTTPLIB_LISTEN_BACKLOG дефолтом 5 (макро под #ifndef, поэтому
+# переопределяется флагом, а не правкой third_party). С пятью слотами всплеск
+# запросов переполняет очередь, ядро молча рвёт handshake
+# (tcp_abort_on_overflow=0) и клиент видит таймаут вместо ответа. Под нагрузкой
+# от кодеков это выглядело как «API и веб умерли».
+HTTP_BACKLOG_FLAG := -DCPPHTTPLIB_LISTEN_BACKLOG=1024
+
 ifeq ($(TARGET),linux)
   CXX := g++
   CC := gcc
-  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Ithird_party -Ithird_party/httplib -Isrc
+  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra $(HTTP_BACKLOG_FLAG) -Ithird_party -Ithird_party/httplib -Isrc
   CFLAGS := -O2 -Ithird_party
   LDFLAGS := -lpthread
   BIN := llao-linux
 else
   CXX := x86_64-w64-mingw32-g++
   CC := x86_64-w64-mingw32-gcc
-  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DWIN32_LEAN_AND_MEAN -Ithird_party -Ithird_party/httplib -Isrc
+  CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -DWIN32_LEAN_AND_MEAN $(HTTP_BACKLOG_FLAG) -Ithird_party -Ithird_party/httplib -Isrc
   CFLAGS := -O2 -DWIN32_LEAN_AND_MEAN -Ithird_party
   LDFLAGS := -static -static-libgcc -static-libstdc++ -lwinhttp -lws2_32 -lbcrypt -lshell32
   BIN := llao.exe

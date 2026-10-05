@@ -12,7 +12,8 @@ ffmpeg в PATH для генерации тестовых wav. Без ffmpeg т�
   4. reorder подмножеством после remove (раньше молча отказывал)
   5. pause -> resume: те же id, без дублей
   6. restart завершённого: старая строка заменена новой, дублей нет
-  7. restart активного/неизвестного -> пустой restarted; restart без ids -> bad_args
+  7. restart активного/неизвестного -> restarted/gone/failed; повтор того же
+     батча -> Gone (идемпотентность); restart без ids -> bad_args
   7.11 optimize с target_dir: результат в target_dir/<rel>, оригинал не тронут;
        повторный optimize уже оптимизированного — всё равно пишется в цель
   8. shutdown: процесс завершается, discovery-файл удалён
@@ -160,9 +161,45 @@ def main():
                 check(old not in ids, f"old id {old} replaced: {ids}")
         d.rpc("resume", {})
         r = d.rpc("restart", {"ids": [9999]})
-        check(r["ok"] and r["result"]["restarted"] == [], "restart unknown")
+        # Неизвестный id — это Gone, а не «перезапуск не сработал»: клиент,
+        # повторивший запрос после таймаута, обязан отличить «уже сделано» от
+        # «потеряли» (иначе повтор выглядит как частичная потеря работы).
+        check(r["ok"] and r["result"]["restarted"] == []
+              and r["result"]["gone"] == [9999]
+              and r["result"]["failed"] == [], f"restart unknown -> gone: {r}")
         r = d.rpc("restart", {})
         check(not r["ok"] and r["code"] == "bad_args", "restart bad_args")
+
+        # 7.4. Повтор того же батча (клиент не дождался ответа и переспросил):
+        # первый вызов Restarted, второй Gone по всем id, файлов не удвоилось.
+        # Именно так выглядел боевой батч из 9 moov-строк: клиент получил
+        # таймаут, повторил и увидел «перезапущено 2 из 9».
+        d.rpc("pause", {})
+        rep_wav = os.path.join(workdir, "retry_restart.wav")
+        H.gen_wav(rep_wav, 680)
+        r = d.rpc("add", {"paths": [rep_wav]})
+        rid = r["result"]["added"][0]["id"]
+        d.rpc("cancel-file", {"id": rid})
+        H.wait_until(
+            lambda: (lambda row: row is None
+                     or row["state"] not in ("queued", "prep", "running"))(
+                next((x for x in d.get("/api/state")["rows"]
+                      if x["id"] == rid), None)),
+            timeout=20, interval=0.5)
+        first = d.rpc("restart", {"ids": [rid]})
+        check(first["ok"] and first["result"]["restarted"] == [rid]
+              and first["result"]["gone"] == [],
+              f"retry_restart first call: {first}")
+        again = d.rpc("restart", {"ids": [rid]})
+        check(again["ok"] and again["result"]["restarted"] == []
+              and again["result"]["gone"] == [rid]
+              and again["result"]["failed"] == [],
+              f"retry_restart repeat -> gone, not failed: {again}")
+        st = d.get("/api/state")
+        rows_rep = [x for x in st["rows"] if x["label"] == "retry_restart.wav"]
+        check(len(rows_rep) == 1,
+              f"retry_restart: ровно одна строка после повтора: {rows_rep}")
+        d.rpc("resume", {})
 
         # 7.5. параллельные add одного пути: ровно одно добавление, без дублей
         import concurrent.futures as _fut

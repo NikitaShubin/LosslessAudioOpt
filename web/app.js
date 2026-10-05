@@ -730,13 +730,27 @@ btnStop.addEventListener("click", async ()=>{
     opmsg("Остановлено активных: "+(res.cancelled||0)+". Очередь на паузе.", "ok");
   } catch(e){ opmsg(e.message, "err"); }
 });
+// Отчёт о батче restart: gone — это не «потеряли», а «уже в работе» (строку
+// перезапустил более ранний такой же запрос). Без такой расшифровки повтор
+// после сетевого таймаута показывал бы «Запущено: 0 из 9» при девяти
+// работающих файлах.
+function restartReport(res, total){
+  const n = (res.restarted||[]).length;
+  const g = (res.gone||[]).length;
+  const f = (res.failed||[]).length;
+  let msg = "Запущено: "+n+" из "+total;
+  if (g) msg += ", уже в работе: "+g;
+  if (f) msg += ", не запущено: "+f;
+  return msg;
+}
+
 btnResume.addEventListener("click", async ()=>{
   const ids = currentRows.filter(r=>r.state==="stopped"||r.state==="error").map(r=>r.id);
   try{ await rpc("resume", {}); }catch(e){}
   if (ids.length) {
     try {
       const res = await rpc("restart", {ids});
-opmsg("Запущено: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
+opmsg(restartReport(res, ids.length), (res.failed||[]).length ? "err" : "ok");
     } catch(e){ opmsg(e.message, "err"); }
   } else {
     opmsg("Очередь запущена", "ok");
@@ -774,7 +788,7 @@ btnBatchStart.addEventListener("click", async ()=>{
   opmsg("Запуск выделенных...", "");
   try {
     const res = await rpc("restart", {ids});
-    opmsg("Запущено: "+((res.restarted||[]).length)+" из "+ids.length, "ok");
+    opmsg(restartReport(res, ids.length), (res.failed||[]).length ? "err" : "ok");
   } catch(e){ opmsg(e.message, "err"); }
 });
 btnBatchDelete.addEventListener("click", async ()=>{
