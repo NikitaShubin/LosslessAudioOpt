@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstring>
 
+#include "config.h"
 #include "i18n.h"
 #include "util.h"
 
@@ -129,36 +130,33 @@ std::string write_group(const std::string& path, const config::Format& fmt, TagT
     }
     if (fmt.tag_write_method == "mp4_ilst") {
         auto data = util::read_file(path);
-        size_t mdat = std::string::npos, moov = std::string::npos;
-        for (size_t i = 0; i + 4 <= data.size(); i++) {
-            if (mdat == std::string::npos && memcmp(data.data() + i, "mdat", 4) == 0)
-                mdat = i;
-            if (moov == std::string::npos && memcmp(data.data() + i, "moov", 4) == 0)
-                moov = i;
-        }
-        if (mdat == std::string::npos || moov == std::string::npos)
+        // mdat и moov ищем обходом дерева боксов, а не поиском байтов: ASCII
+        // "moov"/"mdat" встречается внутри энтропийных данных mdat, и прежний
+        // поиск цеплял первое совпадение в аудиобайтах. Из-за этого читались
+        // мусорные 4 байта размера и файл падал с "moov is corrupted".
+        M4aBox moov_b, mdat_b;
+        if (!m4a_top_find(data.data(), data.size(), "moov", &moov_b))
             return i18n::str("no mdat/moov in M4A");
-        if (moov < mdat)
+        if (!m4a_top_find(data.data(), data.size(), "mdat", &mdat_b))
+            return i18n::str("no mdat/moov in M4A");
+        if (moov_b.off < mdat_b.off)
             return i18n::str("moov before mdat — offset rewriting is not supported (use a sidecar)");
 
-        uint64_t moov_off = moov - 4;
-        uint64_t moov_sz = rd32be(data.data() + moov_off);
-        if (moov_sz < 8 || moov_off + moov_sz > data.size()) return i18n::str("moov is corrupted");
-
-        M4aBox udta{0, 0, {'u', 'd', 't', 'a'}};
-        M4aBox meta{0, 0, {'m', 'e', 't', 'a'}};
-        M4aBox ilst{0, 0, {'i', 'l', 's', 't'}};
+        M4aBox udta, meta, ilst;
         bool found_udta = false, found_meta = false, found_ilst = false;
-        for (const auto& b : m4a_children(data.data(), moov_off + 8, moov_off + moov_sz)) {
+        for (const auto& b : m4a_children(data.data(), moov_b.off + (moov_b.wide ? 16 : 8),
+                                           moov_b.off + moov_b.size)) {
             if (memcmp(b.type, "udta", 4) == 0) { udta = b; found_udta = true; }
         }
         if (found_udta) {
-            for (const auto& b : m4a_children(data.data(), udta.off + 8, udta.off + udta.size)) {
+            for (const auto& b : m4a_children(data.data(), udta.off + (udta.wide ? 16 : 8),
+                                               udta.off + udta.size)) {
                 if (memcmp(b.type, "meta", 4) == 0) { meta = b; found_meta = true; }
             }
         }
         if (found_meta) {
-            for (const auto& b : m4a_children(data.data(), meta.off + 12, meta.off + meta.size)) {
+            for (const auto& b : m4a_children(data.data(), meta.off + (meta.wide ? 20 : 12),
+                                               meta.off + meta.size)) {
                 if (memcmp(b.type, "ilst", 4) == 0) { ilst = b; found_ilst = true; }
             }
         }
@@ -182,11 +180,18 @@ std::string write_group(const std::string& path, const config::Format& fmt, TagT
             wr32be_at(item, 0, (uint32_t)item.size());
             new_ilst.insert(new_ilst.end(), item.begin(), item.end());
         };
+        const auto& tbl = config::load_tag_tables();
         for (const auto& [key, values] : g.fields) {
             bool is_binary = std::find(fmt.tag_numeric_fields.begin(),
                                        fmt.tag_numeric_fields.end(), key) !=
                              fmt.tag_numeric_fields.end();
             if (is_binary) {
+                // 4CC-ключ и размер бинарной пары берём из formats/tag_tables.json
+                // (mp4_numeric): в коде не осталось раскладки "track -> trkn, 8 байт".
+                const config::Mp4Numeric* num = tbl.mp4_numeric_by_field(key);
+                if (!num)
+                    return i18n::fmt("no numeric MP4 description for the field '%s' in tag_tables.json",
+                                     key.c_str());
                 // Числовые поля MP4 хранятся бинарной парой: номер и «всего».
                 // Значение приходит текстом в форме "номер" или "номер/всего"
                 // (APEv2, Vorbis и ID3 пишут оба варианта), поэтому оно
@@ -196,19 +201,19 @@ std::string write_group(const std::string& path, const config::Format& fmt, TagT
                 // «всего», и track вида "3/13" терял половину смысла. Исключение
                 // не спасало: stoul на "3/13" просто возвращает 3.
                 for (const auto& val : values) {
-                    unsigned num = 0, total = 0;
-                    if (!parse_pair(val, &num, &total))
+                    unsigned num_v = 0, total = 0;
+                    if (!parse_pair(val, &num_v, &total))
                         return i18n::fmt("cannot parse the numeric tag '%s' = '%s' for M4A",
                                          key.c_str(), util::one_line(val).c_str());
-                    // trkn: 2 байта reserved, по 2 байта номер/всего, 2 reserved.
-                    // disk: 2 байта reserved, по 2 байта номер/всего.
-                    const size_t box = (key == "track") ? 8 : 6;
-                    std::vector<uint8_t> v(box, 0);
-                    v[2] = (uint8_t)(num >> 8);
-                    v[3] = (uint8_t)num;
+                    // Первые 2 байта пары — reserved, дальше по 2 байта
+                    // номер/всего (у trkn за ними ещё 2 байта reserved —
+                    // это и есть разный box_size у trkn и disk).
+                    std::vector<uint8_t> v(num->box_size, 0);
+                    v[2] = (uint8_t)(num_v >> 8);
+                    v[3] = (uint8_t)num_v;
                     v[4] = (uint8_t)(total >> 8);
                     v[5] = (uint8_t)total;
-                    add_item(key == "track" ? "trkn" : "disk", 0, v);
+                    add_item(num->mp4_key, 0, v);
                 }
             } else if (is_replaygain(key)) {
                 return i18n::str("ReplayGain is not supported in M4A (use a sidecar)");
@@ -269,28 +274,35 @@ std::string write_group(const std::string& path, const config::Format& fmt, TagT
         wr32be_at(new_ilst_box, 0, (uint32_t)new_ilst_box.size());
         out.insert(out.begin() + ilst.off, new_ilst_box.begin(), new_ilst_box.end());
         int64_t delta = (int64_t)new_ilst_box.size() - (int64_t)ilst.size;
-        auto bump = [&](uint64_t off, int64_t add) {
-            if (off + 4 > out.size()) return;
-            uint32_t sz = rd32be(out.data() + off);
-            if (sz != 1) {
-                uint64_t ns = (uint64_t)sz + add;
-                out[off] = (uint8_t)(ns >> 24);
-                out[off + 1] = (uint8_t)(ns >> 16);
-                out[off + 2] = (uint8_t)(ns >> 8);
-                out[off + 3] = (uint8_t)ns;
+        // Смещение ilst не меняется: замена идёт на месте, поэтому и udta,
+        // и meta, и moov начинаются с тех же байтов. Раньше их искали поиском
+        // байтов от moov до конца файла, из-за чего в значение тега, случайно
+        // содержащее "udta"/"meta", могло попасть обновление размера.
+        // У 64-битных боксов (size==1) править надо largesize, а не первые
+        // 4 байта, — иначе размер оставался прежним и файл ломался.
+        auto bump = [&](const M4aBox& b) {
+            if (b.off + 8 > out.size()) return;
+            // Арифметика знаковая: delta отрицательна, когда новый ilst меньше
+            // прежнего (например, в файле были лишние теги). При сложении
+            // uint64_t + int64_t знаковое значение переводится в беззнаковое и
+            // отрицательная дельта заворачивается в мусорный размер — файл после
+            // записи переставал открываться.
+            int64_t ns = (int64_t)b.size + delta;
+            if (ns < 8) return;
+            if (!b.wide && (uint64_t)ns > 0xFFFFFFFFull) return;  // не влезает в 32 бита
+            if (b.wide) {
+                for (int i = 0; i < 8; i++) out[b.off + 8 + i] = (uint8_t)(ns >> (56 - 8 * i));
+            } else {
+                uint64_t u = (uint64_t)ns;
+                out[b.off] = (uint8_t)(u >> 24);
+                out[b.off + 1] = (uint8_t)(u >> 16);
+                out[b.off + 2] = (uint8_t)(u >> 8);
+                out[b.off + 3] = (uint8_t)u;
             }
         };
-        auto locate = [&](const char* t4) -> uint64_t {
-            for (size_t i = moov_off; i + 4 <= out.size(); i++)
-                if (memcmp(out.data() + i, t4, 4) == 0) return i;
-            return 0;
-        };
-        uint64_t new_moov = locate("moov") - 4;
-        uint64_t new_udta = locate("udta") - 4;
-        uint64_t new_meta = locate("meta") - 4;
-        bump(new_moov, delta);
-        bump(new_udta, delta);
-        bump(new_meta, delta);
+        bump(moov_b);
+        bump(udta);
+        bump(meta);
         return util::write_file(path, out) ? "" : i18n::str("could not write M4A tags");
     }
     return i18n::fmt("format '%s' does not support built-in tags of type '%s'",

@@ -521,7 +521,17 @@ std::string validate_groups(const std::string& path, const config::Format& fmt,
             bool found = false;
             for (const auto& r : read.fields["lyrics"])
                 if (r == lyr->second[0]) found = true;
-            if (!found) problems.push_back(i18n::str("lyrics did not survive"));
+            // Значение в сообщение целиком не вставляем: лирика — это
+            // сотни строк текста, и такая «ошибка» превращалась в простыню,
+            // из которой нечего было выцепить. Показываем начало и размер.
+            if (!found) {
+                const std::string& lv = lyr->second[0];
+                const size_t kPreview = 40;
+                std::string prev = lv.substr(0, kPreview);
+                problems.push_back(i18n::fmt(
+                    "lyrics did not survive (%zu chars, starts '%s')", lv.size(),
+                    prev.c_str()));
+            }
         }
     }
     if (read.pictures.size() != want_pics) {

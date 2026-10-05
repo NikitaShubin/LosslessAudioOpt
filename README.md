@@ -274,6 +274,11 @@ Open `http://127.0.0.1:<port>/` and enter the token. Features:
   (blue), for finished ones — savings in percent (green). In restore mode the
   percentages are honest: when the file grows, the loss is shown in grey. The result
   path in the "File" column is relative to the target folder;
+- the per-variant dots after the progress bar, one per candidate: green for done,
+  blue for working, yellow for skipped (outside the format's capabilities), red
+  for failed. Hovering a dot shows the format, variant and parameters, and for a
+  failed variant — the reason it failed, which survives a daemon restart. Only
+  failed variants carry a reason, so the snapshot stays small on a large library;
 - bulk operations on selected rows: stop, start, move to top/up/down/end, remove;
   row dragging; sorting by path;
 - pausing the whole queue, restarting stopped ones, clearing only successfully

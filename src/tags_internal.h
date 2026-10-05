@@ -57,10 +57,19 @@ void id3v1_parse(const uint8_t* d, size_t n, Group& g);
 // MP4 ilst (tags_mp4.cpp).
 struct M4aBox {
     uint64_t off = 0;
-    uint64_t size = 0;
+    uint64_t size = 0;   // полный размер бокса, включая заголовок
     uint8_t type[4] = {0, 0, 0, 0};
+    bool wide = false;   // размер записан в 64 бита (size==1 + largesize)
 };
 std::vector<M4aBox> m4a_children(const uint8_t* d, uint64_t start, uint64_t end);
+
+// Размер бокса берётся из заголовка (32 бита, либо 64 при size==1), поэтому
+// искать боксы поиском байтов нельзя: ASCII "moov"/"mdat" встречается внутри
+// энтропийных данных mdat, и такой поиск находил не тот бокс.
+// m4a_top_level возвращает боксы верхнего уровня файла.
+std::vector<M4aBox> m4a_top_level(const uint8_t* d, uint64_t n);
+// Находит бокс заданного типа на верхнем уровне. false, если его нет.
+bool m4a_top_find(const uint8_t* d, uint64_t n, const char* type, M4aBox* out);
 void mp4_ilst_parse(const uint8_t* d, size_t n, Group& g);
 
 // WAV: LIST INFO + встроенные ID3v2-блоки (tags_wav.cpp).

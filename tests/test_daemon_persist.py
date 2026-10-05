@@ -376,6 +376,52 @@ def main():
               % len(labels10))
         d10b.stop()
 
+        # P10. Причина падения варианта возвращается в /api/state после
+        # рестарта демона.
+        #
+        # Проверяется не «живым» сбоем кодера, а подкладыванием queue.json руками:
+        # monkeys_audio принимает нечётное число сэмплов, и подобрать формат,
+        # который отвергнет вход, иначе не удалось. Здесь важна другая половина
+        # моста — restore: у красной точки причина обязана пережить рестарт, иначе
+        # после перезапуска демона интерфейс молча терял бы половину диагностики.
+        p10dir = os.path.join(workdir, "p10")
+        os.makedirs(p10dir, exist_ok=True)
+        wav10 = os.path.join(p10dir, "mixed.wav")
+        H.gen_wav(wav10, 440)
+        with open(queue_path(H.Daemon(binary, p10dir)), "w", encoding="utf-8") as f:
+            json.dump({"version": 2, "rows": [{
+                "path": wav10, "root": "", "mode": "optimize", "state": "error",
+                "last_error": "variant: encoder rejected odd sample count",
+                "out_path": "", "target_dir": "", "pct": 0,
+                "tasks": ["ok", "failed", "ok"],
+                # причина варианта 1 из 3
+                "task_errors": {"1": "encoder rejected odd sample count"},
+                "task_infos": [{"fmt": "alac", "variant": "default", "note": ""},
+                               {"fmt": "tak", "variant": "p4m", "note": ""},
+                               {"fmt": "tta", "variant": "default", "note": ""}],
+            }]}, f, ensure_ascii=False)
+        d10 = H.Daemon(binary, p10dir, jobs=2.0, cwd=ROOT).start()
+        row10 = next((x for x in d10.rows()
+                      if x["path"].endswith("mixed.wav")), None)
+        check(row10 is not None, f"P10: строка из queue.json поднята: {row10}")
+        infos10 = (row10 or {}).get("task_infos", [])
+        got = [t.get("error") for t in infos10]
+        check(got == [None, "encoder rejected odd sample count", None],
+              f"P10: причина у варианта 1, у соседей её нет: {got}")
+        check(got and "odd" in got[1],
+              f"P10: в причине назван виновник (нечётная длина): {got}")
+        # У 2.3.6 в task_infos не было поля error вообще — веб обязан терпеть
+        # строки без него (старые queue.json в дикой природе ещё месяцами).
+        d10.stop()
+
+        # Строка без причин не должна получать ни одного ключа error.
+        q10 = read_queue(d10)
+        check(all(not r.get("task_errors") or r["task_errors"] == {} or
+                  all(v for v in r["task_errors"].values())
+                  for r in (q10 or {}).get("rows", [])),
+              f"P10: в очередь не записаны пустые причины: "
+              f"{[r.get('task_errors') for r in (q10 or {}).get('rows', [])]}")
+
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

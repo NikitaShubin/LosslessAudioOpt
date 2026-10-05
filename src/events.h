@@ -85,6 +85,10 @@ struct Row {
     std::string state;             // queued | prep | running | ok | stopped | error
     double pct = 0;                // выигрыш в сжатии (после ok)
     std::vector<std::string> tasks; // состояния вариантов: pend|running|ok|failed
+    // Причины падения вариантов, параллельно tasks. Пустая строка — вариант не
+    // падал. Хранится отдельно от task_infos: те — статичные метаданные,
+    // задаваемые один раз на prep, а причина ошибки появляется позже.
+    std::vector<std::string> task_errors;
     std::vector<obs::TaskInfo> task_infos; // метаданные задач (fmt/variant)
     std::vector<obs::ExcludedVariant> excluded; // варианты, пропущенные по caps (жёлтые точки)
     bool has_winner = false;         // победитель известен (кружок на вебе)
@@ -112,6 +116,8 @@ public:
     void set_tasks(size_t id, std::vector<std::string> tasks);
     void set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos);
     void set_task(size_t id, size_t idx, const std::string& st);
+    // Причина падения варианта (пустая строка — сбросить).
+    void set_task_error(size_t id, size_t idx, const std::string& err);
     void set_pct(size_t id, double pct);
     void set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants);
     void set_winner(size_t id, const std::string& fmt, const std::string& variant,

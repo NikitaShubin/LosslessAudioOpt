@@ -174,6 +174,37 @@ def w6_response_parse_reports_failure():
     assert not leftovers, "остались прямые вызовы r.json() без диагностики: %r" % leftovers
 
 
+def w7_variant_error_in_tooltip():
+    """Причина падения варианта должна быть видна в тултипе красной точки."""
+    src = app_src()
+    body = func_body(src, "taskDot")
+    assert "info.error" in body, (
+        "taskDot игнорирует info.error — красная точка варианта молчит, и "
+        "пользователю остаётся причина ошибки файла целиком вместо причины "
+        "конкретного варианта:\n%s" % body)
+    assert "Причина" in body, \
+        "в тултипе нет подписи к причине (\nПричина: ...):\n%s" % body
+
+
+def w8_no_full_path_in_row_tooltip():
+    """Тултип строки не должен содержать полный путь.
+
+    Подсказка из полного пути превращалась в многострочную простыню и перекрывала
+    весь экран, хотя в самой ячейке рядом уже виден тот же путь, урезанный до
+    target_dir. Полный путь остаётся в CLI и в /api/state (поле path).
+    """
+    src = app_src()
+    body = func_body(src, "renderQueue")
+    assert "fullPathFor" not in body, (
+        "renderQueue снова кладёт полный путь в title строки:\n%s" % body)
+    assert "shortPathFor" in body, \
+        "renderQueue не использует shortPathFor — тултип строки пустой или полный"
+    fn = func_body(src, "shortPathFor")
+    assert "target_dir" in fn, \
+        "shortPathFor не урезает по target_dir — длинные пути останутся длинными"
+    assert "function displayPath" in src, "нет displayPath"
+
+
 SCENARIOS = [
     ("W1", "W1  статусбар обновляется до раннего выхода", w1_statusbar_before_early_return),
     ("W2", "W2  нет раннего выхода мимо статусбара", w2_no_early_return_skips_calls),
@@ -181,6 +212,8 @@ SCENARIOS = [
     ("W4", "W4  вшитый ассет не старше web/app.js", w4_embedded_assets_in_sync),
     ("W5", "W5  опрос дельтами, полный state — по resync", w5_polling_uses_events_deltas),
     ("W6", "W6  внятная ошибка разбора вместо SyntaxError", w6_response_parse_reports_failure),
+    ("W7", "W7  причина падения варианта в тултипе точки", w7_variant_error_in_tooltip),
+    ("W8", "W8  в тултипе строки нет полного пути", w8_no_full_path_in_row_tooltip),
 ]
 
 

@@ -71,6 +71,10 @@ void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
                                                    : "failed";
     emit(id, "task", {{"idx", idx}, {"state", s}});
     st_->set_task(id, idx, s);
+    // Причина живёт только рядом с failed: успешный или снятый вариант
+    // ошибкой не является, и старый текст у него быть не должен. Отдельного
+    // события не шлём — «task» и так заставит клиент перезапросить состояние.
+    if (st != obs::TaskState::Failed) st_->set_task_error(id, idx, "");
     // Старт варианта делает файл «в работе»: prep может быть долгим, и строка
     // должна перейти в running по первому реально запущенному варианту
     // (а держаться в prep до этого). Состояние же строки выставлять в ok/failed
@@ -79,6 +83,14 @@ void DaemonSink::task(size_t id, size_t idx, obs::TaskState st) {
         emit(id, "state", {{"state", "running"}});
         st_->set_state(id, "running");
     }
+}
+
+void DaemonSink::task_error(size_t id, size_t idx, const std::string& err) {
+    // Пустая строка — это сброс ранее записанной причины, а не «ничего не
+    // делать»: вариант мог упасть на пробной попытке и затем пройти, и без
+    // сброса зелёная точка продолжала бы показывать старую причину.
+    if (!err.empty()) emit(id, "task_error", {{"idx", idx}, {"error", err}});
+    st_->set_task_error(id, idx, err);
 }
 
 void DaemonSink::end_file(size_t id, double pct) {

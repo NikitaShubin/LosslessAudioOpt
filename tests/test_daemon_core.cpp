@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "daemon_sink.h"
+#include "persist.h"
 #include "rpc.h"
 
 using dsvc::EventBuffer;
@@ -598,6 +599,90 @@ static void test_rpc_matrix() {
     CHECK(arr["ok"] == false && arr["code"] == "bad_args");
 }
 
+// --- Причина падения варианта: зеркало, событие и очередь ---
+//
+// Проверка через живой демон на нечётном wav больше не годится: monkeys_audio
+// принимает нечётное число сэмплов (см. H2 в test_errors.py), и файл проходил
+// все 69 вариантов без единого сбоя. Причина падения проверяется напрямую на
+// sink/зеркале и на queue.json — там, где она и рождается. Мост mirror<->persist
+// живёт в DaemonSession (слишком тяжёлый для этой цели) и проверяется в
+// test_daemon_persist.py: там подкладывают queue.json руками и ждут причину в
+// /api/state после рестарта.
+static void test_task_error_mirror() {
+    EventBuffer ev;
+    StateMirror st;
+    DaemonSink s(&ev, &st);
+    s.begin_file(0, "a.flac", "/m");
+    s.set_tasks(0, std::vector<obs::TaskInfo>{{"alac", "default", {}, ""},
+                                              {"tak", "p4m", {}, ""},
+                                              {"tta", "default", {}, ""}});
+    // Виновник — вариант 1 из трёх: раньше этот случай был неотличим от
+    // «упал вариант 0» или «упал вариант 2».
+    s.task(0, 1, obs::TaskState::Failed);
+    s.task_error(0, 1, "encoder rejected odd sample count");
+
+    auto rows = st.snapshot();
+    CHECK(rows.size() == 1);
+    if (rows.size() != 1) return;
+    CHECK(rows[0].task_errors.size() == 3);
+    CHECK(rows[0].task_errors[1] == "encoder rejected odd sample count");
+    // У соседей причина пустая: иначе раздувались бы и state, и очередь.
+    CHECK(rows[0].task_errors[0].empty());
+    CHECK(rows[0].task_errors[2].empty());
+
+    // Событие ушло в буфер: веб живёт на дельтах и без него узнал бы о причине
+    // только при следующем полном обновлении состояния.
+    auto p = ev.copy_since(0);
+    bool found = false;
+    for (const auto& e : p.events)
+        if (e.type == "task_error" && e.payload.value("idx", (size_t)-1) == 1 &&
+            e.payload.value("error", std::string()) ==
+                "encoder rejected odd sample count")
+            found = true;
+    CHECK(found);
+
+    // Пустая причина — это сброс, а не запись пустой строки: повторный прогон
+    // того же варианта не должен оставлять старый текст.
+    s.task_error(0, 1, "");
+    rows = st.snapshot();
+    CHECK(rows[0].task_errors[1].empty());
+}
+
+static void test_task_errors_persist() {
+    // Переживает очередь: после рестарта демона у красной точки должна снова
+    // быть причина, иначе она молча превращается в голую «failed».
+    persist::Row r;
+    r.path = "a.flac";
+    r.state = "error";
+    r.tasks = {"ok", "failed", "ok"};
+    r.task_errors = {"", "encoder rejected odd sample count", ""};
+    std::string blob = persist::to_json({r});
+    CHECK(blob.find("encoder rejected odd sample count") != std::string::npos);
+    std::vector<persist::Row> back;
+    CHECK(persist::from_json(blob, &back));
+    CHECK(back.size() == 1);
+    if (back.size() != 1) return;
+    CHECK(back[0].task_errors.size() == 3);
+    // Индекс обязан сохраниться: при плотном списке причина съехала бы на
+    // вариант 0 и после рестарта указывала бы не туда.
+    CHECK(back[0].task_errors[1] == "encoder rejected odd sample count");
+    CHECK(back[0].task_errors[0].empty());
+    CHECK(back[0].task_errors[2].empty());
+}
+
+static void test_task_errors_persist_sparse() {
+    // Строка без падений не должна тащить в queue.json пустой объект.
+    persist::Row r;
+    r.path = "b.flac";
+    r.state = "ok";
+    r.tasks = {"ok", "ok"};
+    std::string blob = persist::to_json({r});
+    CHECK(blob.find("task_errors") == std::string::npos);
+    std::vector<persist::Row> back;
+    CHECK(persist::from_json(blob, &back));
+    CHECK(back.size() == 1 && back[0].task_errors.empty());
+}
+
 int main() {
     test_event_buffer();
     test_event_buffer_boundaries();
@@ -608,6 +693,9 @@ int main() {
     test_mirror_order_consistency();
     test_rpc();
     test_rpc_matrix();
+    test_task_error_mirror();
+    test_task_errors_persist();
+    test_task_errors_persist_sparse();
     if (failures == 0) {
         std::cout << "OK\n";
         return 0;

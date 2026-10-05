@@ -103,14 +103,38 @@ public:
 // Обратные таблицы ключей тегов для чтения нативных контейнеров, чьи ключи
 // не совпадают с канонической схемой (ID3v2 frame id, MP4 4CC, WAV LIST INFO).
 // Хранятся в formats/tag_tables.json (data-driven, не хардкодятся в C++).
+// Числовой тег MP4: каноническое поле, 4CC-ключ в ilst и размер бинарной
+// пары (2 байта reserved + по 2 байта номер/всего). Описание живёт в
+// formats/tag_tables.json -> mp4_numeric, чтобы и писатель, и читатель
+// обходились без маппинга в коде.
+struct Mp4Numeric {
+    std::string field;        // каноническое поле (track, disc)
+    std::string mp4_key;      // 4CC в ilst (trkn, disk)
+    unsigned box_size = 0;    // размер бинарной пары в байтах
+};
+
 struct TagTables {
     std::map<std::string, std::string> id3;   // TIT2 -> title
     std::map<std::string, std::string> mp4;   // \xa9nam -> title
     std::map<std::string, std::string> wav;   // IART -> artist
+    // Числовые теги MP4: 4CC -> описание (см. Mp4Numeric).
+    std::map<std::string, Mp4Numeric> mp4_numeric;
     // Синонимы канонических ключей: нормализованное имя (lowercase, без
     // '_'/' '/'-') -> канонический ключ (canonical_key). Глобальная схема,
     // не per-формат (хранится отдельно от key_map каждого формата).
     std::map<std::string, std::string> canonical_aliases;
+
+    // Описание числового поля по 4CC из ilst (nullptr, если поле не числовое).
+    const Mp4Numeric* mp4_numeric_find(const std::string& key4) const {
+        auto it = mp4_numeric.find(key4);
+        return it == mp4_numeric.end() ? nullptr : &it->second;
+    }
+    // Описание числового поля по каноническому имени.
+    const Mp4Numeric* mp4_numeric_by_field(const std::string& field) const {
+        for (const auto& [k, v] : mp4_numeric)
+            if (v.field == field) return &v;
+        return nullptr;
+    }
 };
 
 // Каталог formats/ рядом с exe.

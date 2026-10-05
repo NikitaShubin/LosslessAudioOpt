@@ -231,6 +231,19 @@ Format validate(const json::json& data) {
     if (tag.contains("numeric_fields") && tag.at("numeric_fields").is_array())
         for (const auto& v : tag.at("numeric_fields"))
             f.tag_numeric_fields.push_back(v.get<std::string>());
+    // Для mp4-писателя каждое числовое поле должно быть описано в
+    // formats/tag_tables.json -> mp4_numeric (4CC + размер бинарной пары).
+    // Иначе формат нельзя загрузить: так не даём вернуть раскладку
+    // "track -> trkn, 8 байт" обратно в C++.
+    if (f.tag_write_method == "mp4_ilst" && !f.tag_numeric_fields.empty()) {
+        const auto& tbl = load_tag_tables();
+        for (const auto& nf : f.tag_numeric_fields) {
+            if (!tbl.mp4_numeric_by_field(nf))
+                throw Error(err_str(fmt_id, i18n::fmt(
+                    "numeric field '%s' has no description in tag_tables.json -> mp4_numeric",
+                    nf.c_str())));
+        }
+    }
     if (tag.contains("key_map") && tag.at("key_map").is_object())
         for (auto& [k, v] : tag.at("key_map").items())
             f.tag_key_map[k] = normalize_4cc(v.get<std::string>());
@@ -378,6 +391,20 @@ static TagTables read_tag_tables() {
                     if (v.is_string()) t.mp4[normalize_4cc(k)] = v.get<std::string>();
         }
         if (data.contains("wav")) fill(t.wav, data.at("wav"));
+        if (data.contains("mp4_numeric") && data.at("mp4_numeric").is_object()) {
+            // {"trkn": {"field": "track", "box_size": 8}, ...}
+            for (auto& [k, v] : data.at("mp4_numeric").items()) {
+                if (!v.is_object() || !v.contains("field")) continue;
+                Mp4Numeric num;
+                num.mp4_key = normalize_4cc(k);
+                num.field = v.at("field").get<std::string>();
+                if (v.contains("box_size")) num.box_size = v.at("box_size").get<unsigned>();
+                // Без размера пары писать поле бессмысленно, а читатель принял
+                // бы мусор: пропускаем такую запись целиком.
+                if (num.box_size < 6) continue;
+                t.mp4_numeric[num.mp4_key] = num;
+            }
+        }
         if (data.contains("canonical_aliases"))
             fill(t.canonical_aliases, data.at("canonical_aliases"));
     }

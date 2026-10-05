@@ -37,6 +37,7 @@ std::vector<persist::Row> DaemonSession::snapshot_for_persist(bool final) const 
         // Отрисовка вариантов переживает рестарт: без этого восстановленная
         // строка теряла точки вариантов и кольцо победителя.
         p.tasks = r.tasks;
+        p.task_errors = r.task_errors;
         for (const auto& ti : r.task_infos)
             p.task_infos.push_back({ti.fmt_id, ti.variant_id, ti.note});
         for (const auto& v : r.excluded)
@@ -194,6 +195,12 @@ void DaemonSession::load_persisted(std::string* err) {
         r.had_sidecar = pr.had_sidecar;
         r.has_sidecar = pr.has_sidecar;
         r.tasks = pr.tasks;
+        r.task_errors = pr.task_errors;
+        // Очередь могла достаться от 2.3.6 (где task_errors не было вовсе) или
+        // от упавшего демона, записавшего неполный набор: выравниваем по tasks,
+        // чтобы индекс причины совпадал с индексом варианта.
+        if (r.task_errors.size() < r.tasks.size())
+            r.task_errors.resize(r.tasks.size());
         for (const auto& ti : pr.task_infos)
             r.task_infos.push_back({ti.fmt, ti.variant, {}, ti.note});
         for (const auto& s : pr.excluded)

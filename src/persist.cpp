@@ -35,6 +35,16 @@ std::string to_json(const std::vector<Row>& rows) {
                        {"last_error", r.last_error}});
         if (!r.root.empty()) arr.back()["root"] = r.root;
         if (!r.tasks.empty()) arr.back()["tasks"] = r.tasks;
+        // Ошибки вариантов — map индекс->причина. Именно map, а не массив:
+        // падает обычно один вариант из десятков, и массив с пустыми дырками
+        // раздувал бы queue.json, а плотный массив молча сдвинул бы индексы.
+        // Дополнительно ключ приводим к строке, т.к. JSON-ключи всегда строки,
+        // а индекс варианта — число.
+        nlohmann::json te = nlohmann::json::object();
+        for (size_t i = 0; i < r.task_errors.size(); i++)
+            if (!r.task_errors[i].empty())
+                te[std::to_string(i)] = r.task_errors[i];
+        if (!te.empty()) arr.back()["task_errors"] = std::move(te);
         if (!r.task_infos.empty()) {
             nlohmann::json ti = nlohmann::json::array();
             for (const auto& t : r.task_infos)
@@ -84,6 +94,24 @@ bool from_json(const std::string& text, std::vector<Row>* rows) {
         if (j.contains("tasks") && j["tasks"].is_array())
             for (const auto& t : j["tasks"])
                 if (t.is_string()) r.tasks.push_back(t.get<std::string>());
+        if (j.contains("task_errors") && j["task_errors"].is_object()) {
+            // Ключ — индекс варианта в виде строки (см. сериализацию).
+            for (auto it = j["task_errors"].begin(); it != j["task_errors"].end(); ++it) {
+                if (!it.value().is_string()) continue;
+                size_t idx = 0;
+                try {
+                    idx = (size_t)std::stoull(it.key());
+                } catch (...) {
+                    continue;
+                }
+                if (idx >= r.task_errors.size()) r.task_errors.resize(idx + 1);
+                r.task_errors[idx] = it.value().get<std::string>();
+            }
+            // Выравниваем по tasks: очередь хранит причины выборочно, но
+            // массив обязан оставаться параллельным списку вариантов.
+            if (r.task_errors.size() < r.tasks.size())
+                r.task_errors.resize(r.tasks.size());
+        }
         if (j.contains("task_infos") && j["task_infos"].is_array()) {
             for (const auto& t : j["task_infos"]) {
                 if (!t.is_object()) continue;

@@ -91,6 +91,33 @@ def gen_wav(path, freq, duration=0.25):
         raise RuntimeError("ffmpeg failed")
 
 
+def gen_wav_odd_samples(path, freq=440, duration=0.25):
+    """wav с нечётным числом байт данных — ровно на один сэмпл больше нормы.
+
+    Нужен, чтобы заставить ОТДЕЛЬНЫЙ ВАРИАНТ упасть: кодеры с
+    features.odd_sample_count (monkeys_audio) отвергают такой вход. Отказ
+    варианта — самый надёжный способ проверить, что причина падения доходит до
+    /api/state: сбой подготовки файла уходит в last_error и task_infos тут ни
+    при чём.
+    """
+    # Промежуточный файл обязан сохранять расширение .wav: ffmpeg определяет
+    # muxer по расширению и на ".even" честно падает с кодом 234.
+    even = path + ".even.wav"
+    gen_wav(even, freq, duration)
+    import struct
+    with open(even, "rb") as f:
+        buf = f.read()
+    i = buf.find(b"data")
+    n = struct.unpack("<I", buf[i + 4:i + 8])[0]
+    data = buf[i + 8:i + 8 + n] + b"\x01\x02\x03"   # ровно один сэмпл
+    out = (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE" + buf[12:i] +
+           b"data" + struct.pack("<I", len(data)) + data)
+    with open(path, "wb") as f:
+        f.write(out)
+    os.remove(even)
+    return path
+
+
 def ffmpeg_available():
     return shutil.which("ffmpeg") is not None
 

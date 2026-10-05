@@ -4,6 +4,22 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.7 — 2026-10-05
+
+### ALAC files no longer fail with `moov is corrupted`
+ALAC files whose audio data happens to contain the four bytes `moov` were rejected outright with `moov is corrupted`, on both reading and writing. MP4 is a box format: the file is a sequence of boxes, each with a declared size and a four-letter name, and the real `moov` box — the one holding the tags — was being found by searching for that word in the raw bytes. Audio data is compressed and therefore looks random, so on a large file the odds of those four bytes appearing inside the sound data are good; one real file in the library had them 10.9 MB into the audio, with the actual `moov` another 28 MB further on.
+
+Boxes are now walked properly: each box is read at its own offset with its own declared size, and the tag box is the one the file structure actually points to. The search also now handles 64-bit box sizes (the `largesize` form used by files over 4 GB), boxes that run to the end of the file, and boxes whose declared size leaves no room for a header — all previously either misread or rejected.
+
+### The browser says which variant failed, and why
+A failed variant was a red dot with a tooltip naming the format and variant but no reason, and the only error text shown was the file's own, which on a file with dozens of variants does not say which variant failed or why. Hovering a red dot now shows the reason for that variant — for example which encoder rejected the input. The reason is stored with the row, so it survives a daemon restart; only failed variants carry one, because the full state is already tens of megabytes on a large library.
+
+### The file row tooltip no longer spans the screen
+The row tooltip held the full path, which turned a one-line hint into a multi-line panel that covered the rows underneath it — while the shortened path was already visible in the row itself. The tooltip now shows the same shortened path. The full path is still available in the command line and in the API response.
+
+### A lost lyrics field now says what was lost
+The verification message for a dropped lyrics field was `lyrics did not survive` with nothing else, so there was no way to tell an empty field from a large one. It now reports the size and the opening characters. Other fields already did this.
+
 ## 2.3.6 — 2026-10-04
 
 ### An APE cover with a non-standard key no longer crashes the run

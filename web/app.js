@@ -120,6 +120,10 @@ function taskDot(st, idx, info, isWinner) {
   } else {
     title = `Задача #${idx}: ${st}`;
   }
+  // Причина падения конкретного варианта (её присылает сервер в task_infos[i].error).
+  // Раньше красная точка молчала, а пользователю показывали текст ошибки файла
+  // целиком — из десятков вариантов было не понять, какой именно и почему.
+  if (info && info.error) title += `\nПричина: ${info.error}`;
   if (isWinner) title += " — победитель";
   return `<span class="task-dot task-${c}${isWinner?" task-winner":""}" title="${esc(title)}"></span>`;
 }
@@ -302,13 +306,23 @@ function displayPath(r){
   return p;
 }
 
-// Полный путь для всплывающей подсказки к строке «Файл»: если показывается
-// результат — это out_path, иначе полный исходный путь (path из /api/state;
-// у старых строк label может сам быть полным путём).
-function fullPathFor(r){
-  if (r.out_path && r.out_path!=="") return r.out_path;
-  return r.path || r.label || "";
+// Короткий путь для всплывающей подсказки к строке «Файл».
+//
+// Раньше туда клался полный путь, и это было неудобно: подсказка превращалась в
+// простыню на несколько строк и «перекрывала» всё остальное на экране, хотя
+// рядом в самой ячейке уже виден тот же путь, только урезанный до target_dir.
+// Оставляем урезанный вариант, а полный путь по-прежнему доступен в CLI и в
+// /api/state (поле path) — то есть никуда не делся, просто не в этом тултипе.
+function shortPathFor(r){
+  const t = r.target_dir || "";
+  let p = (r.out_path && r.out_path!=="") ? r.out_path : (r.path || r.label || "");
+  if (t && p.startsWith(t) && p.length > t.length) {
+    const rel = p.slice(t.length);
+    return rel.replace(/^[\\\/]/, "") || p;
+  }
+  return p;
 }
+
 
 function updateSelectionUI(){
   if (!chkAll) return;
@@ -404,7 +418,7 @@ function renderQueue(rows){
     const shown = displayPath(r);
     const exitErr = (r.last_error && (r.state==="stopped"||r.state==="error"))
       ? `<span class="warn" title="${esc(r.last_error)}">⚠</span> ` : "";
-    html += `<tr data-id="${r.id}" class="${selClass} st-${r.state}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td title="${esc(fullPathFor(r))}">${badge}${exitErr}${esc(shown)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
+    html += `<tr data-id="${r.id}" class="${selClass} st-${r.state}"><td>${chk}</td><td>${handle}</td><td title="#${r.id}">${pos}</td><td title="${esc(shortPathFor(r))}">${badge}${exitErr}${esc(shown)}</td><td class="prog">${bar}</td><td><span class="tasks">${tasks}</span></td><td>${actions}</td></tr>`;
   }
   queueBody.innerHTML = html;
   updateSelectionUI();

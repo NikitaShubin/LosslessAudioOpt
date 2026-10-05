@@ -51,11 +51,18 @@ nlohmann::json rows_json(const StateMirror& st) {
         nlohmann::json tasks = nlohmann::json::array();
         for (const auto& t : r.tasks) tasks.push_back(t);
         nlohmann::json infos = nlohmann::json::array();
-        for (const auto& ti : r.task_infos) {
-            infos.push_back({{"fmt", ti.fmt_id},
-                             {"variant", ti.variant_id},
-                             {"params", ti.params},
-                             {"note", ti.note}});
+        for (size_t i = 0; i < r.task_infos.size(); i++) {
+            const auto& ti = r.task_infos[i];
+            nlohmann::json j = {{"fmt", ti.fmt_id},
+                                {"variant", ti.variant_id},
+                                {"params", ti.params},
+                                {"note", ti.note}};
+            // Причина падения — только у упавшего варианта. Ключ "error" не
+            // добавляем для успешных: /api/state на большой библиотеке весит
+            // десятки мегабайт, а файлов с падениями единицы из тысяч.
+            if (i < r.task_errors.size() && !r.task_errors[i].empty())
+                j["error"] = r.task_errors[i];
+            infos.push_back(std::move(j));
         }
         nlohmann::json excl = nlohmann::json::array();
         for (const auto& v : r.excluded)

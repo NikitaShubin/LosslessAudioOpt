@@ -202,7 +202,7 @@
  "invalid tags.json: ": "неверный tags.json: ",
  "ffprobe could not read the written tags: ": "ffprobe не смог прочитать записанные теги: ",
  "field '%s' did not survive ('%s')": "поле '%s' не сохранилось ('%s')",
- "lyrics did not survive": "лирика не сохранилась",
+ "lyrics did not survive (%zu chars, starts '%s')": "лирика не сохранилась (%zu симв., начинается с '%s')",
  "pictures: were %d, now %d": "картинки: было %d, стало %d",
  "downloaded file is empty (0 bytes) — the server throttled or dropped the connection": "скачанный файл пуст (0 байт) — сервер ограничивает скорость или оборвал соединение",
  "checksum mismatch: expected %s, got %s (downloaded %s bytes — the download may have been interrupted)": "контрольная сумма не совпала: ожидалось %s, получено %s (скачано %s байт — возможно, загрузка оборвана)",

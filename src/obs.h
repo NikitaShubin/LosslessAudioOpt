@@ -55,6 +55,14 @@ struct Sink {
     // Смена состояния варианта task_idx.
     virtual void task(size_t, size_t, TaskState) {}
 
+    // Причина падения конкретного варианта (task_idx). Отдельно от task(),
+    // потому что task() зовётся и на успехе, и на «виновнике», и на жертве
+    // прерывания, а текст ошибки есть только у виновника. Без этого в вебе
+    // горело лишь «alac/default — failed» без причины: у файла десятки
+    // вариантов, и непонятно, какой именно и по какой причине упал.
+    // err пустая — сбросить ранее записанную причину.
+    virtual void task_error(size_t, size_t, const std::string&) {}
+
     // Выбранный победитель файла (демон): индекс задачи в кружке на вебе.
     // task_idx — индекс в tasks/task_infos, SIZE_MAX если неизвестен.
     virtual void winner(size_t, const std::string&, const std::string&, size_t) {}

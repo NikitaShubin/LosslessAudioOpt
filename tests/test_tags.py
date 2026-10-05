@@ -307,6 +307,133 @@ def read_m4a(path):
     return {"fields": out, "pictures": 0}
 
 
+# ---------------------------------------------------------------------------
+# MP4-боксы: обход дерева для тестов (в коде — src/tags_mp4.cpp)
+# ---------------------------------------------------------------------------
+
+def m4a_top_boxes(d):
+    """Верхний уровень боксов MP4: [(off, size, type, wide), ...]."""
+    out = []
+    o = 0
+    n = len(d)
+    while o + 8 <= n:
+        size = struct.unpack_from(">I", d, o)[0]
+        typ = d[o + 4:o + 8]
+        wide = False
+        if size == 1:
+            if o + 16 > n:
+                break
+            size = struct.unpack_from(">Q", d, o + 8)[0]
+            wide = True
+        elif size == 0:
+            size = n - o
+        elif size < 8:
+            break
+        if size > n - o:
+            break
+        out.append((o, size, typ, wide))
+        o += size
+    return out
+
+
+def m4a_top_find(d, typ):
+    for off, size, t, wide in m4a_top_boxes(d):
+        if t == typ:
+            return off, size, wide
+    return None
+
+
+def m4a_make(src_wav, dst, metadata=()):
+    """Кодирует wav -> m4a (alac) с тегами через ffmpeg."""
+    args = ["-i", src_wav, "-c:a", "alac"]
+    for k, v in metadata:
+        args += ["-metadata", "%s=%s" % (k, v)]
+    args.append(dst)
+    ffmpeg(args)
+
+
+def inject_false_moov(path, at=None):
+    """Внедряет ASCII 'moov' внутрь энтропийных данных mdat.
+
+    Именно это происходит в реальности: внутри ALAC-данных регулярно
+    встречается последовательность байтов 'moov'. Поиск боксов побайтно цеплял
+    её, читал 4 байта перед ней как размер и объявлял файл битым
+    ('moov is corrupted'), а читатель при этом молча терял все теги.
+
+    Точка выбирается глубоко в mdat: первые килобайты заняты extradata и
+    заголовком первого кадра, и их порча ломает файл для ffmpeg
+    ('invalid element channel count') — а нужен файл, который читается, но
+    содержит ложный бокс. Поэтому смещение — четверть payload, и результат
+    проверяется: ffmpeg обязан продолжать читать файл.
+    """
+    d = bytearray(open(path, "rb").read())
+    mdat = m4a_top_find(d, b"mdat")
+    assert mdat, "в m4a нет mdat"
+    off, size, _wide = mdat
+    if at is None:
+        at = max(4096, size // 4)
+    assert off + at + 4 < off + size, "mdat слишком мал для внедрения"
+    d[off + at:off + at + 4] = b"moov"
+    open(path, "wb").write(bytes(d))
+    # Файл должен остаться читаемым: иначе тест проверял бы не то.
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags",
+                        "-of", "json", path], capture_output=True, text=True)
+    assert r.returncode == 0, "ffprobe перестал читать файл после внедрения: %s" % r.stderr
+    try:
+        json.loads(r.stdout or "{}")
+    except ValueError:
+        # Диагностика в stderr полезнее, чем «сломан JSON».
+        assert False, "ffprobe вернул не-JSON после внедрения: %s" % r.stdout[:200]
+    return off + at
+
+
+def widen_moov_to_64bit(path):
+    """Переписывает заголовок moov в 64-битный (size==1 + largesize).
+
+    Смещение mdat не меняется, поэтому chunk offsets внутри moov остаются
+    верными. Прежний bump() правил только первые 4 байта размера и для
+    64-битного бокса молча оставлял размер прежним.
+    """
+    d = bytearray(open(path, "rb").read())
+    found = m4a_top_find(d, b"moov")
+    assert found, "в m4a нет moov"
+    off, size, wide = found
+    assert not wide, "moov уже 64-битный"
+    head = struct.pack(">I", 1) + b"moov" + struct.pack(">Q", size + 8)
+    out = bytes(d[:off]) + head + bytes(d[off + 8:off + size])
+    open(path, "wb").write(out)
+    return off
+
+
+def clean_dir(d):
+    """Очищает рабочую папку сценария.
+
+    main() чистит только WORK целиком, а не папку каждого сценария, поэтому
+    повторный прогон поверх leftovers ловит SKIP: сценарий оставляет и вход, и
+    выход (src.m4a -> src.flac), и restore начинает видеть два файла.
+    """
+    os.makedirs(d, exist_ok=True)
+    for name in os.listdir(d):
+        p = os.path.join(d, name)
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            os.remove(p)
+
+
+def pad_m4a(path, extra=4 << 20):
+    """Добавляет в конец файла бокс free заданного размера.
+
+    Нужен, чтобы вариант alac реально выигрывал по размеру: исходник с 4 МБ
+    free больше, чем результат перекодирования (ffmpeg такие боксы не пишет).
+    Без этого optimize отбрасывал бы кандидата, и тест проверял бы нетронутый
+    исходник, а не то, что записал писатель.
+    """
+    d = open(path, "rb").read()
+    box = struct.pack(">I", extra + 8) + b"free" + b"\x00" * extra
+    open(path, "wb").write(d + box)
+
+
 def read_sidecar_groups(zp):
     z = zipfile.ZipFile(zp)
     doc = json.loads(z.read("tags.json"))
@@ -816,6 +943,92 @@ def o2c2_slash_pair_survives_wavpack(d):
     assert_subset({"track": ["3/13"], "disc": ["1/2"]}, wv["fields"], "O2C2 wv")
 
 
+def o2d_false_moov_in_mdat_writer(d):
+    """Ложный 'moov' внутри mdat не должен ломать запись тегов в m4a.
+    clean_dir(d)
+
+    Реальный регресс: 9 файлов NIN падали с 'moov is corrupted', потому что
+    боксы искались побайтно. Тег-строка внутри энтропийных данных не должна
+    выглядеть как бокс.
+    """
+    m4a = os.path.join(d, "src.m4a")
+    m4a_make(os.path.join(FIX, "pair_slash.wav"), m4a,
+             [("title", "False Moov Title"), ("artist", "Probe Artist"),
+              ("track", "3/13"), ("disc", "1/2")])
+    inject_false_moov(m4a)
+    pad_m4a(m4a)
+    rc, out = run_tool(["optimize", d, "--formats=alac", "--jobs=1"])
+    assert rc == 0, out
+    assert "moov is corrupted" not in out, "ошибка moov вернулась: %s" % out
+    check_ok("O2D", out)
+    assert os.path.exists(os.path.join(d, "src.m4a")), "нет src.m4a"
+    res = open(os.path.join(d, "src.m4a"), "rb").read()
+    # Кандидат выиграл -> файл перезаписан писателем. Сумма размеров боксов
+    # должна сойтись с длиной файла: значит, moov/udta/meta получили верные
+    # размеры, а ложный 'moov' в mdat не был принят за бокс.
+    boxes = m4a_top_boxes(res)
+    assert boxes, "результат не читается как MP4"
+    total = sum(s for _o, s, _t, _w in boxes)
+    assert total == len(res), "размеры боксов не сходятся: %d != %d" % (total, len(res))
+    got = read_m4a(os.path.join(d, "src.m4a"))
+    assert got, "в m4a нет тегов"
+    assert_subset({"title": ["False Moov Title"], "artist": ["Probe Artist"],
+                   "track": ["3/13"], "disc": ["1/2"]}, got["fields"], "O2D m4a")
+
+
+def o2e_false_moov_in_mdat_reader(d):
+    """Тот же файл читается без потери тегов: restore m4a -> flac."""
+    clean_dir(d)
+    m4a = os.path.join(d, "src.m4a")
+    m4a_make(os.path.join(FIX, "pair_slash.wav"), m4a,
+             [("title", "Reader Probe Title"), ("artist", "Reader Probe Artist"),
+              ("track", "3/13"), ("disc", "1/2")])
+    inject_false_moov(m4a)
+    rc, out = run_tool(["restore", d, "--to=flac", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O2E", out)
+    flac = os.path.join(d, "src.flac")
+    assert os.path.exists(flac), "нет src.flac"
+    f = read_flac(flac)
+    assert f, "в flac нет тегов"
+    assert_subset({"title": ["Reader Probe Title"], "artist": ["Reader Probe Artist"],
+                   "track": ["3/13"], "disc": ["1/2"]}, f["fields"], "O2E flac")
+
+
+def o2f_moov_64bit_reader(d):
+    """moov с 64-битным заголовком (size==1 + largesize) читается без потери тегов.
+    clean_dir(d)
+
+    Так пишут муксеры крупных файлов и часть внешних утилит. Прежний читатель
+    брал только младшие 4 байта размера, получал 1 и обрывал обход — теги
+    файла терялись молча.
+
+    Именно читателя эта проверка и касается: писателю (write_group) всегда
+    достаётся свежий m4a от ffmpeg с обычным 32-битным moov, 64-битный
+    заголовок там появляется лишь у файлов размером больше 4 ГБ.
+    """
+    m4a = os.path.join(d, "src.m4a")
+    m4a_make(os.path.join(FIX, "pair_slash.wav"), m4a,
+             [("title", "Wide Moov Title"), ("artist", "Wide Moov Artist"),
+              ("track", "3/13")])
+    widen_moov_to_64bit(m4a)
+    raw = open(m4a, "rb").read()
+    found = m4a_top_find(raw, b"moov")
+    assert found and found[2], "тестовый файл не переписан в 64-битный moov"
+    # файл обязан остаться валидным после правки заголовка
+    assert sum(s for _o, s, _t, _w in m4a_top_boxes(raw)) == len(raw), \
+        "подготовленный 64-битный m4a не сходится по размерам"
+    rc, out = run_tool(["restore", d, "--to=flac", "--jobs=1"])
+    assert rc == 0, out
+    check_ok("O2F", out)
+    flac = os.path.join(d, "src.flac")
+    assert os.path.exists(flac), "нет src.flac"
+    f = read_flac(flac)
+    assert f, "в flac нет тегов"
+    assert_subset({"title": ["Wide Moov Title"], "artist": ["Wide Moov Artist"],
+                   "track": ["3/13"]}, f["fields"], "O2F flac")
+
+
 def o3_wv_to_flac(d):
     cp(os.path.join(FIX, "wv_single.wv"), os.path.join(d, "src.wv"))
     rc, out = run_tool(["optimize", d, "--formats=flac", "--jobs=1"])
@@ -1197,6 +1410,9 @@ SCENARIOS = [
     ("o2b", "O2B wav(id3v2) -> alac(m4a): track «01» (ведущий ноль) проходит валидацию, в m4a читается как «1» (trkn бинарный)", o2b_flac_to_alac_track_zero),
     ("o2c", "O2C track=3/13, disc=1/2 -> alac(m4a): «номер/всего» не теряется", o2c_slash_pair_survives_alac),
     ("o2c2", "O2C2 та же форма -> wavpack: APEv2 хранит текстом, контроль", o2c2_slash_pair_survives_wavpack),
+    ("o2d", "O2D ложный 'moov' внутри mdat -> alac: запись тегов не ломается (регресс 'moov is corrupted')", o2d_false_moov_in_mdat_writer),
+    ("o2e", "O2E тот же файл -> restore flac: теги читаются, а не теряются", o2e_false_moov_in_mdat_reader),
+    ("o2f", "O2F moov с 64-битным заголовком (largesize) -> restore flac: теги читаются", o2f_moov_64bit_reader),
     ("o3", "O3  wv(apev2) -> flac: vorbis embed, без sidecar", o3_wv_to_flac),
     ("o4", "O4  mp3(id3v2) -> flac (restore, lossy): vorbis embed", o4_mp3_to_flac),
     ("o5", "O5  wav(riff+id3v2 конфликт) -> flac: всё в sidecar, embed нет", o5_wav_conflict_to_flac),

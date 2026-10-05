@@ -103,6 +103,10 @@ void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
         if (r.tasks[i] != "pend") tasks[i] = r.tasks[i];
     }
     r.tasks = std::move(tasks);
+    // task_errors держим того же размера, что и tasks: это параллельные массивы,
+    // и «причина варианта N» обязана означать ровно вариант N. Если оставить
+    // массив короче, причина уехала бы на чужой вариант после перезапуска.
+    r.task_errors.resize(r.tasks.size());
 }
 
 void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
@@ -117,6 +121,7 @@ void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) 
         if (r.tasks[i] != "pend") tasks[i] = r.tasks[i];
     }
     r.tasks = std::move(tasks);
+    r.task_errors.resize(r.tasks.size());
 }
 
 void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
@@ -127,6 +132,16 @@ void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
     touch_locked(id);
     if (idx >= r.tasks.size()) r.tasks.resize(idx + 1, "pend");
     r.tasks[idx] = st;
+}
+
+void StateMirror::set_task_error(size_t id, size_t idx, const std::string& err) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (removed_.count(id)) return;
+    auto& r = rows_[id];
+    r.id = id;
+    touch_locked(id);
+    if (idx >= r.task_errors.size()) r.task_errors.resize(idx + 1);
+    r.task_errors[idx] = err;
 }
 
 void StateMirror::set_pct(size_t id, double pct) {

@@ -36,6 +36,7 @@ public:
     void winner(size_t id, const std::string& fmt, const std::string& variant,
                 size_t task_idx) override;
     void task(size_t id, size_t idx, obs::TaskState st) override;
+    void task_error(size_t id, size_t idx, const std::string& err) override;
     void end_file(size_t id, double pct) override;
     void mark_stopped(size_t id) override;
     // Единая модель ошибки файла: одно файл-событие с причиной (см. optimize).

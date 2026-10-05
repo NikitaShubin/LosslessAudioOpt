@@ -928,6 +928,8 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
                 break;
             }
             obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
+            obs::sink()->task_error(j.idx, c.task,
+                                    verr.empty() ? i18n::str("re-encode failed") : verr);
             continue;
         }
         ++tried;
@@ -1002,6 +1004,7 @@ bool Runner::descend_candidates(FileJob& j, std::unique_lock<std::mutex>& lk,
         vc->status = "verify_fail";
         vc->error = werr;
         obs::sink()->task(j.idx, c.task, obs::TaskState::Failed);
+        obs::sink()->task_error(j.idx, c.task, werr);
         notes += notes.empty() ? "" : "; ";
         notes += i18n::fmt("%s/%s: %s", c.format.c_str(), c.variant.c_str(), werr.c_str());
     }
@@ -1204,6 +1207,7 @@ void Runner::finalize_file(FileJob& j) {
                     break;
                 }
                 obs::sink()->task(j.idx, j.best_order, obs::TaskState::Failed);
+                obs::sink()->task_error(j.idx, j.best_order, werr);
             }
         }
 
@@ -1494,6 +1498,7 @@ void Runner::finalize_file(FileJob& j) {
             j.summary.savings_pct = 0.0;
             msg += i18n::fmt("      ! %s\n", reason.c_str());
             obs::sink()->task(j.idx, j.best_order, obs::TaskState::Failed);
+            obs::sink()->task_error(j.idx, j.best_order, reason);
         }
     }
 
@@ -1660,6 +1665,13 @@ void Runner::worker() {
             obs::sink()->task(w.idx, w.task,
                          oc == VariantOutcome::Ok ? obs::TaskState::Ok
                                                    : obs::TaskState::Failed);
+            if (oc != VariantOutcome::Ok) {
+                // Причина падения варианта: без неё в вебе горела красная точка
+                // «alac/default — failed» с причиной файла целиком, по которой
+                // непонятно, какой из десятков вариантов и что именно сломалось.
+                obs::sink()->task_error(w.idx, w.task,
+                                        verr.empty() ? i18n::str("variant failed") : verr);
+            }
             bool last = false;
             {
                 std::lock_guard<std::mutex> lk(qm);
