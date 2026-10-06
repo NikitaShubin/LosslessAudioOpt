@@ -140,6 +140,12 @@ bool ResourceManager::can_start_new_variant(const FileJob& j, int window,
     if (j.done || !j.prep_done) return false;
     if (j.cancelled) return false;
     if (j.crashed.load(std::memory_order_relaxed)) return false;
+    // Файл остановлен из-за сбоя варианта (строгий режим): новые варианты для
+    // него не запускаем. Уже идущие завершатся по kill_requested, и на этом
+    // файле работа кончится. Без проверки планировщик продолжал выдавать ему
+    // задачи, и они сразу возвращались Cancelled, не увеличивая completed —
+    // файл не мог закрыться и висел в running до конца очереди.
+    if (j.kill_requested.load(std::memory_order_relaxed)) return false;
     if (j.released >= j.tasks.size()) return false;
     if (j.released - j.completed >= (size_t)window) return false;
     return true;

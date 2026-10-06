@@ -177,13 +177,23 @@ itself fails (configuration, no input files, a broken ffmpeg), not for an indivi
 file. Files that did not run to the end because of an abort are not drawn as empty
 rows in the report, they are accounted for by a separate `Not processed` line.
 
-An error in **one** variant closes the whole file in strict mode: work on it stops
-and its remaining variants are cancelled. Task dots in the web interface tell the
-culprit from the victims: a failed task is red (`failed`), one cancelled by an abort
-caused by someone else's error is grey (`skipped`). In daemon mode and with
-`--ignore-errors` a variant error does not close the file: the remaining variants
-run to the end, and if the winner passes verification the file finishes as `ok` and
-is not counted as an error.
+An error in **one** variant closes the whole file in strict mode, and closing means
+stopping: every remaining process for that file is terminated immediately, whatever
+its current state, and no further variants of it are started. The file becomes
+`error` even if a suitable candidate was already found and verified — a variant we
+neither checked nor fixed could have been the better one, and handing out a result
+with a hole in the verification is exactly what strict mode exists to prevent.
+Taking "any one correct variant" is what `--ignore-errors` is for: it excludes the
+broken variant from the selection and lets the file through.
+
+Task dots in the web interface tell the culprit from the victims: a failed task is
+red (`failed`), one cancelled by someone else's error is grey (`skipped`). This
+applies wherever strict mode closes a file — CLI and daemon alike.
+
+Strict mode is about the **file**, never about the whole queue: in the daemon an
+error marks one row and the rest of the queue keeps running. Only CLI `optimize`
+stops the run at the first failing file, which is its long-standing behaviour for
+scripts.
 
 ### Interface language
 

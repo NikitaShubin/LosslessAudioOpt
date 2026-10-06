@@ -291,7 +291,92 @@ def main():
               f"restart after reorder produced new jobs: {new_ids9}")
         check(d4.stop() == 0, "case 9: exit 0")
 
-        print("case 10: shutdown")
+        # case 10: строгий режим — сбой ОДНОГО варианта перечёркивает файл,
+        # остальные варианты этого файла останавливаются, очередь продолжается.
+        #
+        # Регрессия с живой библиотеки: ветка «variant_errors > 0 -> error»
+        # стояла под verify_all, поэтому при verify=winner (дефолт демона) файл
+        # выходил ok с красной точкой на сломанном alac. Смысл режима без
+        # --ignore-errors: дыры в проверке быть не должно.
+        workdir10 = tempfile.mkdtemp(prefix="llao-strict-")
+        restore = None
+        try:
+            H.gen_wav(os.path.join(workdir10, "bad.wav"), 500, 0.2)
+            H.gen_wav(os.path.join(workdir10, "good.wav"), 700, 0.2)
+            restore = H.stub_monkeys_audio_encoder(workdir10)
+            d10 = H.Daemon(binary, workdir10, jobs=1.0)
+            d10.start()
+            r10 = d10.rpc("add", {"paths": [
+                os.path.join(workdir10, "bad.wav"),
+                os.path.join(workdir10, "good.wav")]})
+            check(r10["ok"], "case 10: add двух файлов")
+            ids10 = [x["id"] for x in r10["result"]["added"]]
+            check(len(ids10) == 2, f"case 10: два id {ids10}")
+            # Ждём терминального состояния обоих файлов. Верхняя граница по
+            # времени, а не «после N секунд всё должно быть готово»: ночные
+            # пресеты optimfrog на виниле уходят далеко за любой разумный срок,
+            # и жёсткий таймаут в тесте означал бы только flaky-падение.
+            ids_all = set(d10.ids())
+            st10 = H.wait_state(
+                d10,
+                lambda st: bool(ids_all) and all(
+                    x["state"] in ("ok", "error", "stopped")
+                    for x in st["rows"] if x["id"] in ids_all),
+                timeout=1800, interval=5)
+            check(st10 is not None,
+                  "case 10: оба файла дошли до терминального состояния за отведённое время")
+            if st10 is None:
+                print("     состояние на момент таймаута:",
+                      [(x["id"], x["state"]) for x in d10.rows()])
+                st10 = {"rows": d10.rows()}
+            rows10 = {x["id"]: x for x in st10["rows"]}
+            bad = rows10.get(ids10[0], {})
+            # Первый файл: monkeys_audio отказал -> строгий режим перечёркивает
+            # файл, даже если остальные форматы отработали.
+            check(bad.get("state") == "error",
+                  f"case 10: сбой варианта перечеркнул файл (state={bad.get('state')})")
+            # Причина от кодера обязана дойти до строки: у виновника своя
+            # task_error, у файла — last_error. Безликое «variant failed»
+            # диагностикой не считается.
+            err_txt = (bad.get("last_error") or "") + " ".join(
+                (t.get("error") or "") for t in (bad.get("task_infos") or []))
+            check("Command line error" in err_txt,
+                  f"case 10: причина от кодера дошла до строки: {err_txt[:140]}")
+            # Отказавший вариант помечен failed, остальные этого файла — серым
+            # (skipped): их остановили из-за соседнего сбоя, виновник один.
+            # Все варианты monkeys_audio честно красные: их пять, и каждый
+            # отказ кодировщика — самостоятельный виновник, а не жертва
+            # остановки соседа. Проверяем именно это различие, иначе тест
+            # принимал бы и прежнюю поломку, где виновник превращался в серый.
+            tasks = bad.get("tasks") or []
+            infos = bad.get("task_infos") or []
+            mac_failed = sum(
+                1 for i, s in enumerate(tasks)
+                if s == "failed" and i < len(infos) and infos[i].get("fmt") == "monkeys_audio")
+            check(mac_failed >= 1,
+                  f"case 10: отказы monkeys_audio помечены failed: {tasks[:8]}")
+            others = [s for i, s in enumerate(tasks)
+                      if s != "skipped" and (i >= len(infos) or
+                                             infos[i].get("fmt") != "monkeys_audio")]
+            check("failed" not in others,
+                  f"case 10: невиновные варианты не красные: {others[:8]}")
+            check("skipped" in tasks,
+                  f"case 10: остановленные варианты серые (skipped): {tasks[:8]}")
+            # Второй файл: monkeys_audio отказывает и для него тоже (подмена
+            # бинарника глобальна), поэтому строгий режим перечёркивает и его —
+            # это правильно. Главное проверяемое здесь: он дошёл до терминального
+            # состояния сам, а не завис после ошибки первого файла.
+            good = rows10.get(ids10[1], {})
+            check(good.get("state") == "error",
+                  f"case 10: второй файл обработан, а не завис "
+                  f"(state={good.get('state')})")
+            check(d10.stop() == 0, "case 10: exit 0")
+        finally:
+            if restore:
+                restore()
+            shutil.rmtree(workdir10, ignore_errors=True)
+
+        print("case 11: shutdown")
         check(d.stop() == 0, "exit 0")
         check(not os.path.exists(d.disc), "discovery removed")
     finally:

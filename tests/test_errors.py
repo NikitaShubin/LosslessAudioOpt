@@ -321,6 +321,77 @@ def g2_ignore_errors_keeps_counting(d):
             "исходник %s не должен заменяться:\n%s" % (name, out)
 
 
+def g3_strict_one_bad_variant_fails_file(d):
+    """Строгий режим: сбой ОДНОГО варианта из нескольких перечёркивает файл.
+
+    Регрессия, найденная на живой библиотеке: сбой варианта считался
+    блокирующим только при verify=all, поэтому при verify=winner (дефолт
+    демона) файл выходил ok с красной точкой на сломанном варианте. Смысл
+    режима без --ignore-errors: дыры в проверке быть не должно — пока хоть
+    один вариант не проверен, файл отдавать нельзя (сломанный мог бы оказаться
+    победителем).
+
+    Берём два формата: один кодер отказывает (подмена бинарника), второй
+    отрабатывает штатно. Проверяем, что файл ушёл в ошибку, хотя пригодный
+    вариант был и был меньше исходника.
+    """
+    cp(os.path.join(FIX, "tone_even.wav"), os.path.join(d, "mix.wav"))
+    restore = stub_encoder(d)
+    try:
+        rc, out = run_tool(["optimize", d, "--formats=monkeys_audio,flac",
+                            "--jobs=1", "--no-download", "--verify=winner"])
+    finally:
+        restore()
+    assert rc == 1, "сбой одного варианта должен перечеркнуть файл, rc=1:\n%s" % out
+    assert has_errors(out, 1), "файл должен посчитан как ошибка:\n%s" % out
+    assert "mix.wav" in out, "ERROR без имени файла:\n%s" % out
+    assert "Command line error" in out, "нет причины от кодировщика:\n%s" % out
+    # Исходник на месте: файл не отдан.
+    assert os.path.exists(os.path.join(d, "mix.wav")), \
+        "при отказе файла исходник должен остаться:\n%s" % out
+    # Главное: результата НЕТ ни от одного формата.
+    leftovers = [f for f in os.listdir(d)
+                 if f.lower().endswith((".ape", ".flac", ".ofr", ".wav")) and f != "mix.wav"]
+    assert not leftovers, "при сбое варианта файл не должен отдаваться: %s\n%s" % (leftovers, out)
+
+
+def g4_strict_does_not_stop_other_files(d):
+    """Граница режима: сбой относится к файлу, а не к прогону.
+
+    Два разных контракта, оба зафиксированы:
+
+    * CLI `optimize` (без флага --mode=daemon) по первой ошибке варианта
+      останавливает прогон целиком. Это историческое поведение optimize, на
+      нём держатся скрипты: упал кодер — дальше идти бессмысленно, про
+      остальные файлы не известно ничего. Ошибка при этом видна и разборчива:
+      в отчёте и в выводе есть имя файла и причина, а не только «Aborted: N».
+    * Демон (--mode=daemon) НИКОГДА не роняет очередь: ошибка помечает один
+      файл, остальные обязаны доехать. Проверяется в test_daemon_*.
+
+    Здесь фиксируется именно CLI-контракт: ошибка видна пофайлово, а прогон
+    после неё действительно прекращается.
+    """
+    cp(os.path.join(FIX, "tone_odd.wav"), os.path.join(d, "odd.wav"))
+    cp(os.path.join(FIX, "tone_even.wav"), os.path.join(d, "even.wav"))
+    rep = os.path.join(d, "report.txt")
+    restore = stub_encoder(d)
+    try:
+        rc, out = run_tool(["optimize", d, "--formats=monkeys_audio", "--jobs=1",
+                            "--no-download", "--report=" + rep])
+    finally:
+        restore()
+    assert rc != 0, "CLI в строгом режиме обязан вернуть ненулевой код:\n%s" % out
+    assert has_errors(out, 1), "ошибка должна быть посчитана:\n%s" % out
+    # Пофайловая диагностика обязана сохраниться: «Aborted» без имени файла
+    # и без причины — ровно тот дефект, который этот течет поймал.
+    first = [l for l in out.splitlines() if ".wav" in l and "ERROR" in l]
+    assert first, "нет строки ERROR с именем файла:\n%s" % out
+    assert "Command line error" in out, "в выводе нет причины от кодировщика:\n%s" % out
+    text = open(rep, encoding="utf-8", errors="replace").read()
+    assert ".wav" in text and "error" in text, \
+        "файла нет в отчёте (диагностика не потеряна при аборте):\n%s" % text
+
+
 def codec_accepts_odd_length(fmt_id="monkeys_audio"):
     """Читает из formats/<id>.json признак «принимает нечётное число сэмплов».
 
@@ -392,6 +463,10 @@ SCENARIOS = [
      g1_variant_failure_reported),
     ("g2", "G2  сбой варианта + --ignore-errors: продолжил, пропущен, rc=0",
      g2_ignore_errors_keeps_counting),
+    ("g3", "G3  строгий режим: сбой ОДНОГО варианта перечёркивает файл",
+     g3_strict_one_bad_variant_fails_file),
+    ("g4", "G4  CLI: сбой останавливает прогон, но пофайловая диагностика не теряется",
+     g4_strict_does_not_stop_other_files),
     ("h1", "H1  неизвестный id в --formats -> rc=1, ERROR", h1_unknown_format_rejected),
     ("h2", "H2  24-бит моно с нечётной длиной -> кодируется (по признаку кодека)",
      h2_odd_length_compresses),

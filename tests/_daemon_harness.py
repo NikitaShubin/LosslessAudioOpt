@@ -253,3 +253,30 @@ class Daemon:
             self.proc.kill()
             self.proc.wait()
         return self.proc.returncode
+
+
+def stub_monkeys_audio_encoder(workdir):
+    """Подменяет кодировщик APE на Takc.exe, чтобы вариант гарантированно отказал.
+
+    Отказ нужен, чтобы проверить строгий режим демона: сбой ЛЮБОГО варианта
+    должен перечеркнуть файл (error), остановить остальные его варианты и НЕ
+    остановить очередь. Опора на дефект конкретного кодера здесь не годится —
+    триггером служит подмена бинарника, поэтому тест не зависит от версий.
+
+    Возвращает функцию восстановления (для try/finally).
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    binroot = os.path.join(root, "bin")
+    mac = os.path.join(binroot, "monkeys_audio", "MAC.exe")
+    takc = os.path.join(binroot, "tak", "Takc.exe")
+    if not (os.path.exists(mac) and os.path.exists(takc)):
+        raise RuntimeError("нет MAC.exe/Takc.exe — bin/ не наполнен")
+    backup = os.path.join(workdir, "MAC.exe.stub-backup")
+    shutil.copy2(mac, backup)
+    shutil.copy2(takc, mac)
+
+    def restore():
+        if os.path.exists(backup):
+            shutil.copy2(backup, mac)
+            os.remove(backup)
+    return restore

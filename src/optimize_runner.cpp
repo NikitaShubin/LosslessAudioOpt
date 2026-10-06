@@ -1141,11 +1141,26 @@ void Runner::finalize_file(FileJob& j) {
                                {"reason", reason}});
             }
         }
-    } else if (verify_all && !tolerant && j.variant_errors > 0) {
-        // Строгий режим с проверкой всех вариантов: хоть один не сложился — файл
-        // не отдаём, даже если остальные варианты в порядке. При verify=winner
-        // сбои вариантов лишь исключают их из отбора, и судьбу файла решает
-        // проверка победителя (ниже).
+    } else if (!tolerant && j.variant_errors > 0) {
+        // Строгий режим (--ignore-errors НЕ задан): сбой ЛЮБОГО варианта
+        // перечёркивает файл, даже если verify=winner и остальные варианты в
+        // порядке. Победитель здесь ни при чём: сломанный вариант мы не
+        // проверили и не починили, а значит не знаем, не оказался бы он
+        // лучше отданного. Отдать файл с дырой в проверке нельзя — сначала
+        // надо доказать, что все варианты годны.
+        //
+        // Это НЕ «взять хоть один корректный вариант»: то самое поведение —
+        // исключить сломанный и отдать лучший из уцелевших — и есть
+        // --ignore-errors (tolerant). Строгий режим означает ровно обратное.
+        //
+        // Отличие от прежнего кода: ветка стояла под verify_all, то есть при
+        // verify=winner (по умолчанию у демона) сбой варианта молча
+        // игнорировался, и на живой библиотеке 54 файла вышли ok с красной
+        // точкой на alac. Судьба файла не должна зависеть от того, проверяем
+        // ли мы все варианты или только победителя: проверка отвечает за
+        // достоверность кандидата, а строгость — за допустимость отдать файл.
+        //
+        // Очередь при этом не прерывается: ошибка относится к одному файлу.
         std::string reason =
             j.failures.empty() ? i18n::str("variant failed") : j.failures[0];
         j.summary.status = "error";
@@ -1649,19 +1664,70 @@ void Runner::worker() {
             } catch (...) {
                 verr = "unknown exception during variant";
             }
+            // Виновник этой итерации отработал (oc/verr получены) — его надо
+            // учесть даже если файл уже остановлен из-за СОСЕДНЕГО варианта.
+            // Жертва остановки узнаётся по двум признакам сразу: сама задача
+            // вернула Cancelled (процесс убит по kill_requested) ИЛИ файл уже
+            // помечен как остановленный, а задача при этом не падала сама.
+            // Раньше жертвами считались только «успешные» задачи, поэтому
+            // убитые в полёте варианты (oc=Cancelled) уезжали в failed и в вебе
+            // выглядели так, будто сломалось всё подряд.
+            const bool file_stopped =
+                w.job->kill_requested.load(std::memory_order_relaxed) &&
+                (oc == VariantOutcome::Cancelled || (oc == VariantOutcome::Ok && verr.empty()));
+            if (file_stopped) {
+                // Задача снята из-за сбоя СОСЕДНЕГО варианта: помечаем её
+                // серым, но обязательно закрываем задачу учётом. Раньше здесь
+                // стоял общий break на cancelled/aborted/file_stopped, из-за
+                // чего ветка file_stopped выходила из рабочего цикла, не
+                // увеличив completed и не вернув зарезервированное место на
+                // диске: условие «completed == released» уже никогда не
+                // выполнялось, и файл навсегда оставался в running.
+                obs::sink()->task(w.idx, w.task, obs::TaskState::Skipped);
+                bool done_stopped = false;
+                {
+                    std::lock_guard<std::mutex> lk(qm);
+                    FileJob& j = *w.job;
+                    j.completed++;
+                    if (w.disk_reserved > 0) {
+                        rm.release_disk(w.disk_reserved);
+                        w.disk_reserved = 0;
+                    }
+                    if (j.completed == j.released) {
+                        j.done = true;
+                        total_done++;
+                        done_stopped = true;
+                    }
+                    cv.notify_all();
+                }
+                if (done_stopped) finalize_file(*w.job);
+                continue;  // следующую задачу воркер берёт как обычно
+            }
             if (proc::cancelled() || proc::aborted()) {
-                // Снятая задача: её остановили из-за ошибки в соседней, а не
-                // из-за собственного сбоя, поэтому красным её не помечаем —
-                // пользователь должен отличать «виновника» от жертв.
+                // Прогон остановлен целиком: точку красим, чтобы виз��ально
+                // показать, что задача снята не собственным сбоем.
                 if (proc::aborted() && !proc::cancelled())
                     obs::sink()->task(w.idx, w.task, obs::TaskState::Skipped);
                 break;
             }
+            // CLI: сбой варианта в строгом режипе обрывает прогон (abort) —
+            // историческое поведение optimize, им пользуются в скриптах.
+            // Демон (--mode=daemon) прогон не роняет НИКОГДА: там ошибка
+            // относится к одному файлу из очереди, а остальные обязаны
+            // доехать. Раньше условие стояло целиком здесь, из-за чего файл в
+            // демоне доходил до finalize с variant_errors>0 и (при
+            // verify=winner) уходил в ok с красной точкой.
             if (!opts->ignore_errors && opts->mode != SessionMode::Daemon &&
                 (oc == VariantOutcome::Failed || !verr.empty())) {
                 report_error_before_abort(*w.job, verr);
                 count_error(*w.job);
             }
+            // Сначала помечаем виновника: у задачи должен быть свой честный
+            // статус (failed) и своя причина, независимо от того, что дальше
+            // решится с файлом. Раньше этот блок стоял ПОСЛЕ проверки на
+            // досрочный выход, и сломанный вариант в строгом режиме успевал
+            // превратиться в серый skipped вместе с жертвами — виновника не
+            // было видно вовсе.
             obs::sink()->task(w.idx, w.task,
                          oc == VariantOutcome::Ok ? obs::TaskState::Ok
                                                    : obs::TaskState::Failed);
@@ -1669,30 +1735,81 @@ void Runner::worker() {
                 // Причина падения варианта: без неё в вебе горела красная точка
                 // «alac/default — failed» с причиной файла целиком, по которой
                 // непонятно, какой из десятков вариантов и что именно сломалось.
-                obs::sink()->task_error(w.idx, w.task,
-                                        verr.empty() ? i18n::str("variant failed") : verr);
+                //
+                // verr пуст при обычном отказе кодировщика: причина уже записана
+                // внутри run_variant в j.failures («fmt/variant: текст»). Без
+                // этого чтения точка в демоне светилась с безликим «variant
+                // failed» вместо настоящего диагноза кодера — а диагностика
+                // сбоев в strict-режиме это ровно то, ради чего она нужна.
+                std::string why = verr;
+                if (why.empty()) {
+                    std::lock_guard<std::mutex> jl(*w.job->m);
+                    if (!w.job->failures.empty()) why = w.job->failures.back();
+                }
+                if (why.empty()) why = i18n::str("variant failed");
+                obs::sink()->task_error(w.idx, w.task, util::one_line(why));
+                // Строгий режим: сбой варианта перечёркивает файл, а значит
+                // продолжать остальные варианты бессмысленно — их результаты
+                // всё равно не будут отданы, только сожжём CPU. Останавливаем
+                // ВСЕ процессы по этому файлу (уже идущие воркеры увидят флаг в
+                // своём цикле опроса и завершатся), новые не запускаем.
+                // Файл при этом НЕ снимается с abort: это локальная остановка,
+                // очередь продолжает работать.
+                //
+                // Флаг ставится ПОСЛЕ пометки виновника, иначе тот же воркер на
+                // следующей итерации увидит kill_requested и перепишет свою же
+                // точку на skipped.
+                if (!opts->ignore_errors) w.job->kill_requested.store(true);
             }
             bool last = false;
             {
                 std::lock_guard<std::mutex> lk(qm);
                 FileJob& j = *w.job;
-                if (!verr.empty()) {
+                // Счётчик сбоев вариантов наращиваем по ФАКТУ провала (oc), а
+                // не по verr: verr заполняется только исключением, а обычный
+                // отказ кодировщика возвращается как VariantOutcome::Failed с
+                // пустым verr (причина уже записана внутри run_variant через
+                // record_error). Старый код считал только исключения, из-за чего
+                // отказ кодировщика в строгом режиме не перечёркивал файл —
+                // ровно тот случай, что и выдавал 54 файла ok с красной точкой.
+                // Счётчик наращиваем только за СОБСТВЕННЫЙ провал задачи.
+                // Исключение (verr) record_error уже посчитала внутри
+                // run_variant, а жертвы остановки (oc=Cancelled) и в счёт, и в
+                // failures не идут вовсе: их остановили из-за соседа, и в
+                // отчёте они были бы ложными «ошибками файла».
+                //
+                // Дописывать что-либо в j.failures здесь тоже нельзя: там уже
+                // лежит текст от record_error, и повторный «variant: » на каждом
+                // отказе обрастал причину («variant: variant: variant: …»).
+                if (oc != VariantOutcome::Ok && verr.empty() && oc != VariantOutcome::Cancelled) {
                     std::lock_guard<std::mutex> jl(*j.m);
-                    j.failures.push_back("variant: " + verr);
                     j.variant_errors++;
-                                    obs::sink()->error_file(j.idx,
-                                                            "ERROR [" + j.path + "]: " + verr + "\n");
-                    j.error_reported = true;
+                    if (!verr.empty() && !j.error_reported) {
+                        obs::sink()->error_file(j.idx,
+                                                "ERROR [" + j.path + "]: " + verr + "\n");
+                        j.error_reported = true;
+                    }
                 }
                 j.completed++;
                 if (w.disk_reserved > 0) {
                     rm.release_disk(w.disk_reserved);
                     w.disk_reserved = 0;
                 }
+                // Файл закрывается, когда: все задачи отработали; движок упал
+                // (crashed — сработает и на досрочной остановке остальных
+                // вариантов, т.к. ставится вместе с kill_requested); файл сняли;
+                // либо строгий режим остановил работу по этому файлу после
+                // сбоя одного из вариантов — тогда заканчивать нечего, и ждать
+                // остальные задачи бессмысленно (все они уже получили
+                // kill_requested и завершатся). released тут не равен
+                // tasks.size(), если часть вариантов не была ещё запущена.
                 if (j.completed == j.tasks.size() ||
                     (j.crashed.load(std::memory_order_relaxed) &&
                      j.completed == j.released) ||
-                    (j.cancelled && j.completed == j.released)) {
+                    (j.cancelled && j.completed == j.released) ||
+                    (!opts->ignore_errors &&
+                     j.kill_requested.load(std::memory_order_relaxed) &&
+                     j.completed == j.released)) {
                     j.done = true;
                     total_done++;
                     last = true;

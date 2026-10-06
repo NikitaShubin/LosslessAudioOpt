@@ -4,6 +4,27 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.9 — 2026-10-06
+
+### Strict mode now really is strict
+Without `--ignore-errors`, a failure in any single variant now closes the whole file — it was supposed to already, but the rule only applied with `--verify=all`. The daemon runs `--verify=winner` by default, so a variant failure was quietly ignored: 54 finished files on a real library were reported `ok` while carrying a red dot on a variant that was never checked.
+
+The reasoning is not about the winner. A variant we neither checked nor fixed could have been the better one, so a result with a hole in its verification cannot be handed out in strict mode. That is the whole point of the mode. Taking "any one correct variant" is what `--ignore-errors` does — it excludes the broken variant from the selection and lets the file through.
+
+Closing a file means stopping it: every remaining process for that file is terminated immediately whatever its state, and no further variants of it are started.
+
+Four defects surfaced while fixing this:
+
+- the failure counter only advanced on exceptions, while an ordinary encoder refusal returns normally with no exception, so the strict check never fired;
+- victims of a stop (processes killed mid-flight) were reported as `failed` instead of `skipped`, making one culprit look like dozens;
+- a stopped file could never close: its task accounting was skipped, so the completion condition never held and the row hung in `running` forever;
+- the scheduler kept handing work to an already stopped file, and the planner and a running worker then disagreed about whether anything was left to do.
+
+The culprit is still marked red and keeps its own reason; victims are grey. The reason now reaches the web row instead of a bare "variant failed" — in strict mode the diagnostics are the point.
+
+### Strict mode concerns the file, never the queue
+An error marks one row and the rest of the queue keeps running — in no scenario does one file stop the queue. Only CLI `optimize` stops at the first failing file, which is its long-standing behaviour for scripts, and it still reports each failure by name with its reason rather than a bare `Aborted: N`.
+
 ## 2.3.8 — 2026-10-06
 
 ### The web interface stopped showing "Failed to fetch" while the queue was busy
