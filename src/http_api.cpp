@@ -50,13 +50,25 @@ nlohmann::json rows_json(const StateMirror& st) {
     for (const auto& r : st.snapshot()) {
         nlohmann::json tasks = nlohmann::json::array();
         for (const auto& t : r.tasks) tasks.push_back(t);
+        // У закрытых файлов task_infos — это 84% ответа (на 5307 строк
+        // замерено 32.6 МБ из 37). Веб из этих данных читает только точки
+        // вариантов и подсветку победителя, а она идёт по паре fmt/variant;
+        // params и note нужны лишь для текста подсказки под точкой. Поэтому
+        // закрытым строкам (ok) шлём fmt/variant и причину падения, а
+        // работающим и упавшим — полный набор: их единицы, весить нечем.
+        const bool lean = (r.state == "ok");
         nlohmann::json infos = nlohmann::json::array();
         for (size_t i = 0; i < r.task_infos.size(); i++) {
             const auto& ti = r.task_infos[i];
-            nlohmann::json j = {{"fmt", ti.fmt_id},
-                                {"variant", ti.variant_id},
-                                {"params", ti.params},
-                                {"note", ti.note}};
+            nlohmann::json j;
+            if (lean) {
+                j = {{"fmt", ti.fmt_id}, {"variant", ti.variant_id}};
+            } else {
+                j = {{"fmt", ti.fmt_id},
+                     {"variant", ti.variant_id},
+                     {"params", ti.params},
+                     {"note", ti.note}};
+            }
             // Причина падения — только у упавшего варианта. Ключ "error" не
             // добавляем для успешных: /api/state на большой библиотеке весит
             // десятки мегабайт, а файлов с падениями единицы из тысяч.
@@ -125,6 +137,23 @@ std::optional<std::string> read_web_file(const std::string& name) {
 
 int mount(httplib::Server& svr, const ApiContext& ctx) {
     const std::string token = ctx.token;
+
+    // Сборщик документа состояния для фонового кэша. Захватывает ctx по
+    // значению (там голые указатели на демон, зеркало и буфер событий — все
+    // живут дольше сессии). Живой поток демона ждёт в деструкторе сессии.
+    ctx.daemon->set_state_builder([ctx] {
+        nlohmann::json out;
+        out["version"] = ctx.daemon->version();
+        out["session"] = {
+            {"options", ctx.daemon->session_options()},
+        };
+        out["counters"] = ctx.daemon->counters();
+        out["paused"] = ctx.daemon->paused();
+        out["no_auth"] = ctx.token.empty();
+        out["last_seq"] = ctx.events->last_seq();
+        out["rows"] = rows_json(*ctx.state);
+        return out.dump();
+    });
 
     // Инициализация встроенных веб-ассетов (zip → память через miniz).
     std::string werr;
@@ -208,17 +237,10 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
 
     svr.Get("/api/state", [ctx, token](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, token)) return send_unauthorized(res);
-        nlohmann::json out;
-        out["version"] = ctx.daemon->version();
-        out["session"] = {
-            {"options", ctx.daemon->session_options()},
-        };
-        out["counters"] = ctx.daemon->counters();
-        out["paused"] = ctx.daemon->paused();
-        out["no_auth"] = token.empty();
-        out["last_seq"] = ctx.events->last_seq();
-        out["rows"] = rows_json(*ctx.state);
-        send_json(res, out);
+        // Сборка ушла в фон (см. DaemonSession::state_document): на горячей
+        // очереди она занимала минуты, и веб отваливался по таймауту fetch.
+        // Отдаём последний готовый документ; актуальность — до секунды.
+        res.set_content(ctx.daemon->state_document(700), "application/json");
     });
 
     svr.Get("/api/events", [ctx, token](const httplib::Request& req, httplib::Response& res) {

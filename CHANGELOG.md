@@ -4,6 +4,28 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.3.8 — 2026-10-06
+
+### The web interface stopped showing "Failed to fetch" while the queue was busy
+On a large library the browser stopped working whenever the queue was busy: the top-right indicator read **Failed to fetch** and the file list froze. The cause was `/api/state`, which the page requests once a second. It returns the entire queue, and building it takes a deep copy of the whole state mirror — 5307 rows measured **37 MB and 161 seconds** under load, against 4–6 seconds on an idle queue. The browser gave up long before that.
+
+Building the document now happens in a background thread. A request is answered immediately from the last completed document, so response time no longer depends on how loaded the queue is. If the queue is quiet enough that a rebuild is cheap (under a second), it is done synchronously, so a caller reading the state right after a change still sees that change. On a loaded queue the previous document is served instead — data a second behind beats waiting minutes.
+
+The response also got about half the size: **37 MB → 18.6 MB**. `task_infos` on finished files were 84% of the payload, and the page only reads the format and variant from them (to draw variant dots and mark the winner). Parameters and notes are now sent for files that are running or failed, and omitted for finished ones.
+
+### Restarting many files no longer times out
+Restarting a batch of files could take longer than the client waited, and the client then repeated the request — which restarted the same files a second time. The web now shows *already running: N* instead of reporting the repeat as lost work.
+
+The queue file is written once per batch rather than once per file: on a 5307-row queue a single write serialises 28 MB, so a batch of 21 restarts wrote it 21 times. One restart batch measured 336 seconds, down from timing out at 900. Rows whose id is no longer known are reported separately, so a repeat is never mistaken for lost work.
+
+A stale id could also add a second row for a file that was already queued: cancelled files leave a record behind, and looking the id up in the engine found it again. Cancelling, restarting and restarting again produced two rows for one file. Restart now requires the row to be visible in the list the user is looking at, otherwise it reports the id as gone.
+
+### The listening backlog is 1024 instead of 5
+`httplib` defaults to a listen backlog of 5, so five unaccepted connections were enough — the kernel then drops the handshake and the client sees a timeout. Under codec load this looked like the API and the web had died. The backlog is now 1024 (`-DCPPHTTPLIB_LISTEN_BACKLOG`; the vendored header is not patched).
+
+### `llao-linux serve` now stops on Ctrl-C and SIGTERM
+On Linux the signal handler set a flag that nothing ever read, so the daemon kept listening and had to be killed with `SIGKILL` — `systemctl stop` did not work. The regression came with splitting `serve.cpp` into modules. A watcher thread now turns the flag into a shutdown.
+
 ## 2.3.7 — 2026-10-05
 
 ### ALAC files no longer fail with `moov is corrupted`

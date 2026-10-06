@@ -50,6 +50,7 @@ uint64_t EventBuffer::last_seq() const {
 
 void StateMirror::upsert(const Row& r) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(r.id)) return;  // удалён — не воскрешать
     bool is_new = rows_.find(r.id) == rows_.end();
     rows_[r.id] = r;
@@ -61,6 +62,7 @@ void StateMirror::upsert(const Row& r) {
 
 void StateMirror::set_label(size_t id, const std::string& label) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     rows_[id].label = label;
     rows_[id].id = id;
@@ -69,6 +71,7 @@ void StateMirror::set_label(size_t id, const std::string& label) {
 
 void StateMirror::set_path(size_t id, const std::string& path) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -77,6 +80,7 @@ void StateMirror::set_path(size_t id, const std::string& path) {
 
 void StateMirror::set_root(size_t id, const std::string& root) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     rows_[id].root = root;
     rows_[id].id = id;
@@ -85,6 +89,7 @@ void StateMirror::set_root(size_t id, const std::string& root) {
 
 void StateMirror::set_state(size_t id, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     rows_[id].state = st;
     rows_[id].id = id;
@@ -93,6 +98,7 @@ void StateMirror::set_state(size_t id, const std::string& st) {
 
 void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -111,6 +117,7 @@ void StateMirror::set_tasks(size_t id, std::vector<std::string> tasks) {
 
 void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -126,6 +133,7 @@ void StateMirror::set_tasks(size_t id, const std::vector<obs::TaskInfo>& infos) 
 
 void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -136,6 +144,7 @@ void StateMirror::set_task(size_t id, size_t idx, const std::string& st) {
 
 void StateMirror::set_task_error(size_t id, size_t idx, const std::string& err) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -146,6 +155,7 @@ void StateMirror::set_task_error(size_t id, size_t idx, const std::string& err) 
 
 void StateMirror::set_pct(size_t id, double pct) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -155,6 +165,7 @@ void StateMirror::set_pct(size_t id, double pct) {
 
 void StateMirror::set_excluded(size_t id, const std::vector<obs::ExcludedVariant>& variants) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -165,6 +176,7 @@ void StateMirror::set_excluded(size_t id, const std::vector<obs::ExcludedVariant
 void StateMirror::set_winner(size_t id, const std::string& fmt, const std::string& variant,
                              size_t task_idx) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -178,6 +190,7 @@ void StateMirror::set_winner(size_t id, const std::string& fmt, const std::strin
 void StateMirror::set_meta(size_t id, const std::string& mode,
                            const std::string& target_dir) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -188,6 +201,7 @@ void StateMirror::set_meta(size_t id, const std::string& mode,
 
 void StateMirror::set_out(size_t id, const std::string& path) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -197,6 +211,7 @@ void StateMirror::set_out(size_t id, const std::string& path) {
 
 void StateMirror::set_last_error(size_t id, const std::string& msg) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -206,6 +221,7 @@ void StateMirror::set_last_error(size_t id, const std::string& msg) {
 
 void StateMirror::set_sidecar_flags(size_t id, bool had_sidecar, bool has_sidecar) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -216,6 +232,7 @@ void StateMirror::set_sidecar_flags(size_t id, bool had_sidecar, bool has_sideca
 
 void StateMirror::set_has_sidecar(size_t id, bool has_sidecar) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (removed_.count(id)) return;
     auto& r = rows_[id];
     r.id = id;
@@ -233,6 +250,7 @@ bool StateMirror::row_path(size_t id, std::string& out) const {
 
 void StateMirror::remove(size_t id) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     rows_.erase(id);
     order_.erase(std::remove(order_.begin(), order_.end(), id), order_.end());
     removed_.insert(id);
@@ -245,6 +263,7 @@ bool StateMirror::alive(size_t id) const {
 
 bool StateMirror::reorder(const std::vector<size_t>& order) {
     std::lock_guard<std::mutex> lk(m_);
+    ++rev_;  // зеркало изменилось
     if (order.empty()) return false;
     std::set<size_t> seen;
     for (size_t id : order) {
@@ -284,6 +303,11 @@ std::vector<Row> StateMirror::snapshot() const {
         for (const auto& kv : rows_) out.push_back(kv.second);
     }
     return out;
+}
+
+uint64_t StateMirror::revision() const {
+    std::lock_guard<std::mutex> lk(m_);
+    return rev_;
 }
 
 size_t StateMirror::size() const {

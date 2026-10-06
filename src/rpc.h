@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -107,6 +108,20 @@ struct Daemon {
     // Внутреннее состояние движка (отладка: prep_active, abort, флаги jobs).
     // По умолчанию пусто; реализуется DaemonSession.
     virtual nlohmann::json debug_state() { return nullptr; }
+    // Документ для /api/state. Реализация сессии отдаёт последний готовый
+    // снимок и пересобирает его в фоне (см. DaemonSession::state_document) —
+    // на большой библиотеке сборка занимает секунды и иначе веб отваливается по
+    // таймауту fetch. Пустая строка = документ не собран (веб получит пустое
+    // тело; это осознанный отказ лучше, чем блокировать запрос на минуты).
+    virtual std::string state_document(int max_age_ms) {
+        (void)max_age_ms;
+        return std::string();
+    }
+    // Установить сборщик документа (функция без аргументов -> строка JSON).
+    // Вызывается при монтировании HTTP-обработчиков.
+    virtual void set_state_builder(std::function<std::string()> build) {
+        (void)build;
+    }
 };
 
 // Исполняет команду. cmd ("ping", "add", …), args — объект аргументов.

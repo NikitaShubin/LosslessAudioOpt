@@ -300,13 +300,29 @@ int run_daemon(const std::vector<std::string>& args) {
     }
     std::fflush(stdout);
 
-    // Блокирующий приём. svr.stop() (по RPC shutdown) прерывает listen и
-    // возвращает управление. Сигнал (Ctrl+C) — запасной путь: прерывает
-    // accept c EINTR; после возврата из listen выполняем graceful shutdown.
+    // Следящий поток: обработчик сигнала только ставит g_ctrl, а httplib
+    // блокируется в accept и опросить флаг там негде. Без этого перевода
+    // llao-linux serve не гасился ни по Ctrl-C, ни по SIGTERM (а значит и по
+    // systemctl stop / kill): демон продолжал слушать порт, пока его не
+    // убьют SIGKILL. Регресс — с момента разбиения serve.cpp на модули.
+    //
+    // Поток выходит и по сигналу, и когда сервер остановился иначе (RPC
+    // shutdown): иначе join() ждал бы вечно — g_ctrl при этом не выставлен.
+    std::atomic<bool> listener_done{false};
+    std::thread ctrl_watcher([&svr, &listener_done] {
+        while (!g_ctrl && !listener_done.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (g_ctrl) svr.stop();
+    });
+
+    // Блокирующий приём. svr.stop() (по RPC shutdown или по сигналу) прерывает
+    // listen и возвращает управление; после возврата выполняем graceful shutdown.
     svr.listen_after_bind();
+    listener_done.store(true);
 
     // Остановить приём; подождать активные файлы; финализировать.
     svr.stop();
+    ctrl_watcher.join();
     if (!disc.empty()) util::remove_file(disc);
 
     session.shutdown();

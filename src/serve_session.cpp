@@ -32,7 +32,116 @@ DaemonSession::DaemonSession(optimize::Options opts, EventBuffer* ev, StateMirro
     started_ = monotonic_s();
 }
 
-DaemonSession::~DaemonSession() { shutdown(); }
+DaemonSession::~DaemonSession() {
+    // Фоновую сборку кэша состояния надо дождаться до разрушения зеркала и
+    // буфера событий: поток зовёт сборщик, который их читает.
+    if (state_worker_.joinable()) state_worker_.join();
+    shutdown();
+}
+
+void DaemonSession::set_state_builder(std::function<std::string()> build) {
+    bool start = false;
+    {
+        std::lock_guard<std::mutex> lk(state_m_);
+        state_build_ = std::move(build);
+        start = static_cast<bool>(state_build_) && !state_building_;
+        if (start) state_building_ = true;
+    }
+    // Прогрев кэша сразу при монтировании обработчиков: иначе первый запрос
+    // веба ждал бы синхронной сборки — на горячей очереди это минуты.
+    if (!start) return;
+    auto b = state_build_;
+    state_worker_ = std::thread([this, b] { state_rebuild(b, st_->revision()); });
+}
+
+std::string DaemonSession::state_document(int max_age_ms) {
+    std::function<std::string()> build;
+    bool sync = false;
+    uint64_t rev = st_->revision();
+    {
+        std::unique_lock<std::mutex> lk(state_m_);
+        if (!state_build_) return std::string();
+        // Зеркало изменилось — документ неверен в любом случае, даже если
+        // секунду назад он был свежим. Это и есть read-after-write для
+        // /api/state: сразу после reorder/pause/remove читатель должен увидеть
+        // новое состояние.
+        const bool dirty = (rev != state_rev_);
+        if (state_json_.empty()) {
+            sync = true;  // кэша ещё нет: отдавать нечего
+        } else if (dirty) {
+            // Зеркало поменялось. Если прошлая сборка была дорогой (насыщенная
+            // очередь) — отдаём прошлый документ и пересобираем в фоне: там
+            // ожидание в минуты куда хуже секундной задержки данных.
+            if (state_build_ms_ <= kStateSyncBudgetMs) {
+                sync = true;
+            } else if (!state_building_) {
+                state_building_ = true;
+                build = state_build_;
+                if (state_worker_.joinable()) state_worker_.join();
+                state_worker_ = std::thread([this, build, rev] { state_rebuild(build, rev); });
+            }
+            if (!sync) return state_json_;
+        } else {
+            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - state_at_)
+                           .count();
+            if (age <= max_age_ms) return state_json_;
+            // Ничего не менялось, но документ подрос — обновляем в фоне, чтобы
+            // счётчики и last_seq не застаивались (веб их показывает).
+            if (state_build_ms_ <= kStateSyncBudgetMs) {
+                sync = true;
+            } else if (!state_building_) {
+                state_building_ = true;
+                build = state_build_;
+                if (state_worker_.joinable()) state_worker_.join();
+                state_worker_ = std::thread([this, build, rev] { state_rebuild(build, rev); });
+            }
+            if (!sync) return state_json_;
+        }
+        if (sync) {
+            build = state_build_;
+            lk.unlock();  // сборка идёт без state_m_ (см. порядок блокировок)
+            auto t0 = std::chrono::steady_clock::now();
+            std::string doc = build();
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+            std::lock_guard<std::mutex> lk2(state_m_);
+            state_json_ = doc;
+            state_at_ = std::chrono::steady_clock::now();
+            state_build_ms_ = ms;
+            state_rev_ = rev;
+            return doc;
+        }
+    }
+}
+
+void DaemonSession::state_rebuild(const std::function<std::string()>& build,
+                                  uint64_t rev) {
+    auto t0 = std::chrono::steady_clock::now();
+    std::string doc;
+    try {
+        doc = build();
+    } catch (...) {
+        // Сборка не должна ронять демон из-за одного сбойного снимка: веб
+        // получит прошлый документ, а следующая попытка построит новый.
+        std::lock_guard<std::mutex> lk(state_m_);
+        state_building_ = false;
+        return;
+    }
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0)
+                  .count();
+    std::lock_guard<std::mutex> lk(state_m_);
+    state_json_ = std::move(doc);
+    state_at_ = std::chrono::steady_clock::now();
+    state_build_ms_ = ms;
+    // Ревизию фиксируем ту, под которую реально собрали. Пока зеркало уедет
+    // вперёд, документ считается устаревшим по change и следующий запрос либо
+    // пересоберёт, либо отдаст прошлый.
+    state_rev_ = rev;
+    state_building_ = false;
+}
 
 int DaemonSession::start(std::string* err) {
     try {
@@ -163,6 +272,15 @@ void DaemonSession::set_paused(bool paused) {
         if (engine_) engine_->pause();
     } else {
         if (engine_) engine_->resume();
+    }
+    // Пауза меняет только флаг и не трогает зеркало, поэтому ревизия зеркала не
+    // растёт — а /api/state отдаёт из кэша и показывал бы прежнее значение
+    // paused. Сбрасываем кэш явно: после паузы и возобновления читатель обязан
+    // увидеть новое состояние сразу.
+    {
+        std::lock_guard<std::mutex> lk(state_m_);
+        state_json_.clear();
+        state_rev_ = st_->revision();
     }
 }
 

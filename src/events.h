@@ -159,9 +159,15 @@ public:
 
     std::vector<Row> snapshot() const;
     size_t size() const;
+    // Счётчик изменений зеркала. Кэш документа /api/state хранит ревизию, под
+    // которую собран: пока она совпадает, отдавать можно готовый документ.
+    // Это то, что отличает «зеркало изменилось — пересобрать» от «просто
+    // подошло время обновить», и сохраняет read-after-write для /api/state.
+    uint64_t revision() const;
 
 private:
     mutable std::mutex m_;
+    uint64_t rev_ = 0;  // растёт на каждом изменении (см. revision())
     std::map<size_t, Row> rows_;
     std::vector<size_t> order_;  // порядок очереди (ids); пусто = по id
     // Tombstones удалённых строк: запоздалые события движка (воркер

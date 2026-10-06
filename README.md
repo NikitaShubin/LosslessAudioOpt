@@ -306,6 +306,15 @@ All requests except `GET /` and `/static/*` require the
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/state` | snapshot: version, session options, counters, pause, queue rows |
+
+The whole queue is returned, so the answer is large on a big library. It is built
+in the background and answered from the last completed document, which keeps the
+web responsive while the queue is busy. When a rebuild is cheap it is done
+synchronously, so reading the state right after a change reflects that change;
+when it is expensive the previous document is served instead — data a second
+behind rather than a wait of minutes. For finished files `task_infos` carries
+only `fmt` and `variant` (plus `error` for a failed variant); running and failed
+files also get `params` and `note`.
 | `GET /api/events?since=N` | event log (log/task/state/…) with `last_seq` for the delta |
 | `GET /api/formats` | list of enabled formats |
 | `POST /rpc` | JSON-RPC: `{ "cmd": "...", "args": {...} }` |

@@ -1,11 +1,13 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -20,6 +22,12 @@
 // DaemonSession реализует dsvc::Daemon (см. rpc.h) поверх optimize::Engine,
 // пишет discovery-файл, обслуживает graceful shutdown.
 namespace dsvc {
+
+// Порог, ниже которого сборка документа состояния считается дешёвой: пока
+// предыдущая уложилась в него, /api/state пересобирается синхронно и читатель
+// сразу после add/remove/restart видит актуальное состояние. На насыщенной
+// очереди сборка уходит в фон, иначе запрос ждал бы минуты.
+inline constexpr long long kStateSyncBudgetMs = 1000;
 
 // Единая точка входа `llao serve`: парсит опции из args (args[0] — имя
 // программы; токен "serve" в любом месте argv пропускается), поднимает
@@ -87,6 +95,25 @@ public:
     // завершения HTTP-сервера.
     void shutdown();
 
+    // --- Кэш документа /api/state ---
+    //
+    // Полный дамп очереди на большой библиотеке — десятки мегабайт, и на
+    // горячей очереди его сборка занимала минуты: StateMirror::snapshot()
+    // берёт общий мьютекс зеркала, который в это время держит движок,
+    // обновляющий десятки файлов. Веб опрашивает состояние раз в секунду и
+    // получает таймаут fetch — «Failed to fetch» в углу.
+    //
+    // Поэтому сборка ушла в фон: запрос отдаёт последний готовый документ
+    // немедленно, а новый документ собирается отдельным потоком. Скорость
+    // ответа перестаёт зависеть от нагрузки на очередь.
+    void set_state_builder(std::function<std::string()> build) override;
+    // Документ состояния. Кэш не старше max_age_ms — отдаётся как есть; иначе
+    // пересобирается: синхронно, если прошлая сборка уложилась в
+    // kStateSyncBudgetMs (состояние остаётся «свежим» для читателя сразу после
+    // add/remove), иначе в фоне с отдачей прошлого. Первый запрос (кэша ещё
+    // нет) собирает документ синхронно — иначе веб получил бы пустое тело.
+    std::string state_document(int max_age_ms) override;
+
 private:
     // Ядро операций под mt_: движок — единственный источник истины очереди,
     // mt_ сериализует check-then-act между параллельными RPC (два таба,
@@ -99,6 +126,21 @@ private:
     // Один перезапуск без персиста и без захвата mt_ — вызывается из
     // restart_many() под mt_ (весь батч) и из restart() под mt_.
     RestartOutcome restart_one(uint64_t id);
+
+    // Состояние кэша документа /api/state. state_m_ держится только на время
+    // подмены строки и проверки даты; сама сборка идёт без него, иначе запрос
+    // ждал бы её наравне с фоновой. Обратного вложения state_m_ -> зеркало
+    // и зеркало -> state_m_ в коде нет.
+    // Фоновая сборка документа (поток один, join в деструкторе).
+    void state_rebuild(const std::function<std::string()>& build, uint64_t rev);
+    std::function<std::string()> state_build_;
+    mutable std::mutex state_m_;
+    std::string state_json_;
+    std::chrono::steady_clock::time_point state_at_{};
+    long long state_build_ms_ = 0;  // длительность прошлой сборки, мс
+    uint64_t state_rev_ = 0;  // ревизия зеркала, под которую собран документ
+    std::thread state_worker_;
+    bool state_building_ = false;
 
     // Инкрементная персистентность: снять снапшоты зеркала и движка
     // ОТДЕЛЬНО (без вложенных блокировок — см. деадлок-осторожность) и
