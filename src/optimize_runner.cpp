@@ -207,6 +207,10 @@ void Runner::write_stats(FileJob& j, const std::string& status, const std::strin
     rec.ts = stats::now_iso();
     rec.run_id = stats::run_id();
     rec.file = j.path;
+    // Ключ итоговой таблицы — то, что осталось на диске. До отдачи файла он
+    // пуст, и тогда таблица встанет на исходник: для файла, который движок
+    // так и не отдал, искать результат нечего.
+    rec.out_path = j.out_path;
     rec.status = status;
     rec.detail = util::one_line(detail);
     rec.source_format = j.probe.format_name;
@@ -217,6 +221,14 @@ void Runner::write_stats(FileJob& j, const std::string& status, const std::strin
     rec.bits = j.bits;
     rec.duration = j.probe.duration;
     rec.has_tags = j.ts.present;
+    // Размер эталонного WAV с тегатами — знаменатель сжатия. Читаем с диска
+    // здесь же: эталон живёт до конца файла, а в таблицу попадает один раз.
+    if (j.session) {
+        uint64_t wav = util::file_size(j.session->ref_wav_path());
+        rec.wav_size = wav;
+    }
+    for (const auto& ev : j.excluded_variants)
+        rec.excluded.push_back({ev.fmt_id, ev.variant_id});
     rec.candidates = j.stat_candidates;
     if (j.best_valid && status == "ok") {
         rec.has_winner = true;
@@ -227,7 +239,37 @@ void Runner::write_stats(FileJob& j, const std::string& status, const std::strin
     // Ошибок не было, но и отдавать нечего (всё крупнее исходника, кандидатов
     // не осталось) — запись всё равно нужна: она объясняет, почему файл цел.
     if (rec.candidates.empty() && status == "ok") return;
-    stats::append_all({stats::to_json(rec)});
+    if (stats::append_all({stats::to_json(rec)})) note_stats_activity();
+}
+
+void Runner::note_stats_activity() {
+    std::lock_guard<std::mutex> lk(export_mtx);
+    pending_export = true;
+    idle_since = std::chrono::steady_clock::now();
+}
+
+void Runner::maybe_export_tsv() {
+    if (!opts || opts->no_stats) return;
+    // Разово-демон экспортирует по выходе из run(): там очередь заведомо
+    // закончилась, и ждать ещё 30 секунд незачем.
+    if (opts->mode != SessionMode::Daemon) return;
+    if (inflight.load(std::memory_order_relaxed) != 0) {
+        note_stats_activity();
+        return;
+    }
+    std::lock_guard<std::mutex> lk(export_mtx);
+    if (!pending_export) return;
+    auto now = std::chrono::steady_clock::now();
+    if (idle_since != std::chrono::steady_clock::time_point{} &&
+        now - idle_since < std::chrono::seconds(kStatsExportIdle))
+        return;
+    pending_export = false;
+    std::string err;
+    // Экспорт идемпотентен — он целиком выводится из журнала, — поэтому лишний
+    // вызов из другого рабочего потока не испортит файл, а держать под замком
+    // всю выгрузку безопасно и нужно, чтобы две не наложились.
+    if (!stats::export_tsv(stats::tsv_path(), &err))
+        obs::sink()->log("[stats] tsv: " + err + "\n");
 }
 
 void Runner::error_line(FileJob& j, const std::string& reason) {
@@ -1074,6 +1116,9 @@ void Runner::finalize_file(FileJob& j) {
     // ReplayGain, cue_sheet) дописываются позже и меняют байтовый размер,
     // поэтому сверять доставку с summary.best нельзя.
     uint64_t delivered_size = 0;
+    // Файл признан удачным, и запись в базу ждёт отдачи: путь результата и
+    // итоговый статус известны только после неё (см. конец функции).
+    bool stats_pending = false;
 
     // Два независимых вопроса, от которых зависит судьба файла. Решаем их
     // один раз здесь, дальше идут обычные ветки — без таблицы комбинаций:
@@ -1261,7 +1306,12 @@ void Runner::finalize_file(FileJob& j) {
             double savings = 100.0 * (1.0 - (double)best_cost / (double)j.probe.size);
             if (savings < 0.0 && j.mode != JobMode::Restore) savings = 0.0;
             j.stat_candidates = candidates;
-            write_stats(j, "ok", "");
+            // Запись в базу здесь намеренно не делается: она пойдёт ниже, после
+            // отдачи файла. Раньше она писалась до отдачи, и в базу попадало
+            // «ok» для файла, который на самом деле не удалось записать на диск
+            // (ошибка замены или расхождение размера). Для отчёта это была бы
+            // несуществующая экономия, а для ключа таблицы — несуществующий путь.
+            stats_pending = true;
 
             if (j.mode == JobMode::Restore) {
                 snprintf(buf, sizeof(buf), "%s",
@@ -1517,6 +1567,12 @@ void Runner::finalize_file(FileJob& j) {
         }
     }
 
+    // Запись в базу — последним действием закрытия файла. К этому моменту
+    // известно и что реально лежит на диске (j.out_path), и каков итоговый
+    // статус: ошибка замены или расхождение размера уже учтены выше, поэтому в
+    // базу не попадёт «ok» для файла, которого на диске нет.
+    if (stats_pending) write_stats(j, j.summary.status, j.summary.detail);
+
     if (j.best_valid) util::remove_file(j.best.path);
     discard_job_tmp(j);
 
@@ -1578,6 +1634,21 @@ void Runner::finalize_file(FileJob& j) {
 // worker: основной цикл воркера
 // ---------------------------------------------------------------------------
 
+namespace {
+// Сколько задач заняло рабочие места. Объект живёт ровно на одну итерацию цикла,
+// поэтому счётчик уменьшается и при выходе по break, и при исключении —
+// иначе «зависшая» задача навсегда блокировала бы экспорт статистики.
+struct InflightGuard {
+    std::atomic<int>& counter;
+    explicit InflightGuard(std::atomic<int>& c) : counter(c) {
+        counter.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~InflightGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
+    InflightGuard(const InflightGuard&) = delete;
+    InflightGuard& operator=(const InflightGuard&) = delete;
+};
+}  // namespace
+
 void Runner::worker() {
     util::set_thread_below_normal();
     workers_alive++;
@@ -1595,7 +1666,15 @@ void Runner::worker() {
             if (shutdown_requested.load()) break;
             if (opts->mode == SessionMode::OneShot && all_done_locked()) break;
             if (abort.load()) break;
+            // Вывод итоговой таблицы под локом планировщика делать нельзя:
+            // выгрузка читает журнал и пишет файл, а qm держит весь план.
+            lk.unlock();
+            maybe_export_tsv();
+            lk.lock();
             if (!take_work_locked(&w)) continue;
+            // Пока задача в руках у рабочего потока, таблицу выводить рано:
+            // журнал вот-вот изменится.
+            InflightGuard inflight_guard(inflight);
             if (w.kind == WorkKind::Variant)
                 obs::sink()->task(w.idx, w.task, obs::TaskState::Running);
         }

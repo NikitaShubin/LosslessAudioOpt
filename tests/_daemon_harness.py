@@ -171,6 +171,13 @@ class Daemon:
         self.disc = os.path.join(workdir, "daemon.json")
         self.log = os.path.join(workdir, "daemon.log")
         self.stats_file = os.path.join(workdir, "stats.json")
+        # Журнал и итоговая таблица пишутся рядом с бинарником по умолчанию.
+        # Без переопределения каждый интеграционный тест создавал бы их в
+        # репозитории (а раньше дописывал в боевую базу stats.json пользователя —
+        # на деле её набралось 39 960 записей о временных файлах в /tmp из
+        # 42 200, то есть почти вся база состояла из мусора тестов).
+        self.stats_journal = os.path.join(workdir, "stats.jsonl")
+        self.stats_tsv = os.path.join(workdir, "stats.tsv")
         self.proc = None
         # --verify=winner задан явно, чтобы тесты не зависели от дефолта
         # демона. С 2.3.2 дефолт verify=all: каждый вариант декодируется и
@@ -187,13 +194,14 @@ class Daemon:
         cmd = list(self.cmd) + list(extra)
         with open(self.log, "w") as log:
             # Статистика демона пишется рядом с бинарником. Без переопределения
-            # каждый интеграционный тест дописывал в боевой stats.json пользователя
-            # записи о временных файлах в /tmp — на деле их набралось 39 960 из
-            # 42 200, то есть почти вся база состояла из мусора тестов.
+            # каждый интеграционный тест дописывал в боевую базу пользователя
+            # записи о временных файлах в /tmp.
             self.proc = subprocess.Popen(
                 cmd, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT,
                 env={**os.environ, "LLAO_DISCOVERY": self.disc,
-                     "LLAO_STATS_FILE": self.stats_file})
+                     "LLAO_STATS_FILE": self.stats_file,
+                     "LLAO_STATS_JOURNAL": self.stats_journal,
+                     "LLAO_STATS_TSV": self.stats_tsv})
         _ALIVE.append(self)
         # Стартовый гейт кодеков (cli_check через wine на Linux) может занимать
         # заметно больше 15 с — особенно когда префикс только что разогревался.

@@ -93,6 +93,7 @@ void usage() {
     out::print("  %s tools [fmt_id ...] [--no-download]  status/download of utilities into bin/<id>/\n", prog);
     out::print("  %s help <fmt_id> [--no-download] [-- <arguments>]  run the utility (--help)\n", prog);
     out::print("  %s stats [--report=<file>]               show accumulated statistics\n", prog);
+    out::print("             [--export-tsv=<file>] [--dump=<file>]\n");
     out::print("  %s optimize <file|folder> [...]        main enumeration\n", prog);
     out::print("             [--jobs=N|M.F] [--formats=a,b] [--report=<file|folder>]\n");
     out::print("             [--no-download] [--dry-run] [--allow-lossy] [--debug] [--no-stats]\n");
@@ -103,7 +104,14 @@ void usage() {
     out::print("  --jobs=N exact thread count; --jobs=M.F multiplier of the CPU core count (default 2.0)\n");
     out::print("  optimize --debug writes the runs/*.jsonl log; --no-stats disables stats.json\n");
     out::print("  stats --report=<file> writes the same ranking plus savings and size histograms as\n");
-    out::print("    a shareable text table; stats.json path can be overridden with LLAO_STATS_FILE\n");
+    out::print("    a shareable text table\n");
+    out::print("  Statistics live in two files. stats.jsonl is an append-only journal, one line per\n");
+    out::print("    finished file, with every candidate, its timings and its errors — the place to\n");
+    out::print("    debug. stats.tsv is the result table: one row per file, one column per\n");
+    out::print("    format:variant with that variant's size (NA = the codec cannot do this file at\n");
+    out::print("    all, empty = never tried). It is rebuilt from the journal when a run ends, never\n");
+    out::print("    while work is in flight, and it is what stats reads. Paths can be overridden\n");
+    out::print("    with LLAO_STATS_JOURNAL, LLAO_STATS_TSV and LLAO_STATS_FILE\n");
     out::print("  optimize --verify: all = check every candidate (default); winner = check only the\n");
     out::print("    best by size; none = no verification at all. Any file error aborts the run unless\n");
     out::print("    --ignore-errors is given (then such files are skipped and the run continues).\n");
@@ -253,6 +261,8 @@ int cmd_help(const std::vector<std::string>& args) {
 
 int cmd_stats(const std::vector<std::string>& args) {
     std::string report;
+    std::string export_to;
+    std::string dump_to;
     bool no_more_opts = false;
     for (const auto& a : args) {
         if (!no_more_opts && a == "--") {
@@ -262,25 +272,51 @@ int cmd_stats(const std::vector<std::string>& args) {
         } else if (!no_more_opts && a == "--report") {
             out::error("ERROR: use --report=<file>\n");
             return 2;
+        } else if (!no_more_opts && a.rfind("--export-tsv=", 0) == 0) {
+            export_to = a.substr(13);
+        } else if (!no_more_opts && a.rfind("--dump=", 0) == 0) {
+            dump_to = a.substr(7);
+        } else if (!no_more_opts && (a == "--export-tsv" || a == "--dump")) {
+            out::error("ERROR: use %s=<file>\n", a.c_str());
+            return 2;
         } else {
             out::error("ERROR: unknown option '%s'\n", a.c_str());
             return 2;
         }
     }
-    auto items = stats::load();
+    // Дамп журнала нужен для разбора: в таблице итоговых размеров нет ни ошибок,
+    // ни таймингов кандидатов, а в журнале они есть.
+    if (!dump_to.empty()) {
+        if (!stats::write_dump(dump_to)) {
+            out::error("ERROR: cannot dump statistics to '%s'\n", dump_to.c_str());
+            return 1;
+        }
+        out::print("%s\n", dump_to.c_str());
+        return 0;
+    }
+    if (!export_to.empty()) {
+        std::string err;
+        if (!stats::export_tsv(export_to, &err)) {
+            out::error("ERROR: %s\n", err.c_str());
+            return 1;
+        }
+        out::print("%s\n", export_to.c_str());
+        return 0;
+    }
+    auto rows = stats::load_tsv();
     if (!report.empty()) {
-        if (items.empty()) {
+        if (rows.empty()) {
             out::error("ERROR: no statistics to report (nothing has been optimized yet)\n");
             return 1;
         }
-        if (!stats::write_report(report, items)) {
+        if (!stats::write_report(report, rows)) {
             out::error("ERROR: cannot write report to '%s'\n", report.c_str());
             return 1;
         }
         out::print("%s\n", report.c_str());
         return 0;
     }
-    stats::print_summary(items);
+    stats::print_summary(rows);
     return 0;
 }
 

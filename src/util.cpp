@@ -412,6 +412,31 @@ bool copy_file(const std::string& src, const std::string& dst) {
     if (!ok) remove_file(dst);
     return ok;
 }
+
+bool append_text(const std::string& p, const std::string& s) {
+    // Через open_shared, а не CreateFile напрямую: демон держит журнал открытым
+    // постоянно, и обычный CreateFile без FILE_SHARE_* не дал бы его прочитать.
+    HANDLE h = open_shared(p, GENERIC_WRITE, OPEN_ALWAYS);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER end{};
+    if (!SetFilePointerEx(h, end, nullptr, FILE_END)) {
+        CloseHandle(h);
+        return false;
+    }
+    bool ok = true;
+    DWORD total = 0;
+    while (total < s.size()) {
+        DWORD wr = 0;
+        DWORD chunk = (DWORD)std::min<size_t>(s.size() - total, 0x7FFFFFFF);
+        if (!WriteFile(h, s.data() + total, chunk, &wr, nullptr) || wr == 0) {
+            ok = false;
+            break;
+        }
+        total += wr;
+    }
+    if (!CloseHandle(h)) ok = false;
+    return ok;
+}
 #else
 std::vector<uint8_t> read_file(const std::string& p) {
     std::vector<uint8_t> data;
@@ -437,6 +462,20 @@ bool write_file(const std::string& p, const std::vector<uint8_t>& data) {
     bool ok = true;
     while (total < data.size()) {
         ssize_t wr = ::write(fd, data.data() + total, data.size() - total);
+        if (wr <= 0) { ok = false; break; }
+        total += wr;
+    }
+    close(fd);
+    return ok;
+}
+
+bool append_text(const std::string& p, const std::string& s) {
+    int fd = open(p.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) return false;
+    size_t total = 0;
+    bool ok = true;
+    while (total < s.size()) {
+        ssize_t wr = ::write(fd, s.data() + total, s.size() - total);
         if (wr <= 0) { ok = false; break; }
         total += wr;
     }

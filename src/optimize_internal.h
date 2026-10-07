@@ -286,6 +286,11 @@ struct FileJob {
 // Runner: ядро планировщика (определения методов — в optimize_runner.cpp)
 // ---------------------------------------------------------------------------
 
+// Сколько секунд должно пройти без единой задачи в полёте, прежде чем итоговая
+// таблица будет выведена заново. Пауза в очереди этому не мешает: ждём
+// отсутствия работы, а не пустого списка файлов.
+constexpr int kStatsExportIdle = 30;
+
 struct Runner {
     const Options* opts = nullptr;
     const std::vector<config::Format>* fmts = nullptr;
@@ -312,6 +317,16 @@ struct Runner {
     std::atomic<bool> shutdown_requested{false};
     std::atomic<bool> queue_paused{false};
     std::atomic<int> workers_alive{0};
+    // Сколько задач сейчас в полёте. Экспорт итоговой таблицы ждёт нуля: писать
+    // её, пока кодируется хоть один файл, незачем — журнал всё равно меняется.
+    std::atomic<int> inflight{0};
+
+    // Состояние отложенного экспорта stats.tsv. Таблица выводится из журнала
+    // не в процессе, а когда работа закончилась, поэтому нужен и признак
+    // «журнал изменился», и момент, с которого в полёте ничего нет.
+    std::mutex export_mtx;
+    bool pending_export = false;
+    std::chrono::steady_clock::time_point idle_since{};
 
     enum class WorkKind { None, Prep, Variant };
     struct Work {
@@ -361,6 +376,13 @@ struct Runner {
                             std::vector<optimize::Candidate>& candidates,
                             std::string& reason);
     void finalize_file(FileJob& j);
+    // Пометить журнал изменившимся: после закрытия файла итоговая таблица
+    // устарела и должна быть выведена заново.
+    void note_stats_activity();
+    // Вывести stats.tsv, если журнал изменился и в полёте ничего нет. В демоне
+    // ждёт ещё и паузы в kStatsExportIdle: очередь может быть остановлена, и
+    // это не мешает — ждём именно отсутствия работы, а не пустого списка.
+    void maybe_export_tsv();
     void worker();
 };
 

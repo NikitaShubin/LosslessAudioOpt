@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -9,8 +11,26 @@
 
 namespace stats {
 
-// Путь к stats.json (рядом с exe; переопределяется LLAO_STATS_FILE).
-std::string path();
+// ---------------------------------------------------------------------------
+// Хранение статистики разделено на два файла с разными задачами.
+//
+//   stats.jsonl — журнал. Append-only, одна строка на один закрытый файл.
+//     Горячий путь: дописать запись, ничего не перечитывая. Раньше база была
+//     одним JSON-массивом, и append перечитывал и перезаписывал его целиком на
+//     каждый файл — на реальной библиотеке это и есть основная цена прогона.
+//     Содержит всё, включая ошибки и тайминги: это база для разбора.
+//
+//   stats.tsv — итог. Не пишется в процессе, а выводится из журнала, когда
+//     работа закончена. Одна строка на файл, столбцы — свойства источника и
+//     размер каждой пары format/variant. Только то, что нужно для статистики
+//     и аналитики; промежуточные и ошибочные состояния остаются в журнале.
+//
+// Пути переопределяются переменными окружения (нужно тестам и разбору чужой
+// статистики); по умолчанию все три лежат рядом с exe. У клиента и у демона
+// это разные экземпляры, поэтому пути и различаются.
+std::string journal_path();     // LLAO_STATS_JOURNAL, иначе stats.jsonl
+std::string tsv_path();         // LLAO_STATS_TSV, иначе stats.tsv
+std::string dump_path();        // LLAO_STATS_FILE, иначе stats.json
 
 // Идентификатор текущего прогона (время запуска UTC + pid). Одинаков во всех
 // записях процесса, поэтому прогоны различимы в базе и их можно выборочно чистить.
@@ -19,7 +39,7 @@ std::string run_id();
 // Текущее время в ISO-8601 UTC — метка времени записи.
 std::string now_iso();
 
-// Одна запись базы = один обработанный файл со всеми его кандидатами.
+// Одна запись журнала = один закрытый файл со всеми его кандидатами.
 //
 // Раньше запись создавалась на каждого кандидата, и по базе было нельзя узнать,
 // кто выиграл файл: победителя приходилось расставлять постфактум перебором
@@ -29,7 +49,8 @@ std::string now_iso();
 struct Record {
     std::string ts;        // ISO-8601, UTC
     std::string run_id;    // прогон, чтобы базу можно было чистить выборочно
-    std::string file;
+    std::string file;      // исходник, как его видел движок
+    std::string out_path;  // что осталось на диске; ключ итоговой таблицы
     std::string status;    // ok | error | stopped
     std::string detail;    // причина для не-ok
 
@@ -43,7 +64,17 @@ struct Record {
     double duration = 0;
     bool has_tags = false;
 
+    // Размер эталонного WAV с тегатами. Знаменатель, от которого отсчитывается
+    // сжатие любого lossless-кодека: без него размеры форматов между собой не
+    // сравнить. Читается с диска в момент закрытия файла.
+    uint64_t wav_size = 0;
+
     std::vector<optimize::Candidate> candidates;
+
+    // Варианты, отсечённые ограничениями самого кодека (формат не умеет такую
+    // разрядность или такое число каналов). В отчёте это не сбой, а «здесь этот
+    // кодек неприменим» — в таблице такие ячейки помечаются NA.
+    std::vector<std::pair<std::string, std::string>> excluded;
 
     bool has_winner = false;
     std::string winner_format;
@@ -58,18 +89,90 @@ nlohmann::json to_json(const Record& rec);
 // Запись кандидата внутри Record (публично — им пользуется сборка записи).
 nlohmann::json candidate_to_json(const optimize::Candidate& c);
 
-// Читает запись обратно (нужно статистике для сводок). Записи неизвестной или
-// старой схемы пропускаются.
+// Читает запись обратно. Записи неизвестной или старой схемы пропускаются.
 bool from_json(const nlohmann::json& j, Record* out);
 
-// Читает все записи. При отсутствии/ошибке файла — пустой список.
-std::vector<nlohmann::json> load();
-
-// Добавляет пачку записей за один проход (потокобезопасно).
+// Дописывает записи в журнал (потокобезопасно, без перечитывания файла).
 bool append_all(const std::vector<nlohmann::json>& items);
 
+// Читает журнал. Если журнала нет, читается старый stats.json — чтобы база,
+// накопленная прошлыми версиями, продолжала работать без ручной возни.
+std::vector<Record> load();
+
+// Отладочный дамп журнала в JSON-массив (тот прежний формат целиком).
+bool write_dump(const std::string& dest);
+
+// ---------------------------------------------------------------------------
+// Итоговая таблица
+// ---------------------------------------------------------------------------
+
+// Ячейка размера одной пары format/variant.
+//
+//   Empty — пара не запускалась (или запускалась и не дала результата);
+//   NA    — кодек отсечён ограничениями самого формата;
+//   Value — лучший cost среди успешных кандидатов пары.
+struct Cell {
+    enum class State { Empty, NA, Value } state = State::Empty;
+    uint64_t value = 0;
+};
+
+// Строка итоговой таблицы: один файл в том виде, в каком он лежит на диске.
+struct Row {
+    std::string out_path;   // ключ строки; при пустом отданном пути — исходник
+    std::string run_id;     // прогон, зафиксировавший итог
+    std::string ts;
+    int runs = 1;           // сколько прогонов затронули файл
+
+    std::string source_format;
+    std::string codec_name;
+    uint64_t source_size = 0;
+    int bits = 0;
+    int channels = 0;
+    int sample_rate = 0;
+    uint64_t duration_ms = 0;
+    bool has_tags = false;
+    uint64_t wav_size = 0;
+
+    bool has_winner = false;
+    std::string winner_format;
+    std::string winner_variant;
+    uint64_t winner_cost = 0;
+    uint64_t winner_sidecar = 0;
+
+    std::map<std::string, Cell> cells;   // ключ "format:variant"
+};
+
+// Собирает строки из журнала и записывает таблицу в dest.
+//
+// Слияние: файл может встретиться в нескольких прогонах (сначала с ошибкой,
+// потом после починки), и таблица хранит самый полный результат — по каждой
+// паре берётся последнее непустое значение, так что повторный перебор только
+// упавших вариантов дополняет таблицу, а не затирает её. Строка попадает в
+// таблицу, только если итоговый статус файла — ok: незавершённое в статистику
+// не идёт, для разбора остаётся журнал.
+bool export_tsv(const std::string& dest, std::string* err = nullptr);
+
+// Читает таблицу. Пустой список при отсутствии или ошибке файла.
+std::vector<Row> load_tsv();
+
+// Столбцы таблицы в фиксированном порядке; sizes — пары format/variant.
+std::vector<std::string> tsv_columns(const std::vector<Row>& rows, size_t* fixed_count);
+
+// Сборка таблицы без записи на диск — для тестов и проверок.
+std::string build_tsv(const std::vector<Row>& rows);
+
+// Экранирование значения ячейки/пути: обратный слэш и управляющие символы.
+// В имени файла на POSIX допустим любой байт кроме '/', поэтому «табуляция
+// разделяет столбцы, а в пути её не бывает» — предположение, а не факт.
+std::string tsv_escape(const std::string& s);
+std::string tsv_unescape(const std::string& s);
+
+// ---------------------------------------------------------------------------
+// Сводки по таблице
+// ---------------------------------------------------------------------------
+
 // Краткая сводка накопленной статистики (для `llao.exe stats`).
-void print_summary(const std::vector<nlohmann::json>& items);
+void print_summary(const std::vector<Row>& rows);
 
 // Один столбик гистограммы: метка бина и сколько файлов в него попало.
 struct HistBin {
@@ -80,12 +183,12 @@ struct HistBin {
 // Распределение экономии по бинам. Экономия файла = 1 - cost/source_size;
 // файлы, которые не были отданы, и lossy-исходники не учитываются (иначе в
 // нулевом бине копятся ошибки кодеков, а не результат).
-std::vector<HistBin> savings_histogram(const std::vector<nlohmann::json>& items,
+std::vector<HistBin> savings_histogram(const std::vector<Row>& rows,
                                        const std::string& fmt = std::string());
 
 // Распределение исходных размеров по бинам. Бины кратны 2, начиная с 1 МБ:
 // для музыкальной библиотеки это читаемее, чем равномерная шкала в килобайтах.
-std::vector<HistBin> size_histogram(const std::vector<nlohmann::json>& items,
+std::vector<HistBin> size_histogram(const std::vector<Row>& rows,
                                     const std::string& fmt = std::string());
 
 // Текст гистограммы в ASCII-столбиках, нормированных на максимальный бин.
@@ -97,10 +200,10 @@ std::string histogram_text(const std::string& title, const std::vector<HistBin>&
 // если записей нет: отчёт без данных бесполезен. Формат табличный и без
 // локализации — в нём только id форматов, числа и проценты, — чтобы его можно
 // было отдать автору кодека как есть.
-std::string build_report(const std::vector<nlohmann::json>& items);
+std::string build_report(const std::vector<Row>& rows);
 
 // Записать build_report() в dest. false — если нечего писать или запись не удалась.
-bool write_report(const std::string& dest, const std::vector<nlohmann::json>& items);
+bool write_report(const std::string& dest, const std::vector<Row>& rows);
 
 // Ранжирование форматов по накопленной статистике: формат выше — тем более
 // вероятен как победитель.
@@ -120,6 +223,6 @@ struct Rank {
 
 // Форматы с выборкой: по убыванию средней экономии (при равенстве — больше
 // файлов впереди). Форматы без побед не попадают в результат.
-std::vector<Rank> ranking(const std::vector<nlohmann::json>& items);
+std::vector<Rank> ranking(const std::vector<Row>& rows);
 
 }  // namespace stats

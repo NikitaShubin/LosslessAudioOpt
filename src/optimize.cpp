@@ -50,7 +50,7 @@ struct Engine::Impl {
             if (err) *err = exc.what();
             return false;
         }
-        auto ranks = stats::ranking(stats::load());
+        auto ranks = stats::ranking(stats::load_tsv());
         std::stable_sort(fmts.begin(), fmts.end(), [&](const config::Format& a,
                                                        const config::Format& b) {
             double ra = -1.0, rb = -1.0;
@@ -322,7 +322,7 @@ int run(const Options& opts) {
     }
 
     {
-        auto ranks = stats::ranking(stats::load());
+        auto ranks = stats::ranking(stats::load_tsv());
         std::stable_sort(fmts.begin(), fmts.end(), [&](const config::Format& a,
                                                        const config::Format& b) {
             double ra = -1.0, rb = -1.0;
@@ -414,6 +414,19 @@ int run(const Options& opts) {
     }
 
     clear_session_tmp_dir(opts.tmp_dir);
+
+    // Итоговая таблица выводится после того, как список закончен: она собирается
+    // из журнала целиком, и дописывать её в процессе незачем. В демоне то же
+    // делает maybe_export_tsv(), когда в полёте не остаётся задач.
+    if (!opts.no_stats) {
+        std::string err;
+        if (!stats::export_tsv(stats::tsv_path(), &err))
+            out::print("%s\n",
+                       i18n::fmt("Statistics table not written: %s", err.c_str()).c_str());
+        else
+            out::print("%s\n", i18n::fmt("Statistics table: %s", stats::tsv_path().c_str())
+                                   .c_str());
+    }
 
     if (logger.ok()) {
         logger.event({{"type", "run_end"},

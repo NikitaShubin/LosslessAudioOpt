@@ -4,6 +4,63 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.4.0 — 2026-10-07
+
+### Statistics: a journal to debug in and a table to count with
+
+A real library run had produced a 138 MB `stats.json` for 5134 files. Two thirds
+of it was the same information written 387 009 times: 75 candidates per file,
+each repeating its format, variant, status and timings. The file was also
+rewritten from scratch for every finished file — `append` re-read the whole base
+and dumped it back — which on that run was 5134 full rewrites.
+
+Statistics are now two files with different jobs.
+
+**`stats.jsonl` is the journal.** Append-only, one line per finished file, with
+everything known about it: source properties, the size of the WAV it was decoded
+to, every candidate with its size, sidecar, timings, verification mode and error,
+the variants a codec refused on its own limits, and the winner. Writing a record
+is now a single append with no read. This is the place to debug — `llao stats
+--dump=<file>` writes it as one JSON array. An existing `stats.json` is still read
+if there is no journal yet, so old databases keep working untouched.
+
+**`stats.tsv` is the result table.** One row per file, one column per
+`format:variant` holding that variant's size, plus the source properties, the
+size of the uncompressed WAV and the winner. On that same library it comes to
+about 4.5 MB — roughly 30 times smaller. A cell is empty when the variant was
+never tried, `NA` when the codec's own limits ruled it out for this file, and a
+number otherwise. Rows are keyed by the path left on disk: once a file is
+converted its original is gone, and there would be nothing to look it up by. A
+file seen in several runs is merged keeping the most complete result, so a later
+run that retries only the failed variants fills the gaps instead of overwriting
+them. Files that did not finish are not in the table at all.
+
+The table is rebuilt from the journal when work ends, not while it is in flight —
+in the daemon, once nothing has been in flight for 30 seconds. A paused queue
+does not hold that back: the trigger is the absence of work, not an empty file
+list. `llao stats --export-tsv=<file>` writes it on demand. Paths are overridable
+with `LLAO_STATS_JOURNAL`, `LLAO_STATS_TSV` and `LLAO_STATS_FILE`.
+
+`llao stats` and the format ranking now read the table rather than the journal.
+A side effect worth having: the order in which formats are tried no longer shifts
+in the middle of a run as records accumulate — it comes from a snapshot taken
+before the run starts.
+
+### A file that was never written no longer counts as delivered
+
+The record for a finished file was written before the file was handed over, so a
+file whose replacement failed — or whose size on disk did not match the verified
+candidate — was recorded as `ok` with savings that did not exist. The record is
+now written after the handover, when the final status and the resulting path are
+both known. That also makes the table key exact instead of guessed.
+
+### WAV size
+
+Every record and every table row carries the size of the uncompressed WAV the
+file was decoded to. Without it the sizes of different codecs are not comparable:
+it is the denominator the compression ratio is measured against, and it is not
+recorded anywhere else.
+
 ## 2.3.9 — 2026-10-06
 
 ### Strict mode now really is strict

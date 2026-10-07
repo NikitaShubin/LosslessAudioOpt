@@ -108,28 +108,67 @@ llao.exe optimize <file|folder> [--jobs=N|M.F] # brute-force formats/parameters 
                  [--verify=all|winner|none]   # candidate verification mode (all by default)
                  [--ignore-errors]            # file errors — mark skip, do not abort the run
                  [--tmp=<path>]               # temporary folder (next to the binary by default)
-                 [--debug] [--no-stats]       # runs/*.jsonl log / do not accumulate stats.json
+                 [--debug] [--no-stats]       # runs/*.jsonl log / do not accumulate statistics
 llao.exe restore <file|folder> [--jobs=N|M.F] # inverse optimization: return to the target
                  [--to=flac]                  # format (FLAC by default), tags come back
-                 [--variant=<id>] [--no-download] [--allow-lossy]
+                 [--variant=<id>] --no-download --allow-lossy
 llao.exe help <fmt_id> -- <arguments>         # run a codec utility (--help and so on)
 llao.exe serve [options]                      # headless engine with HTTP API and web UI
 llao.exe stats [--report=<file>]               # show accumulated statistics
+                 [--export-tsv=<file>] [--dump=<file>]
 llao.exe variants                             # list formats and compression variants
 ```
+
+### Statistics: a journal and a table
 
 `llao.exe stats` prints the accumulated statistics: how many files were processed
 and replaced, the format ranking by average savings **on the files each format
 won**, and two histograms — the savings distribution and the source size
 distribution. `llao.exe stats --report=<file>` writes the same thing as a plain
 text table with no localization — a compact, shareable summary of how each codec
-performs on your material. The `stats.json` path can be overridden with the
-`LLAO_STATS_FILE` environment variable.
+performs on your material.
 
-One record in `stats.json` is one processed file: its source properties, every
-candidate that was tried (size, sidecar, timings, verification mode, error), and
-the winner. Since the whole run is recorded, any figure can be derived later from
-the same base instead of being frozen at the moment it was first computed.
+Statistics live in two files, and they do different jobs.
+
+**`stats.jsonl` — the journal.** Append-only, one line per finished file: its
+source properties, the size of the uncompressed WAV it was decoded to, every
+candidate that was tried (size, sidecar, timings, verification mode, error),
+what the codec refused to touch, and the winner. This is where to debug. Since
+the whole run is recorded, any figure can be derived later from the same base
+instead of being frozen at the moment it was first computed. `llao.exe stats
+--dump=<file>` writes it as one JSON array for anything that would rather parse
+it.
+
+**`stats.tsv` — the result table.** One row per file, one column per
+`format:variant` holding that variant's size, plus the source properties and the
+winner. It is the file to load into a spreadsheet or a plotting script:
+
+```
+out_path  run_id  ts  runs  source_format  codec_name  source_size  bits  …
+wav_size  winner_format  winner_variant  winner_cost  winner_sidecar  flac:8  …
+```
+
+Three things about a cell are worth knowing:
+
+- **empty** — the variant was never tried;
+- **`NA`** — the codec was ruled out by its own limits for this file (no
+  24-bit variant, say), which is not a failure;
+- **a number** — the best `cost` (file plus sidecar) the variant achieved.
+
+Rows are keyed by the path that is left on disk, not by the source: once a file
+has been converted its original is gone, and there would be nothing to look it up
+by. A file that appears in several runs is merged, keeping the most complete
+result — the last non-empty value per variant — so a later run that retries only
+the failed variants fills the gaps instead of overwriting them. Files that did not
+finish do not appear at all; they are only in the journal.
+
+The table is rebuilt from the journal when a run ends, not while work is in
+flight. In the daemon that means once no task has been in flight for a while; a
+paused queue does not hold it back, because there is no work to wait for.
+`llao.exe stats --export-tsv=<file>` writes it on demand.
+
+The paths can be overridden with `LLAO_STATS_JOURNAL`, `LLAO_STATS_TSV` and
+`LLAO_STATS_FILE`.
 
 The exported report also carries a savings histogram per format, so a format with
 one lucky file does not look like a consistently better one.
@@ -164,7 +203,7 @@ not replaced) and the run continues; `--ignore-errors` does not affect `restore`
 
 A failed file is **always** shown, regardless of the mode: an
 `ERROR <file> — <reason>` line in the output, a row with `error` status in
-`--report`, records for its variants in `stats.json`. Reasons that arrive from the
+`--report`, records for its variants in `stats.jsonl`. Reasons that arrive from the
 codecs' stderr as multiple lines are folded into one line so the report table is not
 broken.
 
@@ -232,7 +271,7 @@ Session options (optimization defaults):
   intermediate candidate disappear from the contest unnoticed;
 - `--dry-run` — do not write the result;
 - `--no-download` — do not download codecs (the startup gate only checks);
-- `--no-stats` — do not accumulate `stats.json`;
+- `--no-stats` — do not accumulate statistics;
 - `--debug` — `runs/*.jsonl` log and debugging;
 - `--report PATH` — final report on daemon shutdown (file or directory);
 - `--restore-to ID` — target format of the restore mode (`flac` by default; the id
@@ -403,8 +442,9 @@ honestly report unfinished work instead of showing a false "done".
    - the winner = the candidate of minimal size.
 4. The winner replaces the source (with the correct extension), a `.tags.zip`
    sidecar is placed next to it if needed.
-5. The file is written to the local `stats.json` statistics with all of its
-   candidates — they determine the search order in subsequent runs.
+5. The file is written to the local `stats.jsonl` journal with all of its
+   candidates — they determine the search order in subsequent runs, through the
+   result table rebuilt from that journal.
 6. Everything is logged and summarized into a report: a format table, savings,
    exclusion reasons.
 
