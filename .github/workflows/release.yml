@@ -79,6 +79,9 @@ jobs:
       - name: Тесты ошибок и честных результатов
         run: python3 tests/test_errors.py
 
+      - name: Тесты статистики (журнал и итоговая таблица)
+        run: python3 tests/test_stats.py
+
       - name: Сборка релизного архива
         run: |
           set -euo pipefail
