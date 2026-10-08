@@ -470,7 +470,16 @@ def g5_hung_encoder_is_killed(d):
     Триггер — настоящая заглушка вместо кодека: она не пишет выходной файл и
     не жжёт CPU. Ставится через PATH (без маркера .binary), поэтому бинарники в
     bin/ не трогаются.
+
+    Сценарий только для нативной сборки. Заглушка — скрипт /bin/sh, а
+    tool::in_path() на Windows-сборке отбрасывает всё, что не PE, и встроенный
+    flac.exe подменять нельзя: он нужен остальным сценариям и в bin/ не
+    возвращается надёжно. Ветка Windows в proc.cpp не менялась (там
+    GetProcessTimes по своему процессу), так что её проверяет другой сценарий.
     """
+    if not NATIVE_LINUX:
+        return ("пропуск на Windows-сборке: заглушка-kill нельзя подсунуть через "
+                "PATH — in_path() требует PE, а бинарники в bin/ тест не трогает")
     src = os.path.join(FIX, "tone_even.wav")
     assert os.path.exists(src), "нет фикстуры tone_even.wav"
     stub_dir = os.path.join(d, "stubs")
@@ -530,6 +539,10 @@ def g6_source_mode_untouched(d):
     before = os.stat(target).st_mode & 0o777
     rc, out = run_tool(["optimize", target, "--formats=flac", "--jobs=1"])
     after = os.stat(target).st_mode & 0o777
+    # Режим проверяется на УСПЕШНОЙ конвертации: если кодирование отвалилось,
+    # исходник и так останется нетронутым, и проверка станет пустой.
+    assert rc == 0 and "ERROR" not in out, \
+        "нужна успешная конвертация, а не отказ:\n%s" % out
     assert oct(before) == oct(after), \
         "режим исходника изменился: %s -> %s\n%s" % (oct(before), oct(after), out)
 
@@ -543,7 +556,12 @@ def g7_readonly_flac_converts(d):
     """
     src = os.path.join(FIX, "src.ofr")
     assert os.path.exists(src), "нет фикстуры src.ofr"
-    # Готовим read-only FLAC: кодируем заглушкой src.ofr и убираем права.
+    # Свой каталог сценария надо наполнить самому: restore ищет аудио в d, и
+    # на пустом каталоге он честно отвечает «no audio files found». Раньше
+    # сценарий рассчитывал на то, что в d что-то осталось от предыдущих
+    # прогонов, — на чистом CI такого не было.
+    cp(src, os.path.join(d, "seed.ofr"))
+    # Готовим read-only FLAC: кодируем заглушкой seed.ofr и убираем права.
     rc, out = run_tool(["restore", d, "--to=flac", "--jobs=1"])
     flacs = [f for f in os.listdir(d) if f.endswith(".flac")]
     assert flacs, "restore должен был дать .flac:\n%s" % out
