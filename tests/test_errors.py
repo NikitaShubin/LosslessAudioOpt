@@ -16,6 +16,9 @@ OptimFROG вообще) помечались как SKIP, а операцион�
     F6  нет Takc.exe -> optimize/restore --formats=tak: rc != 0 (tool missing)
     G1  сбой ВАРИАНТА (кодер отвергает вход) -> optimize: rc=1, ERROR с
         именем файла и причиной, строка файла в --report
+    G5  зависший кодировщик -> optimize: убит детектором зависания, rc=1
+    G6  режим прав исходного файла не меняется (chmod по симлинку бил цель)
+    G7  read-only .flac конвертируется: кандидат не наследует 0444
     G2  то же с --ignore-errors: прогон продолжается, упавший файл помечен, но
         пропущенные файлы ошибкой не считаются («ошибок: 0», rc=0)
     H1  неизвестный id в --formats -> rc=1, «unknown format», без перебора
@@ -94,10 +97,13 @@ def run_tool(args, timeout=1200):
         cmd = ["wine", LLAO] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
-    # Статистика пишется рядом с бинарником, то есть в рабочую stats.json
+    # Статистика пишется рядом с бинарником, то есть в рабочую базу
     # пользователя. Тестовые прогоны (в том числе с подменой кодировщика,
-    # которая портит рейтинг форматов) не должны туда попадать.
+    # которая портит рейтинг форматов) не должны туда попадать. С 2.4.0 их три:
+    # журнал stats.jsonl, итоговая таблица stats.tsv и отладочный дамп.
     env["LLAO_STATS_FILE"] = os.path.join(WORK, "stats.json")
+    env["LLAO_STATS_JOURNAL"] = os.path.join(WORK, "stats.jsonl")
+    env["LLAO_STATS_TSV"] = os.path.join(WORK, "stats.tsv")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
                        timeout=timeout, env=env)
     out = (r.stdout or "") + (r.stderr or "")
@@ -452,6 +458,107 @@ def h1_unknown_format_rejected(d):
         "валидный --formats должен давать результат:\n%s" % out
 
 
+def g5_hung_encoder_is_killed(d):
+    """Зависший кодировщик должен быть убит, а не висеть вечно.
+
+    Регресс: детектор зависания мерял CPU через getrusage(RUSAGE_CHILDREN),
+    то есть по СУММЕ всех детей процесса. Демон запускает кодировщики пачками,
+    поэтому сумма всегда росла, счётчик обнулялся на каждом опросе, и зависший
+    кодировщик жил бесконечно: на живой библиотеке это 52 процесса la.exe по
+    11 минут, файл навсегда в running, очередь стоит.
+
+    Триггер — настоящая заглушка вместо кодека: она не пишет выходной файл и
+    не жжёт CPU. Ставится через PATH (без маркера .binary), поэтому бинарники в
+    bin/ не трогаются.
+    """
+    src = os.path.join(FIX, "tone_even.wav")
+    assert os.path.exists(src), "нет фикстуры tone_even.wav"
+    stub_dir = os.path.join(d, "stubs")
+    os.makedirs(stub_dir, exist_ok=True)
+    # Имя — как у настоящей утилиты формата, иначе ensure() её не найдёт.
+    flac_real = os.path.join(BIN, "flac", "flac.exe")
+    assert os.path.exists(flac_real), "нет %s — bin/ не наполнен" % flac_real
+    stub = os.path.join(stub_dir, "flac")
+    with open(stub, "w") as f:
+        f.write("#!/bin/sh\nexec sleep 100000\n")
+    os.chmod(stub, 0o755)
+
+    marker = os.path.join(BIN, "flac", ".binary")
+    marker_backup = marker + ".hidden"
+    had_marker = os.path.exists(marker)
+    cp(src, os.path.join(d, "hung.wav"))
+    try:
+        if had_marker:
+            os.rename(marker, marker_backup)
+        env_path = stub_dir + os.pathsep + os.environ.get("PATH", "")
+        # Таймаут прогона заведомо меньше hard_timeout кодировщика (1800 с): если
+        # детектор откажет, тест упадёт по таймауту subprocess, а не провисит
+        # полчаса.
+        cmd = [LLAO, "optimize", d, "--formats=flac", "--jobs=1", "--no-download"]
+        env = dict(os.environ)
+        env["WINEDEBUG"] = "-all"
+        env["PATH"] = env_path
+        env["LLAO_STATS_FILE"] = os.path.join(WORK, "stats.json")
+        env["LLAO_STATS_JOURNAL"] = os.path.join(WORK, "stats.jsonl")
+        env["LLAO_STATS_TSV"] = os.path.join(WORK, "stats.tsv")
+        if not NATIVE_LINUX:
+            cmd = ["wine"] + cmd
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
+                           timeout=420, env=env)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert "hung.wav" in out, "файл должен быть назван в выводе:\n%s" % out
+        assert "stalled" in out.lower(), \
+            "зависший кодировщик должен быть убит детектором зависания:\n%s" % out
+    finally:
+        if had_marker and os.path.exists(marker_backup):
+            os.rename(marker_backup, marker)
+
+
+def g6_source_mode_untouched(d):
+    """Движок не имеет права менять права исходного файла.
+
+    Регресс: для декодирования заводится алиас src_link.<ext>, и на него
+    вызывался chmod(0444). chmod следует по симлинкам, поэтому права менялись
+    у ЦЕЛИ, то есть у файла библиотеки: пользователю оставались файлы, которыми
+    он больше не мог управлять (в прогоне на 5000 файлов таких оказалось 19).
+    """
+    src = os.path.join(FIX, "tone_even.wav")
+    assert os.path.exists(src), "нет фикстуры tone_even.wav"
+    target = os.path.join(d, "modes.wav")
+    cp(src, target)
+    os.chmod(target, 0o444)
+    before = os.stat(target).st_mode & 0o777
+    rc, out = run_tool(["optimize", target, "--formats=flac", "--jobs=1"])
+    after = os.stat(target).st_mode & 0o777
+    assert oct(before) == oct(after), \
+        "режим исходника изменился: %s -> %s\n%s" % (oct(before), oct(after), out)
+
+
+def g7_readonly_flac_converts(d):
+    """Read-only .flac должен конвертироваться, а не падать на записи тегов.
+
+    Тот же регресс, но с последствием: flac.exe переносит режим входного файла
+    на выходной, кандидат получался 0444, и write_group (O_TRUNC по тому же
+    пути) получал EACCES — «could not write FLAC tags» на каждом варианте.
+    """
+    src = os.path.join(FIX, "src.ofr")
+    assert os.path.exists(src), "нет фикстуры src.ofr"
+    # Готовим read-only FLAC: кодируем заглушкой src.ofr и убираем права.
+    rc, out = run_tool(["restore", d, "--to=flac", "--jobs=1"])
+    flacs = [f for f in os.listdir(d) if f.endswith(".flac")]
+    assert flacs, "restore должен был дать .flac:\n%s" % out
+    target = os.path.join(d, flacs[0])
+    os.chmod(target, 0o444)
+    out_dir = os.path.join(d, "conv")
+    os.makedirs(out_dir, exist_ok=True)
+    shutil.copy2(target, os.path.join(out_dir, flacs[0]))
+    cp(src, os.path.join(out_dir, "src2.ofr"))
+    rc, out = run_tool(["optimize", out_dir, "--formats=flac", "--jobs=1"])
+    assert "could not write FLAC tags" not in out, \
+        "read-only исходник роняет запись тегов в кандидат:\n%s" % out
+    assert "ERROR" not in out, "read-only .flac должен конвертироваться:\n%s" % out
+
+
 SCENARIOS = [
     ("f1", "F1  мусорный .flac -> optimize: rc!=0, «ошибок: 1»", f1_optimize_garbage),
     ("f2", "F2  мусорный .flac -> restore: rc!=0, ERROR", f2_restore_garbage),
@@ -470,6 +577,11 @@ SCENARIOS = [
     ("h1", "H1  неизвестный id в --formats -> rc=1, ERROR", h1_unknown_format_rejected),
     ("h2", "H2  24-бит моно с нечётной длиной -> кодируется (по признаку кодека)",
      h2_odd_length_compresses),
+    ("g5", "G5  зависший кодировщик убивается детектором, а не живёт вечно",
+     g5_hung_encoder_is_killed),
+    ("g6", "G6  режим прав исходного файла не меняется", g6_source_mode_untouched),
+    ("g7", "G7  read-only .flac конвертируется (регресс на права файла)",
+     g7_readonly_flac_converts),
 ]
 
 RESULTS = []

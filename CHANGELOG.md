@@ -4,6 +4,34 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.4.1 — 2026-10-08
+
+### LLAO was changing the permissions of your library
+
+Found while optimizing a 5000-file library: after a run, 19 files were left with mode `444` and could no longer be managed. `c` was not the user's copy — the tool did it.
+
+Every file goes through decoding, and before decoding the engine creates an alias `src_link.<ext>` so the codec can read the source. On POSIX the alias was made read-only with `chmod(link_path, 0444)`. `chmod` follows symlinks, so this set the mode of the **target** — the user's file. Converted files were unaffected (delivery puts a fresh inode in place, mode 664); anything not converted kept `0444`.
+
+It also broke the work itself: `flac.exe` carries the input's mode over to its output, so a read-only FLAC source produced a read-only candidate and the tag writer failed on it with `could not write FLAC tags` — every variant of those files. The `chmod` is gone. Linux ignores symlink modes (`lrwxrwxrwx` always), so there was nothing to protect: the alias lives in the session's temporary directory and is removed right after decoding.
+
+### A hung encoder could live forever on Linux
+
+Stall detection measured CPU with `getrusage(RUSAGE_CHILDREN)`, which sums every reaped child of the process. The daemon runs encoders in batches, so the sum always grew, `cpu_active` was always true, and the stall accumulator was reset on every poll — the detector could never fire. A hung encoder stayed alive indefinitely and held the file in `running`; one stalled codec produced 52 processes over 11 minutes and the queue stopped.
+
+CPU is now read per process from `/proc/<pid>/stat` (utime+stime), matching what the Windows branch does with `GetProcessTimes`.
+
+### The built-in ffmpeg was silently skipped on Linux
+
+`find_ffmpeg()` and `find_ffprobe()` looked for `bin/ffmpeg/ffmpeg` — without the extension. No such file exists: the build ships `ffmpeg.exe`/`ffprobe.exe`, including on Linux, where they run under wine. The lookup missed and fell through to `PATH`.
+
+That split the run in half: encoding used the built-in binary (through the `.binary` marker) while decoding, probing and tag verification used the system one. Two different ffmpeg builds inside one set of statistics. Both names are now checked on POSIX — a native file first, then the bundled `.exe`, and only then `PATH`.
+
+### Test isolation for the statistics files
+
+The test harnesses redirected only `stats.json`. Since 2.4.0 the journal `stats.jsonl` and the table `stats.tsv` are written next to the binary as well, and the test runs were leaving both in the repository. All three are now redirected into the scratch directory.
+
+New: `tests/test_media.py` (built-in tool selection, 4 scenarios), and three scenarios in `tests/test_errors.py` — a hung encoder must be killed by the stall detector, the source file's mode must not change, and a read-only FLAC must still convert.
+
 ## 2.4.0 — 2026-10-07
 
 ### Statistics: a journal to debug in and a table to count with

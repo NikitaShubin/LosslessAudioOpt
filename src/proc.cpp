@@ -12,6 +12,8 @@
 #endif
 
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <thread>
 
 #include "util.h"
@@ -359,7 +361,44 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
     bool timed_out = false;
     bool stalled = false;
 
+    // CPU именно этого процесса, а не сумма по всем детям демона.
+    //
+    // Раньше здесь стоял getrusage(RUSAGE_CHILDREN): он отдаёт время по всем
+    // перебранным потомкам сразу, поэтому при параллельной работе (а демон
+    // запускает кодеки пачками) счётчик всегда рос, cpu_active был истинным, и
+    // stall_accum_ms обнулялся на каждом опросе. Детектор зависания не срабатывал
+    // НИКОГДА — зависший кодировщик жил вечно и держал файл в running.
+    // На Windows того же класса ошибки не было: там GetProcessTimes(hProcess)
+    // меряет конкретный процесс.
     auto get_child_cpu_ms = [&](pid_t p) -> uint64_t {
+        // /proc/<pid>/stat: поля 14 (utime) и 15 (stime) в тиках ядра.
+        // comm (поле 2) может содержать пробелы и скобки, поэтому режем по
+        // последней ')'.
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%ld/stat", (long)p);
+        FILE* f = fopen(path, "rb");
+        if (f) {
+            char buf[512];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            if (n == 0) return 0;
+            buf[n] = '\0';
+            char* rp = strrchr(buf, ')');
+            if (rp) {
+                long utime = 0, stime = 0;
+                // После ')': state, ppid, pgrp, session, tty, tpgid, flags,
+                // minflt, cminflt, majflt, cmajflt, utime, stime, ...
+                if (sscanf(rp + 1, " %*c %*d %*d %*d %*d %*d %*d %*d %*d %*d %ld %ld",
+                           &utime, &stime) == 2) {
+                    long hz = sysconf(_SC_CLK_TCK);
+                    if (hz <= 0) hz = 100;
+                    return (uint64_t)((utime + stime) * 1000 / hz);
+                }
+            }
+            return 0;
+        }
+        // /proc недоступен — откат на прежнее поведение: хоть что-то, но при
+        // параллельной работе этот откат детектор снова не сработает.
         struct rusage ru{};
         if (getrusage(RUSAGE_CHILDREN, &ru) == 0)
             return timeval_ms(ru.ru_utime) + timeval_ms(ru.ru_stime);

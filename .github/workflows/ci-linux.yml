@@ -58,3 +58,6 @@ jobs:
 
       - name: Тесты статистики (журнал и итоговая таблица)
         run: python3 tests/test_stats.py
+
+      - name: Тесты выбора утилит (встроенный ffmpeg)
+        run: python3 tests/test_media.py

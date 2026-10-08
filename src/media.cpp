@@ -110,29 +110,34 @@ bool Probe::is_lossless() const {
     return codec_is_lossless(codec_name);
 }
 
-std::string find_ffprobe() {
+// Встроенный ffmpeg/ffprobe живёт в bin/ffmpeg/ и кладётся сборкой как .exe —
+// в том числе на Linux, где он запускается через wine. Раньше не-Windows ветка
+// искала имя без расширения («bin/ffmpeg/ffmpeg»), такого файла не бывает, и
+// движок молча уходил в PATH на системный ffmpeg: кодирование шло встроенным
+// бинарником (через tool::cached_binary), а декодирование, профилирование и
+// сверка тегов — системным. Два разных ffmpeg в одном прогоне, и цифры
+// сравнимы только с оговоркой.
+//
+// Теперь на POSIX проверяем оба имени: сначала нативный файл без расширения,
+// затем встроенный .exe (под wine), и только потом PATH.
+static std::string find_bundled_tool(const char* name) {
+    std::string dir = util::join_path(config::bin_dir(), "ffmpeg");
 #ifdef _WIN32
-    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffprobe.exe");
+    std::string local = util::join_path(dir, std::string(name) + ".exe");
     if (util::file_exists(local)) return local;
-    return util::find_in_path("ffprobe.exe");
+    return util::find_in_path(std::string(name) + ".exe");
 #else
-    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffprobe");
-    if (util::file_exists(local)) return local;
-    return util::find_in_path("ffprobe");
+    std::string native = util::join_path(dir, name);
+    if (util::file_exists(native)) return native;
+    std::string exe = util::join_path(dir, std::string(name) + ".exe");
+    if (util::file_exists(exe)) return exe;
+    return util::find_in_path(name);
 #endif
 }
 
-std::string find_ffmpeg() {
-#ifdef _WIN32
-    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffmpeg.exe");
-    if (util::file_exists(local)) return local;
-    return util::find_in_path("ffmpeg.exe");
-#else
-    std::string local = util::join_path(util::join_path(config::bin_dir(), "ffmpeg"), "ffmpeg");
-    if (util::file_exists(local)) return local;
-    return util::find_in_path("ffmpeg");
-#endif
-}
+std::string find_ffprobe() { return find_bundled_tool("ffprobe"); }
+
+std::string find_ffmpeg() { return find_bundled_tool("ffmpeg"); }
 
 // Удаляет JSON-скелет ffprobe из вывода при ошибке: строки "{", "}" и пустые.
 // При -print_format json ffprobe печатает {\r\n\r\n}\r\n на stdout даже при

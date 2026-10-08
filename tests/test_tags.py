@@ -116,8 +116,11 @@ def run_tool(args, timeout=1200):
         cmd = ["wine", LLAO] + args
     env = dict(os.environ)
     env["WINEDEBUG"] = "-all"
-    # Тестовые прогоны не должны попадать в рабочую stats.json.
+    # Тестовые прогоны не должны попадать в рабочую статистику. С 2.4.0 её три:
+    # журнал stats.jsonl, итоговая таблица stats.tsv и отладочный дамп.
     env["LLAO_STATS_FILE"] = os.path.join(WORK, "stats.json")
+    env["LLAO_STATS_JOURNAL"] = os.path.join(WORK, "stats.jsonl")
+    env["LLAO_STATS_TSV"] = os.path.join(WORK, "stats.tsv")
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT,
                        timeout=timeout, env=env)
     out = (r.stdout or "") + (r.stderr or "")

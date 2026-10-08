@@ -520,7 +520,19 @@ bool create_readonly_symlink(const std::string& target, const std::string& link_
                        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_REPARSE_POINT);
 #else
     if (::symlink(target.c_str(), link_path.c_str()) != 0) return false;
-    ::chmod(link_path.c_str(), 0444);
+    // chmod() здесь НЕ вызывается — намеренно.
+    //
+    // chmod следует по симлинкам, поэтому chmod(link_path, 0444) менял права
+    // ЦЕЛИ, то есть исходного файла библиотеки: движок оставлял пользователю
+    // файлы, которыми тот больше не может управлять. Хуже: read-only исходник с
+    // FLAC-кодеком ронял оптимизацию с «could not write FLAC tags» — кандидат
+    // наследовал режим входа, а write_group пишет его через O_TRUNC.
+    //
+    // В Linux режимы симлинка игнорируются (всегда lrwxrwxrwx), так что
+    // «сделать алиас только для чтения» здесь нечего: это ссылка внутри
+    // временного каталога сессии, её и удаляют сразу после декодирования.
+    (void)target;
+    (void)link_path;
 #endif
     return true;
 }
