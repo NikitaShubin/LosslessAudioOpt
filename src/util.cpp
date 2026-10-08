@@ -622,6 +622,30 @@ ReplaceResult replace_file(const std::string& original, const std::string& tmp,
     //     (артефакт прерванного запуска), затем rename tmp -> final.
     const std::string target = final_name.empty() ? original : final_name;
 
+#ifndef _WIN32
+    // POSIX: rename поверх существующего файла атомарен, поэтому сначала
+    // пробуем именно его, без предварительного удаления.
+    //
+    // Прежняя схема оставляла окно, в котором файла нет вообще: kill -9 в
+    // этот момент терял и оригинал, и кандидата. На живых данных это
+    // проявлялось как «файл в работе» потерянным — после перезапуска демон
+    // видел пустой queue.json.active и молча перезапускал прерванный файл
+    // вместо того, чтобы пометить его остановленным.
+    //
+    // Старый файл, если он не совпадает с целью, убирается ПОСЛЕ переноса:
+    // лишний дубликат безопаснее потери файла. Если не удалился — результат
+    // всё равно доставлен, поэтому ошибкой это не считается.
+    {
+        std::error_code ec;
+        fs::rename(fs::u8path(tmp), fs::u8path(target), ec);
+        if (!ec) {
+            if (target != original) remove_retry(original);
+            res.ok = true;
+            return res;
+        }
+    }
+#endif
+
     if (target != original) {
         std::string e1 = remove_retry(target);
         std::string e2 = remove_retry(original);
