@@ -16,11 +16,18 @@ wine. Поиск проваливался, и движок молча уходи
 одной статистике.
 
 Покрытие:
-    M1  при наличии bin/ffmpeg/ffmpeg.exe find_ffmpeg берёт именно его
-    M2  то же для ffprobe
-    M3  если встроенного бинарника нет — берётся утилита из PATH
-    M4  встроенный бинарник не переименовывается в .txt на время проверки
-        (регресс: тест не должен ломать рабочую установку)
+    M1  bin/ffmpeg/ffmpeg.exe — find_ffmpeg берёт именно его
+    M2  bin/ffmpeg/ffprobe.exe — find_ffprobe берёт именно его
+    M3  в bin лежит только имя без расширения — берётся оно (POSIX-ветка)
+    M4  в bin пусто — берётся утилита из PATH
+    M5  рабочая установка не тронута: bin/ репозитория побитово тот же
+
+Изоляция. Первые версии теста работали с настоящим bin/ репозитория и на время
+проверки переименовывали боевой ffmpeg.exe. Так тест требовал заполненного bin/
+(в CI его нет — кодек�� приезжают только в сборке релиза) и рисковал сломать
+рабочую установку. Здесь всё живёт во временном каталоге: config::bin_dir()
+считается от каталога исполняемого файла, поэтому проба собирается рядом с
+поддельным bin/ и ни одного файла репозитория не касается.
 
 Запуск:
     python3 tests/test_media.py
@@ -29,25 +36,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LLAO_NATIVE = os.path.join(ROOT, "llao-linux")
-LLAO_EXE = os.path.join(ROOT, "llao.exe")
-FF_DIR = os.path.join(ROOT, "bin", "ffmpeg")
 
 RESULTS = []
-
-
-def pick_native():
-    if not os.path.isfile(LLAO_NATIVE):
-        return False
-    if not os.path.isfile(LLAO_EXE):
-        return True
-    return os.path.getmtime(LLAO_NATIVE) >= os.path.getmtime(LLAO_EXE)
-
-
-NATIVE = pick_native()
-LLAO = LLAO_NATIVE if NATIVE else LLAO_EXE
 
 PROBE_SRC = r'''
 #include <cstdio>
@@ -62,38 +55,43 @@ int main(int argc, char** argv) {
 }
 '''
 
+COMPILE_UNITS = [
+    "src/media.cpp", "src/config.cpp", "src/util.cpp", "src/i18n.cpp",
+    "src/out.cpp", "src/tags_apev2.cpp", "src/tags_vorbis.cpp",
+    "src/tags_id3.cpp", "src/tags_mp4.cpp", "src/tags_wav.cpp",
+    "src/tags_core.cpp", "src/tags_write.cpp", "src/tags_sidecar.cpp",
+    "src/proc.cpp",
+]
 
-def build_probe():
-    out = os.path.join(ROOT, "_probe_media")
-    src = os.path.join(ROOT, "_probe_media.cpp")
+
+def build_probe(workdir):
+    """Собирает пробу в workdir — её каталог и есть тот, где ищется bin/."""
+    out = os.path.join(workdir, "probe_media")
+    src = os.path.join(workdir, "probe_media.cpp")
     with open(src, "w") as f:
         f.write(PROBE_SRC)
     # miniz.c — код на C, g++ собирает его как C++ и спотыкается о повторное
     # объявление массива, поэтому компилируем его отдельно компилятором C.
-    mz = os.path.join(ROOT, "_probe_miniz.o")
+    mz = os.path.join(workdir, "probe_miniz.o")
     c = subprocess.run(["gcc", "-O0", "-Ithird_party", "-c", "-o", mz,
                         "third_party/miniz/miniz.c"], capture_output=True, text=True,
                        cwd=ROOT)
     if c.returncode != 0:
         return None, c.stderr[-800:]
     cmd = ["g++", "-std=c++17", "-O0", "-Ithird_party", "-Isrc",
-           "-o", out, src, mz,
-           "src/media.cpp", "src/config.cpp", "src/util.cpp", "src/i18n.cpp",
-           "src/out.cpp", "src/tags_apev2.cpp", "src/tags_vorbis.cpp",
-           "src/tags_id3.cpp", "src/tags_mp4.cpp", "src/tags_wav.cpp",
-           "src/tags_core.cpp", "src/tags_write.cpp", "src/tags_sidecar.cpp",
-           "src/proc.cpp"]
+           "-o", out, src, mz] + COMPILE_UNITS
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
-    os.remove(src)
-    if os.path.exists(mz):
-        os.remove(mz)
     if r.returncode != 0 or not os.path.exists(out):
         return None, r.stderr[-800:]
     return out, ""
 
 
-def run_probe(probe, which):
-    r = subprocess.run([probe, which], capture_output=True, text=True, cwd=ROOT)
+def run_probe(probe, which, path_ffmpeg=None):
+    """Запускает пробу; path_ffmpeg — каталог, который кладётся в PATH."""
+    env = dict(os.environ)
+    if path_ffmpeg:
+        env["PATH"] = path_ffmpeg + os.pathsep + env.get("PATH", "")
+    r = subprocess.run([probe, which], capture_output=True, text=True, cwd=ROOT, env=env)
     return r.returncode, (r.stdout or "").strip()
 
 
@@ -107,81 +105,122 @@ def scenario(name, fn):
         RESULTS.append((name, False, "%s: %s" % (type(exc).__name__, exc)))
 
 
-PROBE = None
+def install_stub(ff_dir, name):
+    """Кладёт файл-заглушку нужного имени и возвращает его путь."""
+    path = os.path.join(ff_dir, name)
+    with open(path, "w") as f:
+        f.write("stub\n")
+    os.chmod(path, 0o755)
+    return path
+
+
+# Проба, поддельный bin/ и PATH-каталог живут всё время прогона.
+PROBE = ""
 ERR = ""
+FF_DIR = ""
 
 
 def m1_ffmpeg_bundled():
-    code, got = run_probe(PROBE, "ffmpeg")
-    if code == 1 and not got:
-        raise AssertionError("find_ffmpeg ничего не вернул; сборка пробы: %s" % ERR)
     exe = os.path.join(FF_DIR, "ffmpeg.exe")
-    if not os.path.exists(exe):
-        raise AssertionError("нет %s — bin/ не наполнен, проверять нечего" % exe)
-    assert os.path.basename(got) == "ffmpeg.exe", \
-        "нативная сборка должна брать вложенный ffmpeg.exe, а не %r" % got
+    install_stub(FF_DIR, "ffmpeg.exe")
+    try:
+        code, got = run_probe(PROBE, "ffmpeg")
+        if code == 1 and not got:
+            raise AssertionError("find_ffmpeg ничего не вернул; сборка пробы: %s" % ERR)
+        assert got == exe, "ожидался вложенный %r, получено %r" % (exe, got)
+    finally:
+        os.remove(exe)
 
 
 def m2_ffprobe_bundled():
-    code, got = run_probe(PROBE, "ffprobe")
-    if code == 1 and not got:
-        raise AssertionError("find_ffprobe ничего не вернул; сборка пробы: %s" % ERR)
     exe = os.path.join(FF_DIR, "ffprobe.exe")
-    if not os.path.exists(exe):
-        raise AssertionError("нет %s — bin/ не наполнен, проверять нечего" % exe)
-    assert os.path.basename(got) == "ffprobe.exe", \
-        "нативная сборка должна брать вложенный ffprobe.exe, а не %r" % got
-
-
-def m3_falls_back_to_path():
-    """Встроенного бинарника нет — должна взять утилиту из PATH."""
-    exe = os.path.join(FF_DIR, "ffprobe.exe")
-    if not os.path.exists(exe):
-        return  # нечего прятать
-    hidden = exe + ".hidden-by-test"
-    os.rename(exe, hidden)
+    install_stub(FF_DIR, "ffprobe.exe")
     try:
         code, got = run_probe(PROBE, "ffprobe")
+        if code == 1 and not got:
+            raise AssertionError("find_ffprobe ничего не вернул; сборка пробы: %s" % ERR)
+        assert got == exe, "ожидался вложенный %r, получено %r" % (exe, got)
+    finally:
+        os.remove(exe)
+
+
+def m3_native_name_wins():
+    """В bin лежит только имя без расширения — POSIX-ветка берёт его."""
+    native = install_stub(FF_DIR, "ffprobe")
+    # Оба имени рядом: без расширения проверяется первым, и это правильный
+    # порядок на POSIX — нативный файл не нужно гонять через wine.
+    install_stub(FF_DIR, "ffprobe.exe")
+    try:
+        _, got = run_probe(PROBE, "ffprobe")
+        assert got == native, \
+            "при наличии обоих имён ожидалось нативное %r, получено %r" % (native, got)
+    finally:
+        os.remove(native)
+        os.remove(os.path.join(FF_DIR, "ffprobe.exe"))
+
+
+def m4_falls_back_to_path():
+    """В bin пусто — должна взять утилиту из PATH."""
+    path_dir = os.path.join(os.path.dirname(FF_DIR), "pathbin")
+    os.makedirs(path_dir, exist_ok=True)
+    stub = install_stub(path_dir, "ffprobe")
+    try:
+        _, got = run_probe(PROBE, "ffprobe", path_ffmpeg=path_dir)
         assert got, "без встроенного бинарника должна взять утилиту из PATH"
-        assert "bin/ffmpeg" not in got, \
+        assert got == stub, "ожидался %r из PATH, получено %r" % (stub, got)
+        assert os.path.basename(got) != "ffprobe.exe" or os.path.dirname(got) != FF_DIR, \
             "встроенного файла нет, а вернулся путь из bin/ffmpeg: %r" % got
     finally:
-        os.rename(hidden, exe)
+        os.remove(stub)
 
 
-def m4_install_intact():
-    exe = os.path.join(FF_DIR, "ffmpeg.exe")
-    assert os.path.exists(exe), "ffmpeg.exe должен лежать на месте после тестов"
-    leftovers = [f for f in os.listdir(FF_DIR) if ".hidden" in f or f.endswith(".txt")]
-    assert not leftovers, "тест оставил мусор в bin/ffmpeg: %r" % leftovers
-    probe = os.path.join(ROOT, "_probe_media")
-    if os.path.exists(probe):
-        os.remove(probe)
+def m5_install_intact():
+    """Ни один файл рабочей установки не должен быть тронут."""
+    bin_ffmpeg = os.path.join(ROOT, "bin", "ffmpeg")
+    current = sorted(os.listdir(bin_ffmpeg)) if os.path.isdir(bin_ffmpeg) else []
+    assert current == INSTALL_SNAPSHOT["bin_ffmpeg"], \
+        "тест изменил содержимое bin/ffmpeg: было %r, стало %r" \
+        % (INSTALL_SNAPSHOT["bin_ffmpeg"], current)
+    leftovers = [f for f in os.listdir(ROOT)
+                 if f.startswith("_probe_media") or f.startswith("probe_media")]
+    assert not leftovers, "тест оставил мусор в корне репозитория: %r" % leftovers
 
+
+INSTALL_SNAPSHOT = {"bin_ffmpeg": []}
 
 SCENARIOS = [
     ("M1 find_ffmpeg берёт вложенный ffmpeg.exe", m1_ffmpeg_bundled),
     ("M2 find_ffprobe берёт вложенный ffprobe.exe", m2_ffprobe_bundled),
-    ("M3 без встроенного бинарника — утилита из PATH", m3_falls_back_to_path),
-    ("M4 установка не тронута", m4_install_intact),
+    ("M3 без расширения — нативный файл (POSIX)", m3_native_name_wins),
+    ("M4 встроенного нет — утилита из PATH", m4_falls_back_to_path),
+    ("M5 рабочая установка не тронута", m5_install_intact),
 ]
 
 
 def main():
-    global PROBE, ERR
-    PROBE, ERR = build_probe()
-    if not PROBE:
-        print("SKIP: не собралась проба (%s)" % ERR)
-        return 0
-    for name, fn in SCENARIOS:
-        scenario(name, fn)
+    global PROBE, ERR, FF_DIR, INSTALL_SNAPSHOT
+    bin_ffmpeg = os.path.join(ROOT, "bin", "ffmpeg")
+    INSTALL_SNAPSHOT = {
+        "bin_ffmpeg": sorted(os.listdir(bin_ffmpeg)) if os.path.isdir(bin_ffmpeg) else []
+    }
+    workdir = tempfile.mkdtemp(prefix="llao-media-")
+    try:
+        FF_DIR = os.path.join(workdir, "bin", "ffmpeg")
+        os.makedirs(FF_DIR)
+        PROBE, ERR = build_probe(workdir)
+        if not PROBE:
+            print("SKIP: не собралась проба (%s)" % ERR)
+            return 0
+        for name, fn in SCENARIOS:
+            scenario(name, fn)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
     ok = sum(1 for _, good, _ in RESULTS if good)
     for name, good, msg in RESULTS:
         print("%s %s" % ("PASS" if good else "FAIL", name))
         if not good:
             print("    " + msg)
-    if os.path.exists(PROBE):
-        os.remove(PROBE)
     print("\n%d/%d passed" % (ok, len(SCENARIOS)))
     return 0 if ok == len(SCENARIOS) else 1
 
