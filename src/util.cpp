@@ -278,16 +278,42 @@ bool mkdirs(const std::string& p) {
     return !ec;
 }
 
-bool remove_file(const std::string& p) {
+#ifdef _WIN32
+// Windows: DeleteFileW и MoveFileEx отказывают на файле с атрибутом
+// read-only (ERROR_ACCESS_DENIED). Это не временная блокировка, поэтому
+// повторные попытки не помогают — они лишь тратят время (в replace_file до
+// 14 с на файл). Атрибут надо снимать ДО удаления: иначе оптимизация не может
+// заменить исходник на лучший, а временные файлы не убираются.
+//
+// Снимается только бит READONLY: SetFileAttributesW переписывает набор
+// атрибутов целиком, и обнуление заодно сняло бы hidden/system/archive.
+static void clear_readonly_attr(const std::string& p) {
+    std::wstring w = utf8_to_cp(p, CP_UTF8);
+    if (w.empty()) return;
+    DWORD a = GetFileAttributesW(w.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_READONLY)) return;
+    SetFileAttributesW(w.c_str(), a & ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY));
+}
+#endif
+
+// Один remove без ретраев. Обёртка нужна ради read-only на Windows.
+static std::error_code remove_once(const std::string& p) {
+#ifdef _WIN32
+    clear_readonly_attr(p);
+#endif
     std::error_code ec;
     fs::remove(fs::u8path(p), ec);
+    return ec;
+}
+
+bool remove_file(const std::string& p) {
+    std::error_code ec = remove_once(p);
     if (!ec) return true;
     // Антивирус/индексатор могут короткое время удерживать свежезаписанный
     // файл (ERROR_SHARING_VIOLATION); повторяем с нарастающей паузой.
     for (int attempt = 0; attempt < 6; attempt++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(150 * (attempt + 1)));
-        ec.clear();
-        fs::remove(fs::u8path(p), ec);
+        ec = remove_once(p);
         if (!ec) return true;
     }
     return false;
@@ -576,8 +602,7 @@ ReplaceResult replace_file(const std::string& original, const std::string& tmp,
     auto remove_retry = [](const std::string& p) -> std::string {
         std::error_code ec;
         for (int attempt = 0; attempt < 15; attempt++) {
-            ec.clear();
-            fs::remove(fs::u8path(p), ec);
+            ec = remove_once(p);
             if (!ec) return {};
             if (ec == std::errc::no_such_file_or_directory) return {};
             if (attempt < 8)
