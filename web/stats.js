@@ -73,15 +73,17 @@ async function api(path) {
 // фитиль — ±σ: полный min..max на большой выборке упирается в единичные
 // выбросы и делает шкалу нечитаемой. Под свечой — распределение по бинам.
 
-let statsFilter = { bits: 0, rate: 0, ch: 0, dur: -1 };
+// Фильтр — набор выбранных значений по грани. Пустой набор означает
+// «включено всё»: снять последнее значение нельзя, оно включает всё обратно.
+let statsFilter = { bits: [], rate: [], ch: [], dur: [] };
 let statsData = null;
 
 function statsQuery() {
   const p = new URLSearchParams();
-  if (statsFilter.bits) p.set("bits", statsFilter.bits);
-  if (statsFilter.rate) p.set("rate", statsFilter.rate);
-  if (statsFilter.ch) p.set("ch", statsFilter.ch);
-  if (statsFilter.dur >= 0) p.set("dur", statsFilter.dur);
+  for (const key of ["bits", "rate", "ch", "dur"]) {
+    const set = statsFilter[key];
+    if (set && set.length) p.set(key, set.join(","));
+  }
   return p.toString();
 }
 
@@ -113,19 +115,17 @@ function renderStatsFilters(d) {
   const box = el("stats-filters");
   if (!box) return;
   box.textContent = "";
-  const key = { bits: "bits", sample_rate: "rate", channels: "ch", duration: "dur" };
-  const cur = { bits: statsFilter.bits, sample_rate: statsFilter.rate,
-                channels: statsFilter.ch, duration: statsFilter.dur };
-  // Счётчики — по facet_counts (с учётом прочих фильтров), набор кнопок — по
-  // facet_values (всегда один и тот же). Иначе при переключении часть кнопок
-  // пропадала, а подписи у оставшихся меняли ширину — и вся полоса
-  // переставлялась справа налево.
+  const KEY = { bits: "bits", sample_rate: "rate", channels: "ch", duration: "dur" };
+  // Счётчики — по facet_counts (с учётом прочих граней), набор кнопок — по
+  // facet_values: он всегда один и тот же, и нажатие ничего не переставляет.
   const counts = {};
   for (const f of d.facets || []) {
     counts[f.facet] = {};
     for (const v of f.values) counts[f.facet][v.value] = v.files;
   }
   for (const f of d.facet_values || []) {
+    const key = KEY[f.facet];
+    const chosen = statsFilter[key] || [];
     const wrap = document.createElement("div");
     wrap.className = "stats-facet";
     const t = document.createElement("span");
@@ -133,23 +133,26 @@ function renderStatsFilters(d) {
     t.textContent = STATS_FACET_LABEL[f.facet] || f.facet;
     wrap.appendChild(t);
 
-    const allVal = f.facet === "duration" ? -1 : 0;
-    const vals = [{ value: allVal, label: STATS_FACET_LABEL.all }]
-      .concat(f.values.map(v => ({
-        value: v.value, label: facetValueLabel(f.facet, v.value, d.duration_buckets),
-      })));
-    for (const v of vals) {
-      const n = v.value === allVal ? d.in_sample
-        : (counts[f.facet] && counts[f.facet][v.value] != null
-            ? counts[f.facet][v.value] : 0);
+    const countOf = v => (v === null ? d.in_sample
+      : (counts[f.facet] && counts[f.facet][v] != null ? counts[f.facet][v] : 0));
+
+    // Кнопка «все» сбрасывает грань в «включено всё».
+    const all = document.createElement("button");
+    all.className = "chip" + (!chosen.length ? " chip--on" : "");
+    all.innerHTML = '<span class="chip__label">' + STATS_FACET_LABEL.all + "</span>"
+      + '<span class="chip__count">' + d.in_sample + "</span>";
+    all.title = "снять ограничение по этой грани";
+    all.addEventListener("click", () => { statsFilter[key] = []; loadStats(); });
+    wrap.appendChild(all);
+
+    for (const v of f.values) {
+      const on = chosen.indexOf(v.value) >= 0;
       const b = document.createElement("button");
-      const on = cur[f.facet] === v.value;
+      const n = countOf(v.value);
       b.className = "chip" + (on ? " chip--on" : "") + (n ? "" : " chip--empty");
-      // Счётчик — в отдельном элементе фиксированной ширины: подпись и число
-      // не должны влиять на ширину кнопки, иначе нажатие её сдвигает.
       const lb = document.createElement("span");
       lb.className = "chip__label";
-      lb.textContent = v.label;
+      lb.textContent = facetValueLabel(f.facet, v.value, d.duration_buckets);
       const ct = document.createElement("span");
       ct.className = "chip__count";
       ct.textContent = String(n);
@@ -157,7 +160,18 @@ function renderStatsFilters(d) {
       b.appendChild(ct);
       b.title = n + " треков";
       b.addEventListener("click", () => {
-        statsFilter[key[f.facet]] = v.value;
+        const set = statsFilter[key] || [];
+        const at = set.indexOf(v.value);
+        if (at >= 0) {
+          set.splice(at, 1);
+          // Сняли последнее значение — пустой набор означал бы «пусто», а это
+          // и есть запрещённое состояние. Включаем всё обратно.
+          if (!set.length) statsFilter[key] = [];
+          else statsFilter[key] = set;
+        } else {
+          set.push(v.value);
+          statsFilter[key] = set.slice().sort((a, b) => a - b);
+        }
         loadStats();
       });
       wrap.appendChild(b);

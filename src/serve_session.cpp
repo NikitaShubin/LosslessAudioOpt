@@ -1,6 +1,7 @@
 #include "serve.h"
 #include "serve_internal.h"
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -43,9 +44,16 @@ DaemonSession::~DaemonSession() {
 std::string DaemonSession::stats_document(const stats::SummaryFilter& f) {
     // Ключ кэша — сами значения фильтра: сменилась разрядность или частота, и
     // прошлый документ уже не подходит.
+    // Наборы сравниваем как множества: порядок в запросе не должен ронять кэш.
+    auto same_set = [](const std::vector<int>& a, const std::vector<int>& b) {
+        if (a.size() != b.size()) return false;
+        for (int v : a) if (std::find(b.begin(), b.end(), v) == b.end()) return false;
+        return true;
+    };
     auto same_filter = [&](const stats::SummaryFilter& g) {
-        return g.bits == f.bits && g.sample_rate == f.sample_rate &&
-               g.channels == f.channels && g.duration_bucket == f.duration_bucket &&
+        return same_set(g.bits, f.bits) && same_set(g.sample_rate, f.sample_rate) &&
+               same_set(g.channels, f.channels) &&
+               same_set(g.duration_bucket, f.duration_bucket) &&
                g.wav_denominator == f.wav_denominator;
     };
     std::lock_guard<std::mutex> lk(stats_m_);

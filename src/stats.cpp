@@ -971,15 +971,19 @@ static std::map<std::string, FormatMeta> load_format_meta() {
 
 // skip — измерение, значение которого в фильтре игнорируется (для счётчиков
 // граней), либо -1, когда применяются все условия.
+// Набор значений грани: пусто — «любое», иначе значение должно входить.
+static bool picked(const std::vector<int>& set, int v) {
+    if (set.empty()) return true;
+    return std::find(set.begin(), set.end(), v) != set.end();
+}
+
 static bool filter_matches(const Row& r, const SummaryFilter& f, int skip) {
-    if (f.bits != 0 && skip != (int)SummaryFacet::Bits && r.bits != f.bits) return false;
-    if (f.sample_rate != 0 && skip != (int)SummaryFacet::SampleRate &&
-        r.sample_rate != f.sample_rate)
+    if (skip != (int)SummaryFacet::Bits && !picked(f.bits, r.bits)) return false;
+    if (skip != (int)SummaryFacet::SampleRate && !picked(f.sample_rate, r.sample_rate))
         return false;
-    if (f.channels != 0 && skip != (int)SummaryFacet::Channels && r.channels != f.channels)
-        return false;
-    if (f.duration_bucket >= 0 && skip != (int)SummaryFacet::Duration &&
-        duration_bucket_of(r.duration_ms) != f.duration_bucket)
+    if (skip != (int)SummaryFacet::Channels && !picked(f.channels, r.channels)) return false;
+    if (skip != (int)SummaryFacet::Duration &&
+        !picked(f.duration_bucket, duration_bucket_of(r.duration_ms)))
         return false;
     return true;
 }
@@ -1283,35 +1287,32 @@ std::vector<FacetCounts> facet_counts(const std::vector<Row>& rows, const Summar
 
 SummaryFilter summary_filter_from_query(const std::string& query) {
     SummaryFilter f;
-    auto num = [&query](const char* key) -> int {
-        std::string k = std::string(key) + "=";
+    // Значение грани — список чисел через запятую: bits=24 или rate=44100,96000.
+    auto many = [&query](const char* key) -> std::vector<int> {
+        std::vector<int> out;
+        const std::string k = std::string(key) + "=";
         size_t p = query.find(k);
-        if (p == std::string::npos) return 0;
+        if (p == std::string::npos) return out;
         p += k.size();
         size_t amp = query.find('&', p);
-        std::string v = query.substr(p, amp == std::string::npos ? amp : amp - p);
-        if (v.empty()) return 0;
-        for (char ch : v)
-            if (!std::isdigit(static_cast<unsigned char>(ch))) return 0;
-        return std::atoi(v.c_str());
+        const std::string v = query.substr(p, amp == std::string::npos ? amp : amp - p);
+        size_t i = 0;
+        while (i <= v.size()) {
+            size_t c = v.find(',', i);
+            if (c == std::string::npos) c = v.size();
+            const std::string one = v.substr(i, c - i);
+            bool ok = !one.empty();
+            for (char ch : one)
+                if (!std::isdigit(static_cast<unsigned char>(ch))) ok = false;
+            if (ok) out.push_back(std::atoi(one.c_str()));
+            i = c + 1;
+        }
+        return out;
     };
-    f.bits = num("bits");
-    f.sample_rate = num("rate");
-    f.channels = num("ch");
-    // -1, а не 0: корзина 0 («до минуты») — полноценное значение, и её нельзя
-    // спутать с «фильтр не задан».
-    f.duration_bucket = -1;
-    std::string k = "dur=";
-    size_t p = query.find(k);
-    if (p != std::string::npos) {
-        p += k.size();
-        size_t amp = query.find('&', p);
-        std::string v = query.substr(p, amp == std::string::npos ? amp : amp - p);
-        bool ok = !v.empty();
-        for (char ch : v)
-            if (!std::isdigit(static_cast<unsigned char>(ch))) ok = false;
-        if (ok) f.duration_bucket = std::atoi(v.c_str());
-    }
+    f.bits = many("bits");
+    f.sample_rate = many("rate");
+    f.channels = many("ch");
+    f.duration_bucket = many("dur");
     // По умолчанию — несжатый оригинал; wav=0 переключает на размер на диске.
     f.wav_denominator = query.find("wav=0") == std::string::npos;
     return f;

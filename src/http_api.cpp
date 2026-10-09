@@ -7,6 +7,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -293,20 +294,28 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
     svr.Get("/api/stats", [ctx, token](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, token)) return send_unauthorized(res);
         stats::SummaryFilter f;
-        // Пустая и нечисловая строка = «любое значение», поэтому параметр можно
-        // просто не слать, а можно прислать пустым.
-        auto num = [&req](const char* key, int fallback) {
+        // Грань принимает список значений через запятую: bits=24 или
+        // rate=44100,96000. Пустой список — «без ограничения».
+        auto many = [&req](const char* key) {
+            std::vector<int> out;
             const std::string v = req.get_param_value(key);
-            if (v.empty()) return fallback;
-            for (char ch : v)
-                if (!std::isdigit(static_cast<unsigned char>(ch))) return fallback;
-            return std::atoi(v.c_str());
+            size_t i = 0;
+            while (i <= v.size()) {
+                size_t c = v.find(',', i);
+                if (c == std::string::npos) c = v.size();
+                const std::string one = v.substr(i, c - i);
+                bool ok = !one.empty();
+                for (char ch : one)
+                    if (!std::isdigit(static_cast<unsigned char>(ch))) ok = false;
+                if (ok) out.push_back(std::atoi(one.c_str()));
+                i = c + 1;
+            }
+            return out;
         };
-        f.bits = num("bits", 0);
-        f.sample_rate = num("rate", 0);
-        f.channels = num("ch", 0);
-        // -1, а не 0: корзина «до минуты» — полноценное значение.
-        f.duration_bucket = req.has_param("dur") ? num("dur", -1) : -1;
+        f.bits = many("bits");
+        f.sample_rate = many("rate");
+        f.channels = many("ch");
+        f.duration_bucket = many("dur");
         // Знаменатель по умолчанию — несжатый оригинал; wav=0 — размер на диске.
         f.wav_denominator = req.get_param_value("wav") != "0";
         res.set_content(ctx.daemon->stats_document(f), "application/json");

@@ -237,12 +237,16 @@ std::vector<Rank> ranking(const std::vector<Row>& rows);
 
 enum class SummaryFacet { Bits, SampleRate, Channels, Duration };
 
-// Отбор. Ноль — «любое значение», duration = -1 — «любая длительность».
+// Отбор. В грани можно выбрать несколько значений сразу: «только 16 бит»,
+// «только 44 и 96 кГц» или ничего не выбирать — тогда берутся все значения.
+// Пустой набор означает «без ограничения», и пустым он быть не может: веб
+// не даёт снять последнее значение (это включало бы всё обратно), а сервер
+// трактует пустой query как «любое».
 struct SummaryFilter {
-    int bits = 0;
-    int sample_rate = 0;
-    int channels = 0;
-    int duration_bucket = -1;
+    std::vector<int> bits;
+    std::vector<int> sample_rate;
+    std::vector<int> channels;
+    std::vector<int> duration_bucket;
     // Знаменатель экономии. По умолчанию wav_size — размер несжатого оригинала
     // (эталонный WAV с тегами), потому что только тогда проценты читаются как
     // «во сколько раз файл меньше несжатого». source_size — то, что лежало на

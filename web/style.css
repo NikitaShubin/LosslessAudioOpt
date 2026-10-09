@@ -149,6 +149,7 @@ button:disabled:hover{border-color:#2a2f3a}
 .chip--on{background:#1d3a63;border-color:#3b82f6;color:#cfe3ff}
 .chip--empty{opacity:.45}
 .chip__label{font-weight:600}
+.chip--on .chip__label::before{content:"\2713";margin-right:4px;font-weight:700;color:#7dd3fc}
 .chip__count{min-width:26px;text-align:right;color:#7d8798;font-variant-numeric:tabular-nums}
 .chip--on .chip__count{color:#cfe3ff}
 .stats-chart{flex:1 1 auto;min-height:260px;overflow:auto}
