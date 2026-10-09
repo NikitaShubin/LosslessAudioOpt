@@ -225,4 +225,92 @@ struct Rank {
 // файлов впереди). Форматы без побед не попадают в результат.
 std::vector<Rank> ranking(const std::vector<Row>& rows);
 
+// ---------------------------------------------------------------------------
+// Сводка эффективности методов — для веб-диаграммы
+// ---------------------------------------------------------------------------
+//
+// Совокупность одна: все обработанные треки. Разбивки по альбомам нет — она
+// ничего не сообщает о кодеке. Вместо неё фильтры по свойствам трека:
+// разрядность, частота дискретизации, число каналов и длительность заметно
+// меняют эффективность сжатия, поэтому это отбор внутри совокупности, а не
+// набор отдельных диаграмм.
+
+enum class SummaryFacet { Bits, SampleRate, Channels, Duration };
+
+// Отбор. Ноль — «любое значение», duration = -1 — «любая длительность».
+struct SummaryFilter {
+    int bits = 0;
+    int sample_rate = 0;
+    int channels = 0;
+    int duration_bucket = -1;
+    // Знаменатель экономии. source_size — размер того, что лежало на диске, и
+    // он согласован с таблицей и отчётом. wav_size — эталонный WAV с тегами:
+    // он снимает зависимость от того, каким кодеком исходник уже сжат, но
+    // тогда сравнение идёт не с тем, что лежит на диске.
+    bool wav_denominator = false;
+};
+
+// Номер корзины длительности. Границы — в миллисекундах, по возрастанию;
+// корзин на одну больше, чем границ.
+int duration_bucket_of(uint64_t duration_ms);
+int duration_bucket_count();
+uint64_t duration_bucket_lower_ms(int bucket);
+
+// Число бинов гистограммы распределения экономии: по 5 % от 0 до 100.
+// Плюс отдельный счётчик kSummaryHistGrew — файлы, которые метод УВЕЛИЧИЛ.
+constexpr int kSummaryHistBins = 21;
+constexpr int kSummaryHistGrew = kSummaryHistBins;
+
+// Свод по одному методу (формату).
+struct MethodSummary {
+    std::string format;
+    int considered = 0;      // треков, где метод дал результат
+    int not_applicable = 0;  // треков, где метод отсечён ограничениями кодека
+    int wins = 0;            // треков, которые метод выиграл
+    double mean = 0.0;       // средняя экономия; 0.1 = на 10 % меньше
+    double stddev = 0.0;     // разброс: на столько метод промахивается в обе стороны
+    double min = 0.0;
+    double max = 0.0;
+    uint64_t total_in = 0;   // сумма знаменателей
+    uint64_t total_out = 0;  // сумма результатов
+    int hist[kSummaryHistBins + 1] = {0};  // распределение экономии по бинам
+};
+
+struct Summary {
+    std::string generated;
+    int files = 0;      // строк в таблице всего
+    int in_sample = 0;  // строк, прошедших фильтр
+    bool wav_denominator = false;
+    std::vector<MethodSummary> methods;  // по убыванию средней экономии
+};
+
+// Свод по всем методам. Список форматов выводится из данных таблицы, а не
+// зашит: новый формат из formats/*.json попадёт сюда сам.
+Summary summarize(const std::vector<Row>& rows, const SummaryFilter& f);
+
+// Тот же свод в JSON — ответ /api/stats.
+std::string summary_json(const std::vector<Row>& rows, const SummaryFilter& f);
+
+// Счётчики значений по каждому измерению при текущем фильтре. Значения самого
+// измерения в фильтре игнорируются: иначе чип показывал бы ноль и переключить
+// его было бы нельзя.
+struct FacetValue {
+    int value = 0;
+    int files = 0;
+};
+struct FacetCounts {
+    SummaryFacet facet = SummaryFacet::Bits;
+    std::vector<FacetValue> values;
+};
+std::vector<FacetCounts> facet_counts(const std::vector<Row>& rows, const SummaryFilter& f);
+
+// Разбор фильтра из query-строки HTTP. Пустые и нечисловые значения означают
+// «любое».
+SummaryFilter summary_filter_from_query(const std::string& query);
+
+// Прочитать журнал и собрать из него строки таблицы. Тот же путь, что у
+// export_tsv(): итоговая таблица и сводка должны считаться из одних и тех же
+// данных, иначе числа на веб-диаграмме разойдутся с stats.tsv.
+std::vector<Row> load_rows();
+
 }  // namespace stats

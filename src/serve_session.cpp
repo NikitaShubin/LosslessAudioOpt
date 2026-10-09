@@ -11,6 +11,7 @@
 #include "obs.h"
 #include "out.h"
 #include "report.h"
+#include "stats.h"
 #include "tool.h"
 #include "util.h"
 #include "version.h"
@@ -37,6 +38,34 @@ DaemonSession::~DaemonSession() {
     // буфера событий: поток зовёт сборщик, который их читает.
     if (state_worker_.joinable()) state_worker_.join();
     shutdown();
+}
+
+std::string DaemonSession::stats_document(const stats::SummaryFilter& f) {
+    // Ключ кэша — сами значения фильтра: сменилась разрядность или частота, и
+    // прошлый документ уже не подходит.
+    auto same_filter = [&](const stats::SummaryFilter& g) {
+        return g.bits == f.bits && g.sample_rate == f.sample_rate &&
+               g.channels == f.channels && g.duration_bucket == f.duration_bucket &&
+               g.wav_denominator == f.wav_denominator;
+    };
+    std::lock_guard<std::mutex> lk(stats_m_);
+    const auto age = std::chrono::steady_clock::now() - stats_at_;
+    if (!stats_json_.empty() && same_filter(stats_filter_) &&
+        age < std::chrono::milliseconds(kStatsCacheMs))
+        return stats_json_;
+    std::string doc;
+    try {
+        doc = stats::summary_json(stats::load_rows(), f);
+    } catch (...) {
+        // Сбой сборки не должен ронять демон: веб получит прошлый документ
+        // (или пустоту, если его ещё не было), а следующий запрос построит новый.
+        return stats_json_;
+    }
+    if (doc.empty()) return stats_json_;
+    stats_json_ = std::move(doc);
+    stats_filter_ = f;
+    stats_at_ = std::chrono::steady_clock::now();
+    return stats_json_;
 }
 
 void DaemonSession::set_state_builder(std::function<std::string()> build) {

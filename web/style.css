@@ -127,3 +127,39 @@ button:disabled:hover{border-color:#2a2f3a}
 .statusbar.on .statusbar__fill{background:rgba(59,130,246,.28)}
 .statusbar__label{position:relative;font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #op-msg{cursor:pointer}
+
+/* ---------------------------------------------------------------------------
+   Панель эффективности кодеков. Открывается кнопкой в шапке, основное окно не
+   трогает: очередь остаётся в памяти с выделением и прокруткой.
+   --------------------------------------------------------------------------- */
+.stats-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:45;display:flex;align-items:center;justify-content:center}
+.stats-overlay.hidden{display:none}
+.stats-panel{background:#14171c;border:1px solid #262b33;border-radius:12px;width:min(1180px,96vw);max-height:92vh;display:flex;flex-direction:column;padding:18px 20px 14px;box-shadow:0 10px 40px rgba(0,0,0,.55)}
+.stats-head{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.stats-head h2{margin:0;font-size:16px;color:#e6e8eb;font-weight:600}
+.stats-sub{font-size:12px;color:#8b93a1}
+.stats-filters{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:10px}
+.stats-facet{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.stats-facet__title{font-size:11px;color:#6f7887;text-transform:uppercase;letter-spacing:.04em;margin-right:2px}
+.chip{background:#1c2027;border:1px solid #2b313b;color:#aab2c0;border-radius:999px;padding:3px 10px;font-size:12px;cursor:pointer;line-height:1.4}
+.chip:hover{border-color:#3b4453;color:#e6e8eb}
+.chip--on{background:#1d3a63;border-color:#3b82f6;color:#cfe3ff}
+.stats-chart{flex:1 1 auto;min-height:300px;overflow:auto}
+.stats-svg{width:100%;height:auto;display:block}
+/* Полоса семейства «общий движок ffmpeg» — намеренно слабая: она должна
+   читаться как фон, а не как данные. */
+.stats-band{fill:#3b82f6;opacity:.07}
+.stats-grid{stroke:#242932;stroke-width:1}
+.stats-zero{stroke:#4b5563;stroke-width:1;stroke-dasharray:4 3}
+.stats-axis{fill:#8b93a1;font-size:11px}
+.stats-wick{stroke:#7d8798;stroke-width:1.5;stroke-linecap:round}
+.stats-body{fill:#4ade80}
+.stats-body--neg{fill:#f87171}
+.stats-hist{fill:#60a5fa;opacity:.45}
+.stats-grew{fill:#f87171;font-size:10px}
+.stats-name{fill:#aab2c0;font-size:12px}
+.stats-mean{fill:#e6e8eb;font-size:12px;font-weight:600}
+.stats-hit{fill:transparent}
+.stats-hit:hover{fill:#ffffff;opacity:.04}
+.stats-legend{margin-top:8px;font-size:11px;color:#6f7887;line-height:1.5}
+.stats-tip{position:fixed;z-index:60;pointer-events:none;background:#0e1116;border:1px solid #2b313b;border-radius:8px;padding:8px 10px;font-size:12px;color:#d6dae1;white-space:pre-line;box-shadow:0 6px 20px rgba(0,0,0,.5);max-width:280px}

@@ -205,6 +205,53 @@ def w8_no_full_path_in_row_tooltip():
     assert "function displayPath" in src, "нет displayPath"
 
 
+def w9_stats_panel_wired():
+    """Кнопка в шапке, панель и её обработчики должны быть связаны.
+
+    Панель эффективности кодеков — не вкладка, а оверлей поверх очереди: за её
+    время просмотра очередь не перерисовывается, поэтому выделение и прокрутка
+    сохраняются. Регрессия здесь молчаливая — если разъедутся id, панель просто
+    не откроется.
+    """
+    src = app_src()
+    html = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
+    for eid in ("btn-stats", "stats-overlay", "stats-filters", "stats-chart"):
+        assert 'id="%s"' % eid in html, "в index.html нет #%s" % eid
+        assert '"%s"' % eid in src, "app.js не обращается к #%s" % eid
+    assert 'id="btn-stats-close"' in html, "в index.html нет кнопки закрытия панели"
+    assert "/api/stats" in src, "панель не ходит в /api/stats"
+
+
+def w10_negative_mean_still_drawn():
+    """Свеча с отрицательным средним должна рисоваться, а не исчезать.
+
+    Средние бывают отрицательными: alac на этой библиотеке в среднем УВЕЛИЧИВАЕТ
+    файл (-8.6 %), tta тоже. Если высоту тела считать как y1 - y0 без модуля,
+    у отрицательного среднего высота станет отрицательной, а rect с
+    отрицательным height не рисуется — метод молча пропадёт с диаграммы ровно
+    тогда, когда его результат интересен.
+    """
+    src = app_src()
+    body = func_body(src, "renderStatsChart")
+    assert "Math.abs(" in body, "высота свечи не берётся по модулю"
+    assert "stats-body--neg" in body, "нет отдельного класса для отрицательного среднего"
+    assert "y(Math.abs(" not in body, "подозрение: модуль применён к значению, а не к высоте"
+
+
+def w11_stats_not_shown_by_default():
+    """Панель эффективности не должна быть основным окном.
+
+    Требование заказчика: статистика не показывается по дефолту. Панель обязана
+    быть скрыта в разметке, иначе она перекроет очередь при загрузке страницы.
+    """
+    html = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
+    m = re.search(r'<div id="stats-overlay"[^>]*>', html)
+    assert m, "нет контейнера #stats-overlay"
+    assert "hidden" in m.group(0), "панель статистики открыта по умолчанию: %s" % m.group(0)
+    src = app_src()
+    assert "el(\"btn-stats\")" in src, "нет кнопки открытия панели"
+
+
 SCENARIOS = [
     ("W1", "W1  статусбар обновляется до раннего выхода", w1_statusbar_before_early_return),
     ("W2", "W2  нет раннего выхода мимо статусбара", w2_no_early_return_skips_calls),
@@ -214,6 +261,10 @@ SCENARIOS = [
     ("W6", "W6  внятная ошибка разбора вместо SyntaxError", w6_response_parse_reports_failure),
     ("W7", "W7  причина падения варианта в тултипе точки", w7_variant_error_in_tooltip),
     ("W8", "W8  в тултипе строки нет полного пути", w8_no_full_path_in_row_tooltip),
+    ("W9", "W9  панель эффективности связана с кнопкой и /api/stats", w9_stats_panel_wired),
+    ("W10", "W10 отрицательное среднее рисуется, а не исчезает",
+     w10_negative_mean_still_drawn),
+    ("W11", "W11 панель статистики скрыта по умолчанию", w11_stats_not_shown_by_default),
 ]
 
 

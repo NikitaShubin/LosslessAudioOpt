@@ -7,6 +7,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "stats.h"
+
 // rpc — диспетчер команд управления демоном (§6.1 REFACTOR_TODO.md).
 // Платформонезависимый (nlohmann + ссылки на интерфейс Daemon): юнит-тестируется
 // нативно. Разбор/исполнение команд `POST /rpc` и поддержка `GET /api/formats`.
@@ -121,6 +123,14 @@ struct Daemon {
     // Вызывается при монтировании HTTP-обработчиков.
     virtual void set_state_builder(std::function<std::string()> build) {
         (void)build;
+    }
+    // Сводка эффективности кодеков для /api/stats: средняя экономия по каждому
+    // методу с отбором по свойствам трека. Реализуется DaemonSession —
+    // журнал статистики читается там же и кэшируется, в базовой заглушке
+    // пустая строка.
+    virtual std::string stats_document(const stats::SummaryFilter& f) {
+        (void)f;
+        return std::string();
     }
 };
 

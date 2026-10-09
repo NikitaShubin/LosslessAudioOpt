@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 
+#include "config.h"
 #include "i18n.h"
 #include "media.h"
 #include "out.h"
@@ -911,6 +912,299 @@ std::vector<Rank> ranking(const std::vector<Row>& rows) {
         return x.files > y.files;
     });
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// Сводка эффективности методов
+// ---------------------------------------------------------------------------
+
+// Границы корзин длительности. Треки сильно различаются по длине (от нескольких
+// секунд до получаса), а короткие и длинные сжимаются разными методами по-
+// разному, поэтому «длительность» — такой же фильтр, как разрядность.
+static const uint64_t kDurationBucketEdges[] = {
+    60 * 1000,        // 1 мин
+    5 * 60 * 1000,    // 5 мин
+    10 * 60 * 1000,   // 10 мин
+    20 * 60 * 1000,   // 20 мин
+};
+
+int duration_bucket_count() {
+    return (int)(sizeof(kDurationBucketEdges) / sizeof(kDurationBucketEdges[0])) + 1;
+}
+
+int duration_bucket_of(uint64_t duration_ms) {
+    for (int i = 0; i < duration_bucket_count() - 1; i++)
+        if (duration_ms < kDurationBucketEdges[i]) return i;
+    return duration_bucket_count() - 1;
+}
+
+uint64_t duration_bucket_lower_ms(int bucket) {
+    if (bucket <= 0) return 0;
+    if (bucket > duration_bucket_count() - 1) bucket = duration_bucket_count() - 1;
+    return kDurationBucketEdges[bucket - 1];
+}
+
+// Ключ ячейки — "формат:вариант". Имя формата доходит до первой двоеточия.
+static std::string cell_format(const std::string& key) {
+    size_t p = key.find(':');
+    return p == std::string::npos ? key : key.substr(0, p);
+}
+
+// Имя и семейство кодека берутся из formats/*.json, а не зашиваются здесь:
+// подпись оси и группировка фоном не должны ломаться от нового формата.
+// Семейство — это engine.kind: «binary» (своя утилита) или «ffmpeg».
+struct FormatMeta {
+    std::string name;
+    std::string family;
+};
+static std::map<std::string, FormatMeta> load_format_meta() {
+    std::map<std::string, FormatMeta> out;
+    std::vector<config::Format> fmts;
+    try {
+        fmts = config::load_all();
+    } catch (const std::exception&) {
+        return out;  // конфиг битый — вернём id без подписи, диаграмма не сломается
+    }
+    for (const auto& f : fmts) out[f.id] = {f.name, f.engine_kind};
+    return out;
+}
+
+// skip — измерение, значение которого в фильтре игнорируется (для счётчиков
+// граней), либо -1, когда применяются все условия.
+static bool filter_matches(const Row& r, const SummaryFilter& f, int skip) {
+    if (f.bits != 0 && skip != (int)SummaryFacet::Bits && r.bits != f.bits) return false;
+    if (f.sample_rate != 0 && skip != (int)SummaryFacet::SampleRate &&
+        r.sample_rate != f.sample_rate)
+        return false;
+    if (f.channels != 0 && skip != (int)SummaryFacet::Channels && r.channels != f.channels)
+        return false;
+    if (f.duration_bucket >= 0 && skip != (int)SummaryFacet::Duration &&
+        duration_bucket_of(r.duration_ms) != f.duration_bucket)
+        return false;
+    return true;
+}
+
+Summary summarize(const std::vector<Row>& rows, const SummaryFilter& f) {
+    Summary s;
+    s.generated = now_iso();
+    s.wav_denominator = f.wav_denominator;
+
+    // Форматы берём из данных: в таблице есть ячейки каждого метода, который
+    // реально отработал, плюс отсечённые по ограничениям кодека.
+    std::map<std::string, MethodSummary> agg;
+    for (const auto& r : rows) {
+        s.files++;
+        for (const auto& [key, cell] : r.cells) {
+            (void)cell;
+            agg[cell_format(key)];  // создаёт пустую запись, если её не было
+        }
+    }
+    // Σ savings² по каждому методу — только для расчёта σ.
+    std::map<std::string, double> sumsq;
+
+    for (const auto& r : rows) {
+        if (!filter_matches(r, f, -1)) continue;
+        s.in_sample++;
+
+        // Знаменатель экономии. У wav-исходников wav_size может быть нулевым
+        // (файл не читался) — тогда честно падаем на размер исходника.
+        uint64_t denom = r.source_size;
+        if (f.wav_denominator && r.wav_size != 0) denom = r.wav_size;
+        if (denom == 0) continue;
+
+        // Лучший результат каждого метода на этом треке + факт отсечения.
+        std::map<std::string, uint64_t> best;
+        std::set<std::string> na;
+        for (const auto& [key, cell] : r.cells) {
+            const std::string fmt = cell_format(key);
+            if (cell.state == Cell::State::NA) {
+                na.insert(fmt);
+                continue;
+            }
+            if (cell.state != Cell::State::Value || cell.value == 0) continue;
+            auto it = best.find(fmt);
+            if (it == best.end() || cell.value < it->second) best[fmt] = cell.value;
+        }
+
+        for (auto& [fmt, m] : agg) {
+            auto it = best.find(fmt);
+            if (it != best.end()) {
+                const double v = 1.0 - (double)it->second / (double)denom;
+                m.considered++;
+                m.total_in += denom;
+                m.total_out += it->second;
+                if (m.considered == 1) m.min = m.max = v;
+                m.min = std::min(m.min, v);
+                m.max = std::max(m.max, v);
+                sumsq[fmt] += v * v;
+                // Гистограмма распределения: по 5 % на бин, файлы, которые
+                // метод увеличил, в отдельный счётчик — иначе они потерялись бы
+                // среди нормальных значений.
+                int bin = (int)(v * 20.0);
+                if (bin < 0) bin = kSummaryHistGrew;
+                if (bin > kSummaryHistBins - 1) bin = kSummaryHistBins - 1;
+                m.hist[bin]++;
+            } else if (na.count(fmt)) {
+                m.not_applicable++;
+            }
+        }
+        if (r.has_winner && !r.winner_format.empty() && best.count(r.winner_format))
+            agg[r.winner_format].wins++;
+    }
+
+    for (auto& [fmt, m] : agg) {
+        m.format = fmt;
+        m.mean = m.considered ? 1.0 - (double)m.total_out / (double)m.total_in : 0.0;
+        // σ для подсказки на диаграмме. Сумма квадратов копится отдельно: в
+        // публичной структуре она не нужна, а из огрублённых бинов точной σ не
+        // получить.
+        if (m.considered > 1) {
+            const double var = sumsq[fmt] / (double)m.considered - m.mean * m.mean;
+            m.stddev = var > 0.0 ? std::sqrt(var) : 0.0;
+        }
+        s.methods.push_back(m);
+    }
+    // Методы без результата в выборке в диаграмме бесполезны: они нарисовали бы
+    // свечу в нуле. Но их нужно видеть, иначе фильтр не объяснит, почему
+    // формат пропал — поэтому оставляем, сортировка уведёт их вниз.
+    std::sort(s.methods.begin(), s.methods.end(),
+              [](const MethodSummary& x, const MethodSummary& y) {
+                  if (x.considered != y.considered) return x.considered > y.considered;
+                  if (x.mean != y.mean) return x.mean > y.mean;
+                  return x.format < y.format;
+              });
+    return s;
+}
+
+std::vector<Row> load_rows() { return rows_from_records(load()); }
+
+std::string summary_json(const std::vector<Row>& rows, const SummaryFilter& f) {
+    nlohmann::json j;
+    const Summary s = summarize(rows, f);
+    j["generated"] = s.generated;
+    j["files"] = s.files;
+    j["in_sample"] = s.in_sample;
+    j["denominator"] = f.wav_denominator ? "wav_size" : "source_size";
+    nlohmann::json fl = nlohmann::json::object();
+    fl["bits"] = f.bits;
+    fl["sample_rate"] = f.sample_rate;
+    fl["channels"] = f.channels;
+    fl["duration_bucket"] = f.duration_bucket;
+    j["filter"] = fl;
+
+    nlohmann::json dur = nlohmann::json::array();
+    for (int i = 0; i < duration_bucket_count(); i++) {
+        nlohmann::json b = nlohmann::json::object();
+        b["id"] = i;
+        b["from_ms"] = duration_bucket_lower_ms(i);
+        dur.push_back(b);
+    }
+    j["duration_buckets"] = dur;
+
+    const std::map<std::string, FormatMeta> meta = load_format_meta();
+    nlohmann::json ms = nlohmann::json::array();
+    for (const auto& m : s.methods) {
+        auto mi = meta.find(m.format);
+        nlohmann::json o = nlohmann::json::object();
+        o["format"] = m.format;
+        o["name"] = mi != meta.end() && !mi->second.name.empty() ? mi->second.name : m.format;
+        o["family"] = mi != meta.end() ? mi->second.family : std::string();
+        o["considered"] = m.considered;
+        o["not_applicable"] = m.not_applicable;
+        o["wins"] = m.wins;
+        o["mean"] = m.mean;
+        o["stddev"] = m.stddev;
+        o["min"] = m.min;
+        o["max"] = m.max;
+        nlohmann::json hb = nlohmann::json::array();
+        for (int i = 0; i < kSummaryHistBins; i++) hb.push_back(m.hist[i]);
+        nlohmann::json h = nlohmann::json::object();
+        h["bins"] = hb;                    // по 5 %, от 0 до 100
+        h["grew"] = m.hist[kSummaryHistGrew];  // метод увеличил файл
+        o["hist"] = h;
+        ms.push_back(o);
+    }
+    j["methods"] = ms;
+
+    nlohmann::json fs = nlohmann::json::array();
+    for (const auto& fc : facet_counts(rows, f)) {
+        nlohmann::json o = nlohmann::json::object();
+        o["facet"] = fc.facet == SummaryFacet::Bits       ? "bits"
+                     : fc.facet == SummaryFacet::SampleRate ? "sample_rate"
+                     : fc.facet == SummaryFacet::Channels   ? "channels"
+                                                            : "duration";
+        nlohmann::json vs = nlohmann::json::array();
+        for (const auto& v : fc.values) {
+            nlohmann::json e = nlohmann::json::object();
+            e["value"] = v.value;
+            e["files"] = v.files;
+            vs.push_back(e);
+        }
+        o["values"] = vs;
+        fs.push_back(o);
+    }
+    j["facets"] = fs;
+    return j.dump();
+}
+
+std::vector<FacetCounts> facet_counts(const std::vector<Row>& rows, const SummaryFilter& f) {
+    const SummaryFacet order[] = {SummaryFacet::Bits, SummaryFacet::SampleRate,
+                                  SummaryFacet::Channels, SummaryFacet::Duration};
+    std::vector<FacetCounts> out;
+    for (SummaryFacet fc : order) {
+        std::map<int, int> counts;
+        for (const auto& r : rows) {
+            if (!filter_matches(r, f, (int)fc)) continue;
+            int v = 0;
+            switch (fc) {
+                case SummaryFacet::Bits: v = r.bits; break;
+                case SummaryFacet::SampleRate: v = r.sample_rate; break;
+                case SummaryFacet::Channels: v = r.channels; break;
+                case SummaryFacet::Duration: v = duration_bucket_of(r.duration_ms); break;
+            }
+            counts[v]++;
+        }
+        FacetCounts c;
+        c.facet = fc;
+        for (const auto& [v, n] : counts) c.values.push_back({v, n});
+        out.push_back(c);
+    }
+    return out;
+}
+
+SummaryFilter summary_filter_from_query(const std::string& query) {
+    SummaryFilter f;
+    auto num = [&query](const char* key) -> int {
+        std::string k = std::string(key) + "=";
+        size_t p = query.find(k);
+        if (p == std::string::npos) return 0;
+        p += k.size();
+        size_t amp = query.find('&', p);
+        std::string v = query.substr(p, amp == std::string::npos ? amp : amp - p);
+        if (v.empty()) return 0;
+        for (char ch : v)
+            if (!std::isdigit(static_cast<unsigned char>(ch))) return 0;
+        return std::atoi(v.c_str());
+    };
+    f.bits = num("bits");
+    f.sample_rate = num("rate");
+    f.channels = num("ch");
+    // -1, а не 0: корзина 0 («до минуты») — полноценное значение, и её нельзя
+    // спутать с «фильтр не задан».
+    f.duration_bucket = -1;
+    std::string k = "dur=";
+    size_t p = query.find(k);
+    if (p != std::string::npos) {
+        p += k.size();
+        size_t amp = query.find('&', p);
+        std::string v = query.substr(p, amp == std::string::npos ? amp : amp - p);
+        bool ok = !v.empty();
+        for (char ch : v)
+            if (!std::isdigit(static_cast<unsigned char>(ch))) ok = false;
+        if (ok) f.duration_bucket = std::atoi(v.c_str());
+    }
+    f.wav_denominator = query.find("wav=1") != std::string::npos;
+    return f;
 }
 
 }  // namespace stats

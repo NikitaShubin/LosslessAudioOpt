@@ -844,6 +844,267 @@ el("btn-shutdown").addEventListener("click", async ()=>{
 
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) pollState(); });
 
+// ---------------------------------------------------------------------------
+// Панель эффективности кодеков (/api/stats)
+// ---------------------------------------------------------------------------
+//
+// Средний уровень сжатия по каждому методу на всём обработанном материале.
+// Фильтры — свойства трека (разрядность, частота, каналы, длительность):
+// они заметно двигают эффективность, поэтому это отбор внутри совокупности.
+// Разбивки по альбомам нет — она ничего не сообщает о кодеке.
+//
+// Ось X — методы, ось Y — экономия. Тело свечи идёт от нуля к среднему,
+// фитиль — ±σ: полный min..max на большой выборке упирается в единичные
+// выбросы и делает шкалу нечитаемой. Под свечой — распределение по бинам.
+
+let statsFilter = { bits: 0, rate: 0, ch: 0, dur: -1 };
+let statsData = null;
+
+function statsQuery() {
+  const p = new URLSearchParams();
+  if (statsFilter.bits) p.set("bits", statsFilter.bits);
+  if (statsFilter.rate) p.set("rate", statsFilter.rate);
+  if (statsFilter.ch) p.set("ch", statsFilter.ch);
+  if (statsFilter.dur >= 0) p.set("dur", statsFilter.dur);
+  return p.toString();
+}
+
+// Подписи значений граней. Сервер отдаёт числа, а не текст: подписи живут
+// здесь, потому что веб по-русски, а /api/stats общий.
+const STATS_FACET_LABEL = {
+  bits: "Разрядность", sample_rate: "Частота", channels: "Каналы",
+  duration: "Длительность", all: "Все треки",
+};
+function facetValueLabel(facet, v, buckets) {
+  if (facet === "bits") return v + " бит";
+  if (facet === "sample_rate") return (v / 1000).toFixed(v % 1000 ? 3 : 0).replace(".", ",") + " кГц";
+  if (facet === "channels") return v === 1 ? "моно" : v === 2 ? "стерео" : v + " кан.";
+  if (facet === "duration") {
+    const bs = buckets || [];
+    const b = bs.find(x => x.id === v);
+    if (!b) return "корзина " + v;
+    // Границы приходят в миллисекундах; последняя корзина открытая.
+    const fromMin = Math.round(b.from_ms / 60000);
+    if (fromMin === 0) return "до 1 мин";
+    const next = bs.find(x => x.id === v + 1);
+    if (!next) return "от " + fromMin + " мин";
+    return fromMin + "\u2013" + Math.round(next.from_ms / 60000) + " мин";
+  }
+  return String(v);
+}
+
+function renderStatsFilters(d) {
+  const box = el("stats-filters");
+  if (!box) return;
+  box.textContent = "";
+  const cur = { bits: statsFilter.bits, sample_rate: statsFilter.rate,
+                channels: statsFilter.ch, duration: statsFilter.dur };
+  for (const f of d.facets || []) {
+    const wrap = document.createElement("div");
+    wrap.className = "stats-facet";
+    const t = document.createElement("span");
+    t.className = "stats-facet__title";
+    t.textContent = STATS_FACET_LABEL[f.facet] || f.facet;
+    wrap.appendChild(t);
+    // «Все треки» кодируется нулём у числовых граней и -1 у длительности:
+    // там лишний 0 — полноценная корзина «до минуты».
+    const allVal = f.facet === "duration" ? -1 : 0;
+    const vals = [{ value: allVal, files: d.in_sample, label: STATS_FACET_LABEL.all }];
+    for (const v of f.values)
+      vals.push({ value: v.value, files: v.files,
+                  label: facetValueLabel(f.facet, v.value, d.duration_buckets) });
+    for (const v of vals) {
+      const b = document.createElement("button");
+      b.className = "chip" + (cur[f.facet] === v.value ? " chip--on" : "");
+      b.textContent = v.label + " · " + v.files;
+      b.title = v.files + " треков";
+      b.addEventListener("click", () => {
+        statsFilter[f.facet === "bits" ? "bits" : f.facet === "sample_rate" ? "rate"
+                     : f.facet === "channels" ? "ch" : "dur"] = v.value;
+        loadStats();
+      });
+      wrap.appendChild(b);
+    }
+    box.appendChild(wrap);
+  }
+}
+
+function statsTip(m) {
+  const pct = x => (x * 100).toFixed(2).replace(".", ",") + " %";
+  return m.name + " (" + m.format + ")\n"
+    + "среднее сжатие: " + pct(m.mean) + "\n"
+    + "разброс σ: ±" + pct(m.stddev) + "\n"
+    + "размах: " + pct(m.min) + " … " + pct(m.max) + "\n"
+    + "треков учтено: " + m.considered
+    + (m.not_applicable ? ", неприменимо: " + m.not_applicable : "") + "\n"
+    + "выиграл: " + m.wins;
+}
+
+function renderStatsChart(d) {
+  const box = el("stats-chart");
+  if (!box) return;
+  box.textContent = "";
+  const ms = (d.methods || []).filter(m => m.considered > 0);
+  if (!ms.length) {
+    box.textContent = "Нет данных под этим фильтром.";
+    return;
+  }
+  // Шкала Y: от минимума до максимума с запасом на фитиль, ноль обязателен —
+  // без него отрицательные средние (alac, tta) неотличимы от нулевых.
+  let lo = 0, hi = 0;
+  for (const m of ms) {
+    lo = Math.min(lo, m.mean - m.stddev, m.min);
+    hi = Math.max(hi, m.mean + m.stddev, m.max);
+  }
+  const pad = Math.max((hi - lo) * 0.08, 0.01);
+  lo -= pad; hi += pad;
+
+  const W = Math.max(box.clientWidth || 900, 640);
+  const H = 420, ML = 62, MR = 16, MT = 18, MB = 78;
+  const iw = W - ML - MR, ih = H - MT - MB;
+  const y = v => MT + ih * (1 - (v - lo) / (hi - lo));
+  const slot = iw / ms.length;
+  const bw = Math.min(56, slot * 0.42);
+
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("class", "stats-svg");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Средний уровень сжатия по методам");
+
+  const add = (tag, attrs, text) => {
+    const el2 = document.createElementNS(NS, tag);
+    for (const k in attrs) el2.setAttribute(k, attrs[k]);
+    if (text != null) el2.textContent = text;
+    svg.appendChild(el2);
+    return el2;
+  };
+
+  // Фоновая подсветка семейств: у кодеков на одном движке (ffmpeg против
+  // отдельных утилит) картина систематически разная, и это видно сразу.
+  let i = 0;
+  while (i < ms.length) {
+    let j = i;
+    while (j + 1 < ms.length && (ms[j + 1].family || "") === (ms[i].family || "")) j++;
+    if ((ms[i].family || "") === "ffmpeg")
+      add("rect", { x: ML + i * slot, y: MT, width: slot * (j - i + 1), height: ih,
+                    class: "stats-band" });
+    i = j + 1;
+  }
+
+  // Сетка и подписи оси Y.
+  const step = (hi - lo) / 5;
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    const yy = y(v);
+    add("line", { x1: ML, y1: yy, x2: ML + iw, y2: yy,
+                  class: Math.abs(v) < 1e-9 ? "stats-zero" : "stats-grid" });
+    add("text", { x: ML - 8, y: yy + 4, class: "stats-axis", "text-anchor": "end" },
+        Math.round(v * 100) + "%");
+  }
+
+  // Гистограмма распределения: максимум по всем методам, иначе полоски у
+  // разных методов несопоставимы между собой.
+  let hmax = 1;
+  for (const m of ms) for (const b of m.hist.bins) hmax = Math.max(hmax, b);
+  const hh = Math.min(46, MB - 30);
+
+  ms.forEach((m, k) => {
+    const cx = ML + slot * (k + 0.5);
+    // Фитиль ±σ.
+    add("line", { x1: cx, y1: y(m.mean - m.stddev), x2: cx, y2: y(m.mean + m.stddev),
+                  class: "stats-wick" });
+    // Тело: от нуля к среднему.
+    const y0 = y(0), y1 = y(m.mean);
+    add("rect", { x: cx - bw / 2, y: Math.min(y0, y1),
+                  width: bw, height: Math.max(1.5, Math.abs(y1 - y0)),
+                  class: "stats-body" + (m.mean < 0 ? " stats-body--neg" : "") });
+    // Полоска распределения под свечой.
+    const bins = m.hist.bins, bwv = bw / bins.length;
+    bins.forEach((c, bi) => {
+      if (!c) return;
+      const h = hh * (c / hmax);
+      add("rect", { x: cx - bw / 2 + bi * bwv, y: MT + ih - h,
+                    width: Math.max(1, bwv - 0.5), height: h, class: "stats-hist" });
+    });
+    if (m.hist.grew)
+      add("text", { x: cx, y: MT + ih + 10, class: "stats-grew", "text-anchor": "middle" },
+          "вырос: " + m.hist.grew);
+    add("text", { x: cx, y: H - MB + hh + 30, class: "stats-name", "text-anchor": "middle" },
+        m.name.length > 15 ? m.name.slice(0, 14) + "…" : m.name);
+    add("text", { x: cx, y: H - MB + hh + 46, class: "stats-mean", "text-anchor": "middle" },
+        (m.mean * 100).toFixed(1) + "%");
+    const hit = add("rect", { x: cx - slot / 2, y: MT, width: slot, height: ih,
+                              class: "stats-hit" });
+    hit.addEventListener("mouseenter", ev => showStatsTip(ev, m));
+    hit.addEventListener("mousemove", ev => moveStatsTip(ev));
+    hit.addEventListener("mouseleave", hideStatsTip);
+  });
+  box.appendChild(svg);
+  el("stats-sub").textContent =
+    "треков в выборке: " + d.in_sample + " из " + d.files
+    + " · знаменатель: " + (d.denominator === "wav_size" ? "WAV с тегами" : "размер на диске")
+    + " · " + d.generated.slice(0, 16).replace("T", " ") + " UTC";
+  el("stats-legend").textContent =
+    "Семейства подсвечены фоном: отдельная утилита — без фона, общий движок ffmpeg — с фоном. "
+    + "Тело свечи — среднее сжатие от нуля, фитиль — ±σ, полоска снизу — распределение по 5 %.";
+}
+
+let statsTipEl = null;
+function showStatsTip(ev, m) {
+  hideStatsTip();
+  statsTipEl = document.createElement("div");
+  statsTipEl.className = "stats-tip";
+  statsTipEl.textContent = statsTip(m);
+  document.body.appendChild(statsTipEl);
+  moveStatsTip(ev);
+}
+function moveStatsTip(ev) {
+  if (!statsTipEl) return;
+  const pad = 14, r = statsTipEl.getBoundingClientRect();
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+  statsTipEl.style.left = x + "px";
+  statsTipEl.style.top = y + "px";
+}
+function hideStatsTip() {
+  if (statsTipEl) { statsTipEl.remove(); statsTipEl = null; }
+}
+
+async function loadStats() {
+  try {
+    const d = await jsonOf(await api("/api/stats?" + statsQuery()), "сводку кодеков");
+    if (!d || !d.methods) return;
+    statsData = d;
+    renderStatsFilters(d);
+    renderStatsChart(d);
+  } catch (e) {
+    const box = el("stats-chart");
+    if (box) box.textContent = "Не удалось загрузить сводку: " + e.message;
+  }
+}
+
+function openStats() {
+  el("stats-overlay").classList.remove("hidden");
+  loadStats();
+}
+function closeStats() {
+  el("stats-overlay").classList.add("hidden");
+  hideStatsTip();
+}
+el("btn-stats") && el("btn-stats").addEventListener("click", ()=>{
+  el("stats-overlay").classList.contains("hidden") ? openStats() : closeStats();
+});
+el("btn-stats-close") && el("btn-stats-close").addEventListener("click", closeStats);
+el("stats-overlay") && el("stats-overlay").addEventListener("click", e=>{
+  if (e.target === el("stats-overlay")) closeStats();
+});
+document.addEventListener("keydown", e=>{
+  if (e.key === "Escape" && !el("stats-overlay").classList.contains("hidden")) closeStats();
+});
+addEventListener("resize", ()=>{ if (statsData && !el("stats-overlay").classList.contains("hidden")) renderStatsChart(statsData); });
+
 (function init(){
   token = sanitizeToken(token);
   if (/[^\x20-\x7E]/.test(token)) token = "";

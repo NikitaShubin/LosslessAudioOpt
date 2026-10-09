@@ -16,6 +16,7 @@
 #include "obs.h"
 #include "optimize.h"
 #include "persist.h"
+#include "stats.h"
 #include "rpc.h"
 
 // serve — командa `llao serve`: headless-движок с HTTP-API.
@@ -28,6 +29,11 @@ namespace dsvc {
 // сразу после add/remove/restart видит актуальное состояние. На насыщенной
 // очереди сборка уходит в фон, иначе запрос ждал бы минуты.
 inline constexpr long long kStateSyncBudgetMs = 1000;
+
+// Сколько живёт кэш сводки /api/stats. Диаграмма показывает среднее по тысяче
+// файлов: обновление раз в полминуты незаметно, а журнал пришлось бы перечитывать
+// на каждый чих.
+inline constexpr long kStatsCacheMs = 30000;
 
 // Единая точка входа `llao serve`: парсит опции из args (args[0] — имя
 // программы; токен "serve" в любом месте argv пропускается), поднимает
@@ -141,6 +147,18 @@ private:
     uint64_t state_rev_ = 0;  // ревизия зеркала, под которую собран документ
     std::thread state_worker_;
     bool state_building_ = false;
+
+    // Кэш сводки /api/stats. Журнал статистики — десятки мегабайт и растёт на
+    // каждом закрытом файле, поэтому читать его в обработчике запроса нельзя.
+    // Здесь, в отличие от документа состояния, сборка синхронная: панель
+    // диаграмм запрашивается редко и только когда открыта, а ожидание в минуты
+    // здесь не бывает — чтение журнала занимает секунды. Кэш живёт
+    // kStatsCacheMs и инвалидируется сменой фильтра.
+    std::string stats_document(const stats::SummaryFilter& f);
+    mutable std::mutex stats_m_;
+    std::string stats_json_;
+    stats::SummaryFilter stats_filter_;
+    std::chrono::steady_clock::time_point stats_at_{};
 
     // Инкрементная персистентность: снять снапшоты зеркала и движка
     // ОТДЕЛЬНО (без вложенных блокировок — см. деадлок-осторожность) и

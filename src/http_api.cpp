@@ -1,5 +1,6 @@
 #include "http_api.h"
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -11,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "contract.h"
+#include "stats.h"
 #include "version.h"
 #include "web_assets.h"
 
@@ -263,6 +265,30 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
     svr.Get("/api/formats", [ctx, token](const httplib::Request& req, httplib::Response& res) {
         if (!authorized(req, token)) return send_unauthorized(res);
         send_json(res, ctx.daemon->formats());
+    });
+
+    // Сводка эффективности кодеков для диаграммы. Фильтр приходит в
+    // query-строке (bits, rate, ch, dur, wav) — сервер пересчитывает среднее
+    // по всей совокупности с отбором, а не отдаёт журнал в браузер.
+    svr.Get("/api/stats", [ctx, token](const httplib::Request& req, httplib::Response& res) {
+        if (!authorized(req, token)) return send_unauthorized(res);
+        stats::SummaryFilter f;
+        // Пустая и нечисловая строка = «любое значение», поэтому параметр можно
+        // просто не слать, а можно прислать пустым.
+        auto num = [&req](const char* key, int fallback) {
+            const std::string v = req.get_param_value(key);
+            if (v.empty()) return fallback;
+            for (char ch : v)
+                if (!std::isdigit(static_cast<unsigned char>(ch))) return fallback;
+            return std::atoi(v.c_str());
+        };
+        f.bits = num("bits", 0);
+        f.sample_rate = num("rate", 0);
+        f.channels = num("ch", 0);
+        // -1, а не 0: корзина «до минуты» — полноценное значение.
+        f.duration_bucket = req.has_param("dur") ? num("dur", -1) : -1;
+        f.wav_denominator = req.get_param_value("wav") == "1";
+        res.set_content(ctx.daemon->stats_document(f), "application/json");
     });
 
     return 0;
