@@ -1178,6 +1178,39 @@ std::string summary_json(const std::vector<Row>& rows, const SummaryFilter& f) {
     }
     j["methods"] = ms;
 
+    // Полный список значений по грани без учёта фильтра. Веб рисует кнопки по
+    // нему, а не по facet_counts: иначе при переключении фильтра часть кнопок
+    // исчезала, а у оставшихся менялся счётчик в подписи — и вся полоса
+    // переставлялась. Здесь набор кнопок всегда один и тот же.
+    nlohmann::json allv = nlohmann::json::array();
+    const SummaryFacet all_order[] = {SummaryFacet::Bits, SummaryFacet::SampleRate,
+                                      SummaryFacet::Channels, SummaryFacet::Duration};
+    for (SummaryFacet fc : all_order) {
+        nlohmann::json o = nlohmann::json::object();
+        o["facet"] = fc == SummaryFacet::Bits       ? "bits"
+                     : fc == SummaryFacet::SampleRate ? "sample_rate"
+                     : fc == SummaryFacet::Channels   ? "channels"
+                                                      : "duration";
+        std::set<int> seen;
+        for (const auto& r : rows) {
+            switch (fc) {
+                case SummaryFacet::Bits: seen.insert(r.bits); break;
+                case SummaryFacet::SampleRate: seen.insert(r.sample_rate); break;
+                case SummaryFacet::Channels: seen.insert(r.channels); break;
+                case SummaryFacet::Duration: seen.insert(duration_bucket_of(r.duration_ms)); break;
+            }
+        }
+        nlohmann::json vs = nlohmann::json::array();
+        for (int v : seen) {
+            nlohmann::json e = nlohmann::json::object();
+            e["value"] = v;
+            vs.push_back(e);
+        }
+        o["values"] = vs;
+        allv.push_back(o);
+    }
+    j["facet_values"] = allv;
+
     nlohmann::json fs = nlohmann::json::array();
     for (const auto& fc : facet_counts(rows, f)) {
         nlohmann::json o = nlohmann::json::object();

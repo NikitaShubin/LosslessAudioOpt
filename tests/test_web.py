@@ -363,6 +363,35 @@ def w15_shape_classes_do_not_collide():
     assert '"stats-body' not in js, "в разметке фигур снова встречается stats-body"
 
 
+def w16_filters_do_not_reflow():
+    """Набор кнопок фильтра и их размеры не должны зависеть от нажатия.
+
+    Жалоба была на перестановку кнопок при переключении фильтра. Причин две:
+    счётчик треков попал в саму подпись, поэтому менялась ширина текста и вся
+    полоса перетекала; и кнопки рисовались по facet_counts, где значения уже
+    отфильтрованы, поэтому часть кнопок исчезала, а набор менялся.
+
+    Теперь набор берётся из facet_values (всегда один и тот же), счётчик живёт
+    в отдельном блоке фиксированной ширины, а состояние меняет только цвет.
+    """
+    src = open(os.path.join(ROOT, "src", "stats.cpp"), encoding="utf-8").read()
+    assert '"facet_values"' in src, "сервер не отдаёт постоянный набор значений грани"
+    js = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    fn = func_body(js, "renderStatsFilters")
+    assert "facet_values" in fn, "кнопки рисуются не по постоянному набору"
+    assert "chip__count" in fn, "счётчик не вынесен в отдельный блок"
+    assert "chip__label" in fn, "подпись не отделена от счётчика"
+    css = open(os.path.join(WEB_DIR, "style.css"), encoding="utf-8").read()
+    count = re.search(r"\.chip__count\s*\{([^}]*)\}", css)
+    assert count, "нет правила для счётчика"
+    assert "min-width" in count.group(1) and "tabular-nums" in count.group(1), \
+        "счётчик не имеет фиксированной ширины: цифры разной длины меняют размер кнопки"
+    chip = re.search(r"\n\.chip\s*\{([^}]*)\}", css)
+    assert chip, "нет базового правила кнопки"
+    assert "padding" in chip.group(1), "у кнопки нет явных отступов"
+
+
+
 SCENARIOS = [
     ("W1", "W1  статусбар обновляется до раннего выхода", w1_statusbar_before_early_return),
     ("W2", "W2  нет раннего выхода мимо статусбара", w2_no_early_return_skips_calls),
@@ -379,6 +408,7 @@ SCENARIOS = [
     ("W13", "W13 ответ разбирается ровно один раз", w13_response_parsed_once),
     ("W14", "W14 все методы на одной плоскости", w14_one_plane_shared_axis),
     ("W15", "W15 классы фигур не пересекаются с вёрсткой", w15_shape_classes_do_not_collide),
+    ("W16", "W16 кнопки фильтра не переставляются", w16_filters_do_not_reflow),
 ]
 
 

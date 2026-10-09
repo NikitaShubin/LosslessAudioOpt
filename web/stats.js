@@ -113,30 +113,51 @@ function renderStatsFilters(d) {
   const box = el("stats-filters");
   if (!box) return;
   box.textContent = "";
+  const key = { bits: "bits", sample_rate: "rate", channels: "ch", duration: "dur" };
   const cur = { bits: statsFilter.bits, sample_rate: statsFilter.rate,
                 channels: statsFilter.ch, duration: statsFilter.dur };
+  // Счётчики — по facet_counts (с учётом прочих фильтров), набор кнопок — по
+  // facet_values (всегда один и тот же). Иначе при переключении часть кнопок
+  // пропадала, а подписи у оставшихся меняли ширину — и вся полоса
+  // переставлялась справа налево.
+  const counts = {};
   for (const f of d.facets || []) {
+    counts[f.facet] = {};
+    for (const v of f.values) counts[f.facet][v.value] = v.files;
+  }
+  for (const f of d.facet_values || []) {
     const wrap = document.createElement("div");
     wrap.className = "stats-facet";
     const t = document.createElement("span");
     t.className = "stats-facet__title";
     t.textContent = STATS_FACET_LABEL[f.facet] || f.facet;
     wrap.appendChild(t);
-    // «Все треки» кодируется нулём у числовых граней и -1 у длительности:
-    // там лишний 0 — полноценная корзина «до минуты».
+
     const allVal = f.facet === "duration" ? -1 : 0;
-    const vals = [{ value: allVal, files: d.in_sample, label: STATS_FACET_LABEL.all }];
-    for (const v of f.values)
-      vals.push({ value: v.value, files: v.files,
-                  label: facetValueLabel(f.facet, v.value, d.duration_buckets) });
+    const vals = [{ value: allVal, label: STATS_FACET_LABEL.all }]
+      .concat(f.values.map(v => ({
+        value: v.value, label: facetValueLabel(f.facet, v.value, d.duration_buckets),
+      })));
     for (const v of vals) {
+      const n = v.value === allVal ? d.in_sample
+        : (counts[f.facet] && counts[f.facet][v.value] != null
+            ? counts[f.facet][v.value] : 0);
       const b = document.createElement("button");
-      b.className = "chip" + (cur[f.facet] === v.value ? " chip--on" : "");
-      b.textContent = v.label + " · " + v.files;
-      b.title = v.files + " треков";
+      const on = cur[f.facet] === v.value;
+      b.className = "chip" + (on ? " chip--on" : "") + (n ? "" : " chip--empty");
+      // Счётчик — в отдельном элементе фиксированной ширины: подпись и число
+      // не должны влиять на ширину кнопки, иначе нажатие её сдвигает.
+      const lb = document.createElement("span");
+      lb.className = "chip__label";
+      lb.textContent = v.label;
+      const ct = document.createElement("span");
+      ct.className = "chip__count";
+      ct.textContent = String(n);
+      b.appendChild(lb);
+      b.appendChild(ct);
+      b.title = n + " треков";
       b.addEventListener("click", () => {
-        statsFilter[f.facet === "bits" ? "bits" : f.facet === "sample_rate" ? "rate"
-                     : f.facet === "channels" ? "ch" : "dur"] = v.value;
+        statsFilter[key[f.facet]] = v.value;
         loadStats();
       });
       wrap.appendChild(b);
@@ -207,12 +228,23 @@ function renderStatsChart(d) {
   box.textContent = "";
   const vs = (d.variants || []).filter(v => v.considered > 0);
   const ms = (d.methods || []).filter(m => m.considered > 0);
-  const items = vs.length ? vs : ms.map(m => Object.assign({}, m, {
+  const raw = vs.length ? vs : ms.map(m => Object.assign({}, m, {
     key: m.format, variant: "", family: m.family, name: m.name,
   }));
-  if (!items.length) {
+  if (!raw.length) {
     box.textContent = "Нет данных под этим фильтром.";
     return;
+  }
+  // Внутри кода задачи выстраиваем по среднему: выбор идёт между вариантами
+  // одного кода, и в случайном порядке (как их перечислил сервер) сравнивать
+  // их невозможно. С лучшего слева разница видна как убывающая лестница.
+  const items = [];
+  const order = [];
+  for (const m of raw) if (!order.includes(m.format)) order.push(m.format);
+  for (const fmt of order) {
+    const group = raw.filter(m => m.format === fmt).slice()
+      .sort((a, b) => (b.mean - a.mean) || a.variant.localeCompare(b.variant));
+    items.push(...group);
   }
 
   const NS = "http://www.w3.org/2000/svg";
@@ -225,7 +257,8 @@ function renderStatsChart(d) {
   const HH = Math.max(box.clientHeight || 520, 340);
   const ML = 58, MR = 14;
   const COL = (W - ML - MR) / items.length;
-  const TOP = 30;                    // полоса названий кодеков
+  const TOP = 40;                    // полоса названий кодеков
+  const WINROW = 12;                // ряд отметок «выигравших файлы» выше них
   const AXT = 26;                    // подписи оси экономии
   // Отдельной полосы под гистограммы больше нет: распределение повёрнуто и
   // нанесено вдоль свечи, на ту же ось экономии. Остаётся только место под
@@ -295,6 +328,19 @@ function renderStatsChart(d) {
 
 
   // Шаг подписей: на колонку шириной COL помещается примерно COL/6 названий.
+  // Опорная линия: лучшее среднее по всей библиотеке. По ней видно, чем
+  // каждая задача хуже лидера — без неё столбики стоят рядом, но сравнивать
+  // не с чем.
+  const best = items.reduce((a, m) => Math.max(a, m.mean), -Infinity);
+  if (isFinite(best)) {
+    add("line", { x1: ML, y1: ySav(best), x2: ML + COL * items.length, y2: ySav(best),
+                  class: "stats-ref" });
+    const t = add("text", { x: ML + COL * items.length - 4, y: ySav(best) - 8,
+                            class: "stats-reflabel", "text-anchor": "end" },
+                  "лучшее " + (best * 100).toFixed(1) + "%");
+    tip(t, "Лучшее среднее сжатие среди всех задач");
+  }
+
   const labelStep = Math.max(1, Math.ceil(66 / Math.max(COL, 1)));
 
   items.forEach((m, k) => {
@@ -346,6 +392,18 @@ function renderStatsChart(d) {
     // --- подписи
     // Подпись задачи: на 76 колонках все не помещаются, поэтому выводим через
     // шаг, а полное имя и число остаются в подсказке.
+    // Задача, которая выигрывала файлы, помечается точкой у фитиля: выбор
+    // движка идёт не только по среднему, но среднее само по себе никого не
+    // выбирает.
+    // Отметка выигравшего — в отдельной полосе над графиком, а не наверху
+    // фитиля: у большинства задач максимум около 99 %, и точки слипались бы в
+    // одну линию у самого верха.
+    if (m.wins > 0) {
+      const dot = add("circle", { cx, cy: WINROW, r: Math.min(2.8, COL * 0.16),
+                                  class: "stats-winner" });
+      tip(dot, m.key + ": выиграл " + m.wins + " файлов");
+    }
+
     if (k % labelStep === 0) {
       const nm = add("text", {
         x: cx, y: MT + CANDLE_H + 16, class: "stats-name",

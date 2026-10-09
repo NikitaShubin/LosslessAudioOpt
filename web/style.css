@@ -138,12 +138,19 @@ button:disabled:hover{border-color:#2a2f3a}
 .stats-head{display:flex;align-items:center;gap:12px;margin-bottom:10px}
 .stats-head h2{margin:0;font-size:16px;color:#e6e8eb;font-weight:600}
 .stats-sub{font-size:12px;color:#8b93a1}
-.stats-filters{display:flex;flex-wrap:wrap;gap:14px;margin-bottom:10px}
+.stats-filters{display:flex;flex-wrap:wrap;gap:10px 14px;margin-bottom:8px}
 .stats-facet{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.stats-facet__title{font-size:11px;color:#6f7887;text-transform:uppercase;letter-spacing:.04em}
-.chip{background:#1c2027;border:1px solid #2b313b;color:#aab2c0;border-radius:999px;padding:3px 10px;font-size:12px;cursor:pointer;line-height:1.4}
+.stats-facet__title{font-size:10px;color:#6f7887;text-transform:uppercase;letter-spacing:.04em}
+/* Кнопки фильтра: размер не должен зависеть от нажатия и от числа в подписи,
+   иначе полоса переставляется при каждом переключении. Толщина рамки, отступы и
+   шрифт одинаковы у всех состояний; состояние меняет только цвет. */
+.chip{display:inline-flex;align-items:center;gap:5px;background:#1c2027;border:1px solid #2b313b;color:#aab2c0;border-radius:6px;padding:2px 6px;font-size:11px;line-height:1.6;cursor:pointer;white-space:nowrap}
 .chip:hover{border-color:#3b4453;color:#e6e8eb}
 .chip--on{background:#1d3a63;border-color:#3b82f6;color:#cfe3ff}
+.chip--empty{opacity:.45}
+.chip__label{font-weight:600}
+.chip__count{min-width:26px;text-align:right;color:#7d8798;font-variant-numeric:tabular-nums}
+.chip--on .chip__count{color:#cfe3ff}
 .stats-chart{flex:1 1 auto;min-height:260px;overflow:auto}
 .stats-svg{width:100%;height:auto;display:block;overflow:visible}
 .stats-axis{fill:#8b93a1;font-size:11px}
@@ -191,3 +198,7 @@ button:disabled:hover{border-color:#2a2f3a}
 .stats-clip{fill:#9aa3b2}
 .stats-name{fill:#aab2c0;font-size:11px}
 .stats-mean{fill:#e6e8eb;font-size:11px;font-weight:600}
+
+.stats-ref{stroke:#fbbf24;stroke-width:1.4;stroke-dasharray:7 5;opacity:.75}
+.stats-reflabel{fill:#fbbf24;font-size:11px;font-weight:600;opacity:.9}
+.stats-winner{fill:#fbbf24;opacity:.95}
