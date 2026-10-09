@@ -399,6 +399,72 @@ def w16_filters_toggle_and_never_empty():
 
 
 
+def w17_variants_sorted_and_grouped():
+    """Задачи отсортированы по среднему и собраны в группы по кодеку.
+
+    Сортировка нужна, чтобы рядом стояли похожие результаты и разница между
+    пресетами читалась глазом. Группировка — чтобы подпись кодека была одна на
+    колонку, а не на каждую задачу: на 76 колонках иначе подписи наезжают.
+    """
+    js = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    body = func_body(js, "renderStatsChart")
+    assert "(b.mean - a.mean)" in body, \
+        "задачи не отсортированы по среднему — рядом оказываются несопоставимые результаты"
+    assert "localeCompare" in body, "при равенстве средних порядок не определён"
+    # Задания предпочтительнее кодеков: у кода среднее по лучшему результату,
+    # и детализация теряется.
+    assert "d.variants || []" in body and "v.considered > 0" in body, \
+        "диаграмма строится по кодакам вместо заданий"
+    assert "items[j + 1].format === items[i].format" in body, \
+        "колонки не сгруппированы по кодеку"
+    # Полоса семейства рисуется только для внешних кодеков: у вложенных
+    # бинарников полоса слилась бы с фоном свечей.
+    assert '=== "ffmpeg"' in body, "полоса семейства не ограничена внешними кодеками"
+    assert "stats-ref" in body, "нет опорной линии лучшего среднего"
+
+
+def w18_histogram_is_one_smooth_curve():
+    """Распределение — непрерывная сглаженная кривая, а не столбики.
+
+    Двадцать один бин столбиками слипались в сплошную стену, и форма
+    распределения не читалась. Кубические сегменты — Catmull-Rom; отрезки
+    были бы угловатыми, а область без заливки — просто линия.
+    """
+    js = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    body = func_body(js, "renderStatsChart")
+    assert 'add("path", { d: d, class: "stats-hist" })' in body, \
+        "распределение рисуется не кривой"
+    assert '" C "' in body, "кривая строится отрезками, а не сплайном"
+    assert '" Z"' in body, "кривая не замыкается — область не заливается"
+    assert "half * 0.46" in body, \
+        "кривые соседних задач смыкаются, колонки перестают различаться"
+    # Свеча: фитиль min..max, тело IQR, засечка среднего.
+    assert "stats-wick" in body, "нет фитиля разброса"
+    assert "stats-candle" in body, "нет тела межквартильного диапазона"
+    assert "ySav(m.mean)" in body and "stats-meanline" in body, \
+        "среднее не отмечено — его нельзя отличить от медианы"
+    # Выигравшая задача помечается точкой над графиком, а не наверху фитиля:
+    # у большинства задач максимум около 99 %, и точки слиплись бы в линию.
+    assert "m.wins > 0" in body and "stats-winner" in body, \
+        "задачи, выигравшие файлы, ничем не помечены"
+
+
+def w19_stats_api_is_authorized():
+    """/api/stats закрыт токеном, как остальные /api-маршруты.
+
+    На странице сводки показываются пути и имена файлов библиотеки, поэтому
+    маршрут не должен отдавать данные анонимному клиенту, когда у демона
+    включён токен.
+    """
+    api = open(os.path.join(ROOT, "src", "http_api.cpp"), encoding="utf-8").read()
+    m = re.search(r'svr\.Get\("/api/stats".*?\n(.*)', api)
+    assert m, "маршрут /api/stats не зарегистрирован"
+    assert "authorized(req, token)" in m.group(1), \
+        "/api/stats отдаёт сводку без проверки токена"
+    assert "send_unauthorized(res)" in m.group(1), "нет ответа 401 без токена"
+
+
+
 SCENARIOS = [
     ("W1", "W1  статусбар обновляется до раннего выхода", w1_statusbar_before_early_return),
     ("W2", "W2  нет раннего выхода мимо статусбара", w2_no_early_return_skips_calls),
@@ -416,6 +482,9 @@ SCENARIOS = [
     ("W14", "W14 все методы на одной плоскости", w14_one_plane_shared_axis),
     ("W15", "W15 классы фигур не пересекаются с вёрсткой", w15_shape_classes_do_not_collide),
     ("W16", "W16 грани переключаются и не могут быть пустыми", w16_filters_toggle_and_never_empty),
+    ("W17", "W17 задачи отсортированы и сгруппированы по кодеку", w17_variants_sorted_and_grouped),
+    ("W18", "W18 распределение — одна сглаженная кривая", w18_histogram_is_one_smooth_curve),
+    ("W19", "W19 сводка закрыта токеном", w19_stats_api_is_authorized),
 ]
 
 

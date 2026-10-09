@@ -108,12 +108,18 @@ $(OBJDIR)/%.o: third_party/%.c
 clean:
 	rm -rf build
 	rm -f llao.exe llao-linux
-	rm -f test-unit test-daemon-core
+	rm -f test-unit test-daemon-core test-stats-core
 
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
 
 test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp src/rpc.cpp src/util.cpp src/persist.cpp
+	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
+
+# Сводка эффективности — числа для веб-диаграммы. Ошибка в ней молчалива:
+# JSON остаётся валидным, график просто врёт, поэтому значения проверяются
+# вручную, а не только форма ответа.
+test-stats-core: tests/test_stats_core.cpp src/stats.cpp src/config.cpp src/i18n.cpp src/media.cpp src/out.cpp src/util.cpp src/proc.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
 
 # Живые интеграционные тесты сервера (нужен собранный llao-linux и ffmpeg;
