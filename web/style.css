@@ -158,7 +158,8 @@ button:disabled:hover{border-color:#2a2f3a}
 .stats-band{fill:#3b82f6;opacity:.07}
 .stats-grid{stroke:#242932;stroke-width:1}
 .stats-zero{stroke:#4b5563;stroke-width:1;stroke-dasharray:3 3}
-.stats-hist{fill:#5b8def;opacity:.34}
+.stats-hist{fill:#4f7fbf;opacity:.30}
+.stats-histhit{fill:transparent}
 .stats-hzone{fill:#f87171;opacity:.06}
 .stats-candle{fill:#7dd3fc;opacity:.22}
 .stats-candle--neg{fill:#f87171;opacity:.2}

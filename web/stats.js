@@ -354,18 +354,38 @@ function renderStatsChart(d) {
     let hm = 1;
     for (const b of bins) hm = Math.max(hm, b);
     const hx = cx - half + 1;            // от левого края колонки
-    const hwid = half * 0.78;            // максимальная длина столбика
+    // Ширина намеренно меньше половины колонки: на полную кривые соседних
+    // задач смыкаются и колонки перестают различаться.
+    const hwid = half * 0.46;
+    // Распределение рисуется одной непрерывной кривой через центры бинов, а не
+    // столбиками: двадцать один кирпичик слипались в сплошной блок, и форма
+    // распределения не читалась. Кривая идёт по Catmull-Rom, от левого края
+    // колонки к значениям бинов.
+    const pts = bins.map((c, bi) => [
+      hx + hwid * (c / hm),
+      (ySav((bi + 1) * 0.05) + ySav(bi * 0.05)) / 2,
+    ]);
+    if (pts.length > 1) {
+      let d = "M " + hx + " " + pts[0][1];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p0 = pts[Math.max(0, i - 1)], p1 = pts[i];
+        const p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+        d += " C " + (p1[0] + (p2[0] - p0[0]) / 6) + " " + (p1[1] + (p2[1] - p0[1]) / 6)
+           + ", " + (p2[0] - (p3[0] - p1[0]) / 6) + " " + (p2[1] - (p3[1] - p1[1]) / 6)
+           + ", " + p2[0] + " " + p2[1];
+      }
+      d += " L " + hx + " " + pts[pts.length - 1][1] + " Z";
+      add("path", { d: d, class: "stats-hist" });
+    }
+    // Невидимые полосы для подсказок: форма одна кривая, а по бину узнать
+    // число треков по-прежнему нужно.
     bins.forEach((c, bi) => {
       if (!c) return;
       const yTop = ySav((bi + 1) * 0.05), yBot = ySav(bi * 0.05);
-      const len = hwid * (c / hm);
-      if (len < 0.7) return;
-      // Столбик занимает меньше половины бина и центрируется в нём: иначе
-      // двадцать один бин слипаются в сплошной блок и свеча за ними пропадает.
-      const bh = Math.max(1, (yBot - yTop) * 0.45);
-      const r = add("rect", { x: hx, y: (yTop + yBot) / 2 - bh / 2, width: len,
-                              height: bh, class: "stats-hist" });
-      tip(r, m.key + ": " + (bi * 5) + "–" + ((bi + 1) * 5) + " % — " + c + " треков");
+      const hit = add("rect", { x: hx, y: yTop, width: hwid,
+                                height: Math.max(1, yBot - yTop),
+                                class: "stats-histhit" });
+      tip(hit, m.key + ": " + (bi * 5) + "–" + ((bi + 1) * 5) + " % — " + c + " треков");
     });
 
     // Правая половина — свеча: тело по межквартильному размаху, фитиль до
