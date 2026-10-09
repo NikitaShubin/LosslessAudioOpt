@@ -1002,6 +1002,21 @@ Summary summarize(const std::vector<Row>& rows, const SummaryFilter& f) {
     // Σ savings² по каждому методу — только для расчёта σ.
     std::map<std::string, double> sumsq;
 
+    // Свод по заданиям. Список собирается из таблицы: у каждой ячейки есть
+    // ключ «формат:вариант», и новый вариант из formats/*.json попадёт сюда сам.
+    std::map<std::string, VariantSummary> vagg;
+    std::map<std::string, double> vsumsq;
+    auto slot_for = [&vagg](const std::string& key) -> VariantSummary& {
+        auto it = vagg.find(key);
+        if (it != vagg.end()) return it->second;
+        VariantSummary v;
+        v.key = key;
+        v.format = cell_format(key);
+        const size_t p = key.find(':');
+        v.variant = p == std::string::npos ? std::string() : key.substr(p + 1);
+        return vagg.emplace(key, v).first->second;
+    };
+
     for (const auto& r : rows) {
         if (!filter_matches(r, f, -1)) continue;
         s.in_sample++;
@@ -1024,6 +1039,26 @@ Summary summarize(const std::vector<Row>& rows, const SummaryFilter& f) {
             if (cell.state != Cell::State::Value || cell.value == 0) continue;
             auto it = best.find(fmt);
             if (it == best.end() || cell.value < it->second) best[fmt] = cell.value;
+        }
+
+        for (const auto& [key, cell] : r.cells) {
+            if (cell.state != Cell::State::Value || cell.value == 0) continue;
+            VariantSummary& v = slot_for(key);
+            const double sv = 1.0 - (double)cell.value / (double)denom;
+            v.considered++;
+            v.total_in += denom;
+            v.total_out += cell.value;
+            if (v.considered == 1) v.min = v.max = sv;
+            v.min = std::min(v.min, sv);
+            v.max = std::max(v.max, sv);
+            vsumsq[key] += sv * sv;
+            int b = (int)(sv * 20.0);
+            if (b < 0) b = kSummaryHistGrew;
+            if (b > kSummaryHistBins - 1) b = kSummaryHistBins - 1;
+            v.hist[b]++;
+            if (r.has_winner && r.winner_format == v.format &&
+                r.winner_variant == v.variant)
+                v.wins++;
         }
 
         for (auto& [fmt, m] : agg) {
@@ -1063,6 +1098,23 @@ Summary summarize(const std::vector<Row>& rows, const SummaryFilter& f) {
             m.stddev = var > 0.0 ? std::sqrt(var) : 0.0;
         }
         s.methods.push_back(m);
+    }
+
+    const std::map<std::string, FormatMeta> meta = load_format_meta();
+    for (auto& [key, v] : vagg) {
+        v.mean = v.considered ? 1.0 - (double)v.total_out / (double)v.total_in : 0.0;
+        if (v.considered > 1) {
+            const double var = vsumsq[key] / (double)v.considered - v.mean * v.mean;
+            v.stddev = var > 0.0 ? std::sqrt(var) : 0.0;
+        }
+        auto mi = meta.find(v.format);
+        if (mi != meta.end()) {
+            v.name = mi->second.name;
+            v.family = mi->second.family;
+        } else {
+            v.name = v.format;
+        }
+        s.variants.push_back(v);
     }
     // Методы без результата в выборке в диаграмме бесполезны: они нарисовали бы
     // свечу в нуле. Но их нужно видеть, иначе фильтр не объяснит, почему
@@ -1144,6 +1196,30 @@ std::string summary_json(const std::vector<Row>& rows, const SummaryFilter& f) {
         fs.push_back(o);
     }
     j["facets"] = fs;
+
+    nlohmann::json vs = nlohmann::json::array();
+    for (const auto& v : s.variants) {
+        nlohmann::json o = nlohmann::json::object();
+        o["key"] = v.key;
+        o["format"] = v.format;
+        o["variant"] = v.variant;
+        o["name"] = v.name;
+        o["family"] = v.family;
+        o["considered"] = v.considered;
+        o["wins"] = v.wins;
+        o["mean"] = v.mean;
+        o["stddev"] = v.stddev;
+        o["min"] = v.min;
+        o["max"] = v.max;
+        nlohmann::json hb = nlohmann::json::array();
+        for (int i = 0; i < kSummaryHistBins; i++) hb.push_back(v.hist[i]);
+        nlohmann::json h = nlohmann::json::object();
+        h["bins"] = hb;
+        h["grew"] = v.hist[kSummaryHistGrew];
+        o["hist"] = h;
+        vs.push_back(o);
+    }
+    j["variants"] = vs;
     return j.dump();
 }
 
@@ -1203,7 +1279,8 @@ SummaryFilter summary_filter_from_query(const std::string& query) {
             if (!std::isdigit(static_cast<unsigned char>(ch))) ok = false;
         if (ok) f.duration_bucket = std::atoi(v.c_str());
     }
-    f.wav_denominator = query.find("wav=1") != std::string::npos;
+    // По умолчанию — несжатый оригинал; wav=0 переключает на размер на диске.
+    f.wav_denominator = query.find("wav=0") == std::string::npos;
     return f;
 }
 

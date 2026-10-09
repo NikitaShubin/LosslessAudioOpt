@@ -31,28 +31,17 @@
     <div class="top-spacer"></div>
     <span id="conn-status" class="conn">Подключение...</span>
     <div class="top-actions">
-      <button id="btn-stats" class="icon-btn" title="Эффективность кодеков">📊</button>
+      <a class="navlink navlink--stats" href="/stats" title="Эффективность кодеков">
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" focusable="false">
+          <path d="M2.5 13.5V8.5M6.5 13.5V3.5M10.5 13.5V6.5M13.5 13.5V2.5"
+                fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span>Эффективность</span>
+      </a>
       <button id="btn-logout" title="Сменить токен">Выйти</button>
       <button id="btn-shutdown" class="icon-btn danger" title="Выключить демон">⏻</button>
     </div>
   </header>
-
-  <!-- Панель эффективности кодеков. Открывается кнопкой в шапке и не является
-       основным окном: очередь на время просмотра остаётся в памяти (выделение,
-       прокрутка, позиция), поэтому панель — оверлей, а не отдельная страница. -->
-  <div id="stats-overlay" class="stats-overlay hidden">
-    <div class="stats-panel">
-      <div class="stats-head">
-        <h2>Эффективность кодеков</h2>
-        <span id="stats-sub" class="stats-sub"></span>
-        <div class="top-spacer"></div>
-        <button id="btn-stats-close" class="icon-btn" title="Закрыть">✕</button>
-      </div>
-      <div id="stats-filters" class="stats-filters"></div>
-      <div id="stats-chart" class="stats-chart"></div>
-      <div id="stats-legend" class="stats-legend"></div>
-    </div>
-  </div>
 
   <section class="queue">
     <div class="queue-head">

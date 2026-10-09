@@ -243,11 +243,12 @@ struct SummaryFilter {
     int sample_rate = 0;
     int channels = 0;
     int duration_bucket = -1;
-    // Знаменатель экономии. source_size — размер того, что лежало на диске, и
-    // он согласован с таблицей и отчётом. wav_size — эталонный WAV с тегами:
-    // он снимает зависимость от того, каким кодеком исходник уже сжат, но
-    // тогда сравнение идёт не с тем, что лежит на диске.
-    bool wav_denominator = false;
+    // Знаменатель экономии. По умолчанию wav_size — размер несжатого оригинала
+    // (эталонный WAV с тегами), потому что только тогда проценты читаются как
+    // «во сколько раз файл меньше несжатого». source_size — то, что лежало на
+    // диске: если исходник уже сжат другим кодеком, проценты сравнивают
+    // кодек с кодеком, а не с несжатым оригиналом.
+    bool wav_denominator = true;
 };
 
 // Номер корзины длительности. Границы — в миллисекундах, по возрастанию;
@@ -276,12 +277,36 @@ struct MethodSummary {
     int hist[kSummaryHistBins + 1] = {0};  // распределение экономии по бинам
 };
 
+// Свод по одному заданию: пара «формат:вариант».
+struct VariantSummary {
+    std::string format;
+    std::string variant;   // идентификатор варианта из formats/*.json
+    std::string key;       // "format:variant" — как в таблице
+    std::string name;      // человеческое имя формата
+    std::string family;    // engine.kind: binary | ffmpeg
+    int considered = 0;
+    int wins = 0;
+    double mean = 0.0;
+    double stddev = 0.0;
+    double min = 0.0;
+    double max = 0.0;
+    uint64_t total_in = 0;
+    uint64_t total_out = 0;
+    int hist[kSummaryHistBins + 1] = {0};
+};
+
 struct Summary {
     std::string generated;
     int files = 0;      // строк в таблице всего
     int in_sample = 0;  // строк, прошедших фильтр
-    bool wav_denominator = false;
+    bool wav_denominator = true;  // проставляется в summarize() из фильтра
     std::vector<MethodSummary> methods;  // по убыванию средней экономии
+    // То же самое, но по ЗАДАНИЯМ (пара «формат:вариант»), а не по методам.
+    // Их десятки: у OptimFROG одиннадцать пресетов, у FLAC больше десятка
+    // вариантов. Сравнивать надо именно их — по методу видно только «среднее по
+    // кодеку», а разброс внутри кодека как раз и объясняет, почему он
+    // проигрывает сам себе.
+    std::vector<VariantSummary> variants;  // в порядке форматов и вариантов
 };
 
 // Свод по всем методам. Список форматов выводится из данных таблицы, а не

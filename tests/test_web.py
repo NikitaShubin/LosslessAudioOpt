@@ -205,51 +205,162 @@ def w8_no_full_path_in_row_tooltip():
     assert "function displayPath" in src, "нет displayPath"
 
 
-def w9_stats_panel_wired():
-    """Кнопка в шапке, панель и её обработчики должны быть связаны.
+def w9_stats_page_wired():
+    """Страница эффективности связана: роут, разметка, скрипт и переходы.
 
-    Панель эффективности кодеков — не вкладка, а оверлей поверх очереди: за её
-    время просмотра очередь не перерисовывается, поэтому выделение и прокрутка
-    сохраняются. Регрессия здесь молчаливая — если разъедутся id, панель просто
-    не откроется.
+    Графики живут на отдельной странице /stats, а не оверлеем над очередью: у
+    очереди своя прокрутка, выделение и автоскролл, и перерисовывать её ради
+    графиков нельзя. Регрессия здесь молчаливая — без роута страница просто не
+    откроется, без ссылки на неё не найти с очереди.
     """
-    src = app_src()
-    html = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
-    for eid in ("btn-stats", "stats-overlay", "stats-filters", "stats-chart"):
-        assert 'id="%s"' % eid in html, "в index.html нет #%s" % eid
-        assert '"%s"' % eid in src, "app.js не обращается к #%s" % eid
-    assert 'id="btn-stats-close"' in html, "в index.html нет кнопки закрытия панели"
-    assert "/api/stats" in src, "панель не ходит в /api/stats"
+    src = open(os.path.join(ROOT, "src", "http_api.cpp"), encoding="utf-8").read()
+    assert 'svr.Get("/stats"' in src, "в http_api.cpp нет роута /stats"
+    assert '"stats.html"' in src, "роут /stats не отдаёт stats.html"
+    html = open(os.path.join(WEB_DIR, "stats.html"), encoding="utf-8").read()
+    assert 'src="/static/stats.js"' in html, "страница не подключает stats.js"
+    assert 'id="stats-chart"' in html, "нет контейнера диаграммы"
+    js = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    assert "/api/stats" in js, "stats.js не ходит в /api/stats"
+    assert 'href="/"' in html, "со страницы эффективности нет ссылки на очередь"
+    queue = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
+    assert 'href="/stats"' in queue, "с очереди нет ссылки на эффективность"
 
 
 def w10_negative_mean_still_drawn():
-    """Свеча с отрицательным средним должна рисоваться, а не исчезать.
+    """Метод с отрицательным средним обязан остаться на диаграмме.
 
-    Средние бывают отрицательными: alac на этой библиотеке в среднем УВЕЛИЧИВАЕТ
-    файл (-8.6 %), tta тоже. Если высоту тела считать как y1 - y0 без модуля,
-    у отрицательного среднего высота станет отрицательной, а rect с
-    отрицательным height не рисуется — метод молча пропадёт с диаграммы ровно
-    тогда, когда его результат интересен.
+    Средние бывают отрицательными: ALAC на этой библиотеке в среднем УВЕЛИЧИВАЕТ
+    файл относительно несжатого оригинала, TTA тоже. Засечка на среднем не должна
+    попадать под условие по знаку — иначе метод с отрицательным средним останется
+    без маркера, то есть пропадёт ровно тогда, когда его результат интересен.
+    Раньше тело свечи считалось как y1 - y0, и у отрицательного среднего высота
+    становилась отрицательной, а rect с отрицательным height не рисуется.
     """
-    src = app_src()
-    body = func_body(src, "renderStatsChart")
-    assert "Math.abs(" in body, "высота свечи не берётся по модулю"
-    assert "stats-body--neg" in body, "нет отдельного класса для отрицательного среднего"
-    assert "y(Math.abs(" not in body, "подозрение: модуль применён к значению, а не к высоте"
+    src = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    chart = func_body(src, "renderStatsChart")
+    assert "stats-meanline" in chart, "засечка на среднем не рисуется"
+    assert "stats-candle--neg" in chart, "нет отдельного оформления отрицательного среднего"
+    assert "m.mean < 0" in chart, "отрицательное сред ничем не выделяется"
+    assert not re.search(r"if\s*\([^)]*mean\s*>\s*0[^)]*\)[^{]*\{[^}]*stats-meanline", chart), \
+        "засечка на среднем рисуется только для положительного значения"
 
 
-def w11_stats_not_shown_by_default():
-    """Панель эффективности не должна быть основным окном.
+def w11_stats_not_in_queue_page():
+    """Эффективность не должна быть частью основного окна очереди.
 
-    Требование заказчика: статистика не показывается по дефолту. Панель обязана
-    быть скрыта в разметке, иначе она перекроет очередь при загрузке страницы.
+    Заказчик попросил отдельную страницу: пока графики жили оверлеем, открытие
+    панели сбрасывало автоскролл и выделение очереди. Проверяем, что в разметке
+    очереди нет ни графиков, ни их скрипта, а страница графиков не тащит в себя
+    таблицу очереди.
     """
-    html = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
-    m = re.search(r'<div id="stats-overlay"[^>]*>', html)
-    assert m, "нет контейнера #stats-overlay"
-    assert "hidden" in m.group(0), "панель статистики открыта по умолчанию: %s" % m.group(0)
-    src = app_src()
-    assert "el(\"btn-stats\")" in src, "нет кнопки открытия панели"
+    queue = open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8").read()
+    assert "stats-overlay" not in queue, "оверлей статистики вернулся в очередь"
+    assert "stats.js" not in queue, "очередь подключает скрипт статистики"
+    assert 'id="stats-chart"' not in queue, "в очереди снова есть контейнер диаграммы"
+    page = open(os.path.join(WEB_DIR, "stats.html"), encoding="utf-8").read()
+    assert 'id="queue-table"' not in page, "страница эффективности тащит таблицу очереди"
+
+
+def w12_no_duplicate_functions():
+    """Верхнеуровневых функций с одинаковым именем быть не должно.
+
+    В JavaScript повторное объявление функции не считается ошибкой: последнее
+    определение молча выигрывает у предыдущего. На странице эффективности это
+    уже стоило двух сломанных графиков — старая statsDomain от ±2σ перекрыла
+    новую, построенную на перцентилях, и ось уезжала в −113 %, а рядом лежали
+    ещё две копии statsTip. Никакого сообщения при этом не появляется.
+    """
+    for name in ("app.js", "stats.js"):
+        src = open(os.path.join(WEB_DIR, name), encoding="utf-8").read()
+        found = re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", src, re.M)
+        dupes = sorted({f for f in found if found.count(f) > 1})
+        assert not dupes, "%s: функции определены повторно (%s)" % (name, ", ".join(dupes))
+
+
+def w13_response_parsed_once():
+    """Ответ сервера должен разбираться ровно один раз.
+
+    api() отдаёт Response, а разбор делает jsonOf() на стороне вызова. Если
+    api() разбирает JSON сам, то обёртка jsonOf(await api(...)) получает вместо
+    ответа обычный объект и падает на r.text — ошибка видна только в браузере,
+    а в среде нет ни node, ни браузера, чтобы поймать её тестом.
+
+    Требование «каждый вызов обёрнут в jsonOf» сюда не годится: в app.js
+    половина мест разбирает ответ иначе (там свой rpc() со своим контрактом).
+    Проверяем ровно два инварианта, которые ломали страницу по-настоящему.
+    """
+    for name in ("app.js", "stats.js"):
+        src = open(os.path.join(WEB_DIR, name), encoding="utf-8").read()
+        m = re.search(r"^async function api\s*\([^)]*\)\s*\{", src, re.M)
+        assert m, "%s: не найдена функция api()" % name
+        end_m = re.compile(r"^\}", re.M)
+        body = src[m.end():end_m.search(src, m.end()).start()]
+        assert "jsonOf(" not in body, \
+            "%s: api() разбирает JSON сам — обёртка jsonOf(await api(...)) упадёт на r.text" % name
+
+    stats = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    calls = list(re.finditer(r"await api\(", stats))
+    assert calls, "stats.js ни разу не ходит в api()"
+    for call in calls:
+        before = stats[max(0, call.start() - 20):call.start()]
+        assert "jsonOf(" in before, \
+            "stats.js: await api() вне jsonOf() — ответ будет разобран некорректно"
+
+
+def w14_one_plane_shared_axis():
+    """Все задачи обязаны лежать в одной системе координат.
+
+    Заказчик требовал сравнивать «кто выше кого и на сколько». Это возможно
+    только в одной плоскости: общая ось экономии по вертикали, задачи
+    разложены по горизонтали, а высота столбиков нормирована по общему
+    максимуму. Раньше был фиксированный viewBox с preserveAspectRatio — он
+    вписывался по меньшей стороне, оставляя половину окна пустой.
+    """
+    src = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    chart = func_body(src, "renderStatsChart")
+    # Границы оси объявлены на уровне модуля, раскладка — внутри функции.
+    assert "const SAV_LO" in src and "const SAV_HI" in src, "нет общей оси экономии"
+    assert "SAV_LO" in chart and "SAV_HI" in chart, "функция не использует общую ось"
+    assert "const COL = (W - ML - MR) / items.length" in chart, \
+        "задачи не разложены по общей оси на равные колонки"
+    # Проверяем именно вызов setAttribute: слово может встречаться в комментарии,
+    # и искать его отсутствие бессмысленно.
+    assert 'setAttribute("preserveAspectRatio"' not in chart, \
+        "viewBox фиксирован: изображение вписывается по меньшей стороне и пустые поля"
+    # График обязан подстраиваться под окно, а не под фиксированный viewBox.
+    assert "box.clientWidth" in chart and "box.clientHeight" in chart, \
+        "размеры берутся не из контейнера"
+    # Свечи и гистограммы — вертикальные, обе части на одной оси экономии.
+    assert "stats-candle" in chart, "свеча не рисуется"
+    assert "quantileFromHist(m, 0.25)" in chart and "quantileFromHist(m, 0.75)" in chart, \
+        "тело свечи строится не по межквартильному размаху"
+    assert "m.hist.bins" in chart, "гистограмма распределения не рисуется"
+
+
+def w15_shape_classes_do_not_collide():
+    """Классы фигур графика не должны совпадать с классами вёрстки страницы.
+
+    Ровно на этом стоял весь график: тело свечи называлось stats-body — так же,
+    как контейнер страницы со стилями display:flex и height:calc(100vh - 56px).
+    Прямоугольник получал flex-раскладку и растягивался на всю высоту окна
+    вместо своих 160 пикселей — свечи превращались в зелёные полосы во всю
+    высоту, и никакого графика не было видно. Ошибка молчаливая: разметка верная,
+    числа верные, а на экране мусор.
+    """
+    css = open(os.path.join(WEB_DIR, "style.css"), encoding="utf-8").read()
+    shape_classes = ("stats-candle", "stats-hist", "stats-band", "stats-wick",
+                     "stats-meanline", "stats-clip", "stats-sep")
+    for name in shape_classes:
+        for rule in re.findall(r"\.%s\s*\{([^}]*)\}" % re.escape(name), css):
+            assert "display:flex" not in rule and "height:calc" not in rule, \
+                ".%s объявлен как элемент вёрстки, а используется как фигура SVG" % name
+    # Имя фигуры свечи не должно совпадать с именем контейнера страницы.
+    assert ".stats-body" not in css, "класс stats-body снова занят контейнером страницы"
+    page = open(os.path.join(WEB_DIR, "stats.html"), encoding="utf-8").read()
+    assert 'class="stats-page"' in page, "контейнер страницы должен быть stats-page"
+    js = open(os.path.join(WEB_DIR, "stats.js"), encoding="utf-8").read()
+    assert '"stats-candle"' in js, "тело свечи должно иметь класс stats-candle"
+    assert '"stats-body' not in js, "в разметке фигур снова встречается stats-body"
 
 
 SCENARIOS = [
@@ -261,25 +372,32 @@ SCENARIOS = [
     ("W6", "W6  внятная ошибка разбора вместо SyntaxError", w6_response_parse_reports_failure),
     ("W7", "W7  причина падения варианта в тултипе точки", w7_variant_error_in_tooltip),
     ("W8", "W8  в тултипе строки нет полного пути", w8_no_full_path_in_row_tooltip),
-    ("W9", "W9  панель эффективности связана с кнопкой и /api/stats", w9_stats_panel_wired),
-    ("W10", "W10 отрицательное среднее рисуется, а не исчезает",
-     w10_negative_mean_still_drawn),
-    ("W11", "W11 панель статистики скрыта по умолчанию", w11_stats_not_shown_by_default),
+    ("W9", "W9  страница эффективности связана и достижима", w9_stats_page_wired),
+    ("W10", "W10 отрицательное среднее остаётся на диаграмме", w10_negative_mean_still_drawn),
+    ("W11", "W11 эффективность вынесена из окна очереди", w11_stats_not_in_queue_page),
+    ("W12", "W12 нет повторных определений функций", w12_no_duplicate_functions),
+    ("W13", "W13 ответ разбирается ровно один раз", w13_response_parsed_once),
+    ("W14", "W14 все методы на одной плоскости", w14_one_plane_shared_axis),
+    ("W15", "W15 классы фигур не пересекаются с вёрсткой", w15_shape_classes_do_not_collide),
 ]
 
 
 def main():
-    for _k, _d, fn in SCENARIOS:
-        scenario(_k, fn)
-
+    for key, desc, fn in SCENARIOS:
+        try:
+            fn()
+            RESULTS.append((desc, True, ""))
+        except AssertionError as exc:
+            RESULTS.append((desc, False, str(exc)[:800]))
+        except Exception as exc:  # noqa: BLE001
+            RESULTS.append((desc, False, "%s: %s" % (type(exc).__name__, exc)))
+    failed = sum(1 for _, ok, _ in RESULTS if not ok)
     print()
-    print("%-62s %s" % ("Сценарий", "Результат"))
-    print("-" * 72)
-    failed = 0
-    for name, ok, detail in RESULTS:
-        print("%-62s %s" % (name, "OK " if ok else "FAIL"))
+    print("%-72s %s" % ("Проверка", "Результат"))
+    print("-" * 85)
+    for desc, ok, detail in RESULTS:
+        print("%-72s %s" % (desc, "OK" if ok else "FAIL"))
         if not ok:
-            failed += 1
             print("        " + detail.replace("\n", "\n        "))
     print("Итого: %d/%d прошло" % (len(RESULTS) - failed, len(RESULTS)))
     sys.exit(1 if failed else 0)

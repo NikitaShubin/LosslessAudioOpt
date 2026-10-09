@@ -189,6 +189,26 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
             "text/html; charset=utf-8");
     });
 
+    // Вторая страница интерфейса: эффективность кодеков. Отдельная точка входа,
+    // а не оверлей: у очереди своя прокрутка и выделение, и перерисовывать её
+    // ради графиков нельзя. Ассеты те же и отдаются тем же кодом, что /static.
+    svr.Get("/stats", [have_web](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-store");
+        if (auto ext = read_web_file("stats.html")) {
+            res.set_content(*ext, "text/html; charset=utf-8");
+            return;
+        }
+        if (have_web) {
+            const std::string* data = web_assets::get("stats.html");
+            if (data) {
+                res.set_content(*data, "text/html; charset=utf-8");
+                return;
+            }
+        }
+        res.status = 404;
+        res.set_content("Not found", "text/plain");
+    });
+
     // Статика: /static/<path> → файл из web/* (напр. /static/app.js → app.js).
     svr.Get(R"(/static/(.*))", [have_web](const httplib::Request& req, httplib::Response& res) {
         if (!have_web) {
@@ -287,7 +307,8 @@ int mount(httplib::Server& svr, const ApiContext& ctx) {
         f.channels = num("ch", 0);
         // -1, а не 0: корзина «до минуты» — полноценное значение.
         f.duration_bucket = req.has_param("dur") ? num("dur", -1) : -1;
-        f.wav_denominator = req.get_param_value("wav") == "1";
+        // Знаменатель по умолчанию — несжатый оригинал; wav=0 — размер на диске.
+        f.wav_denominator = req.get_param_value("wav") != "0";
         res.set_content(ctx.daemon->stats_document(f), "application/json");
     });
 

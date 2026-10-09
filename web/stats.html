@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Эффективность кодеков — LLAO</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body>
+<!-- Отдельная страница, а не оверлей: у очереди своя прокрутка, выделение и
+     автоскролл, и перерисовывать её ради графиков нельзя. Переход между
+     страницами — ссылка в шапке, состояние демона при этом не теряется. -->
+<div id="login" class="login hidden">
+  <div class="login-box">
+    <h1>LLAO daemon</h1>
+    <p>Введите токен доступа (Bearer). Токен показан при запуске демона и хранится в discovery-файле.</p>
+    <form id="login-form">
+      <input id="token-input" type="password" placeholder="токен (64 hex)" autocomplete="off" spellcheck="false">
+      <button type="submit">Войти</button>
+    </form>
+    <p id="login-error" class="error hidden"></p>
+  </div>
+</div>
+
+<div id="stats-page" class="hidden">
+  <header class="topbar">
+    <h1 class="topbar__title">Эффективность кодеков <a class="navlink" href="/">← Очередь</a></h1>
+    <div class="top-spacer"></div>
+    <span id="stats-version" class="conn"></span>
+    <div class="top-actions">
+      <button id="btn-stats-refresh" class="icon-btn" title="Пересчитать">⟳</button>
+      <button id="btn-stats-shutdown" class="icon-btn danger" title="Выключить демон">⏻</button>
+    </div>
+  </header>
+
+  <section class="stats-page">
+    <div id="stats-filters" class="stats-filters"></div>
+    <div id="stats-sub" class="stats-sub"></div>
+    <div id="stats-chart" class="stats-chart"></div>
+    <div id="stats-legend" class="stats-legend"></div>
+  </section>
+</div>
+<script src="/static/stats.js"></script>
+</body>
+</html>
