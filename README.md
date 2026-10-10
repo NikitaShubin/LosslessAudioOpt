@@ -296,6 +296,15 @@ Server options:
 - `--no-auth` — disable authorization (local debugging only);
 - `--discovery PATH` — override the path to the discovery file.
 
+One server per machine: a second `serve` from anywhere is refused with exit code
+1 and `ERROR: another LLAO server is already running`. On Windows this is a named
+mutex; elsewhere a per-user lock file (`$XDG_RUNTIME_DIR`, or `/tmp`, plus
+`llao-singleton-<uid>`), held while the process lives. The check exists because two
+copies would share the queue and the temporary session directory — which surfaced
+as codec failures on ordinary files. `LLAO_ALLOW_MULTIPLE` lifts it (tests that
+start two daemons on purpose use it, and the daemon warns that the protection is
+off).
+
 For example:
 
 ```bat

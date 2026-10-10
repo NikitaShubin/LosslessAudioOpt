@@ -4,6 +4,25 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.6.0 — 2026-10-08
+
+### The server is a singleton on every platform, not just on Windows
+
+"Only one server per machine" was enforced by a named mutex that existed only
+in the Windows build. `llao-linux serve` could be started any number of times;
+the copies shared the session directory and the queue, and the result looked
+like codec failures on perfectly ordinary files.
+
+The native build now takes a per-user lock file — `$XDG_RUNTIME_DIR` (or
+`/tmp`) plus `llao-singleton-<uid>` — held for the lifetime of the process and
+released by the OS when it exits. The refusal matches the Windows one: exit
+code 1 and `ERROR: another LLAO server is already running`.
+
+Set `LLAO_ALLOW_MULTIPLE` to lift the check. It exists for tests that start two
+daemons on purpose and prints a warning that the protection is off. If a second
+daemon is refused, one of the two exits immediately without touching the
+running one's work.
+
 ## 2.5.3 — 2026-10-08
 
 ### Two daemons from the same folder no longer delete each other's work
