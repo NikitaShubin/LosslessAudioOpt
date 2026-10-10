@@ -28,6 +28,11 @@ survive without loss.
    `tools` checks/downloads the codec utilities once (checksums are verified while
    downloading). `optimize` recompresses every audio file in the folder, recursively.
 
+   Only files with a known audio extension are enumerated. macOS leftovers —
+   `._name` siblings and everything inside `__MACOSX` — are skipped: those are
+   resource forks, not audio, and they would fail the probe instead of being
+   converted.
+
    On Linux (under wine) `llao.exe` comes with an `llao` wrapper that covers
    everything wine does not provide out of the box, without touching `llao.exe`:
 
@@ -541,7 +546,7 @@ phases: decode the source → encode into the target format.
 ### Tests
 
 - Native (no wine, built with g++):
-  `make test-unit test-daemon-core test-stats-core && ./test-unit && ./test-daemon-core && ./test-stats-core`.
+  `make test-unit test-daemon-core test-stats-core test-enumerate` and run all four.
   `test-stats-core` covers the efficiency summary arithmetic — the part where a
   mistake stays invisible in the JSON and only misleads on the chart.
 - Server integration tests (need a built `llao-linux`, `ffmpeg` in PATH and codecs

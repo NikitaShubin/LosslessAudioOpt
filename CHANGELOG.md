@@ -4,6 +4,27 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.5.1 — 2026-10-08
+
+### macOS leftovers are no longer treated as audio
+
+A folder copied from macOS carries two copies of every file: the real one and an
+AppleDouble sibling named `._name` holding resource forks and extended
+attributes, plus a `__MACOSX` directory with the same. They are not audio — ffprobe
+answers "Invalid data" — but they matched the extension list and entered the
+queue, so a single album produced eleven errors that had to be investigated like
+real failures. They are now skipped at enumeration, by file name and by path
+component.
+
+### The real ffprobe error is no longer swallowed
+
+When ffprobe exited with code 0 but printed something other than JSON, the error
+reported was the JSON parser's: `parse error at line 1, column 1 ... last read:
+'I'`. The actual message ffprobe printed was discarded, so sixteen failing files
+could not be diagnosed from the queue or the journal at all. The error now carries
+ffprobe's own first line; the parser text is kept only when ffprobe printed
+nothing.
+
 ## 2.5.0 — 2026-10-08
 
 ### A page that shows what the codecs are actually worth
