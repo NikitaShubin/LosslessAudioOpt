@@ -13,8 +13,9 @@ AppleDouble sibling named `._name` holding resource forks and extended
 attributes, plus a `__MACOSX` directory with the same. They are not audio — ffprobe
 answers "Invalid data" — but they matched the extension list and entered the
 queue, so a single album produced eleven errors that had to be investigated like
-real failures. They are now skipped at enumeration, by file name and by path
-component.
+real failures. They are now skipped at enumeration, by file name. The `__MACOSX`
+directory itself is not treated as junk: real audio that happens to sit there is
+still converted rather than lost.
 
 ### The real ffprobe error is no longer swallowed
 

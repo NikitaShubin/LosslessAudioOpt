@@ -1,5 +1,6 @@
 #include "media.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -142,13 +143,31 @@ std::string find_ffmpeg() { return find_bundled_tool("ffmpeg"); }
 // Удаляет JSON-скелет ffprobe из вывода при ошибке: строки "{", "}" и пустые.
 // При -print_format json ffprobe печатает {\r\n\r\n}\r\n на stdout даже при
 // ошибке; stdout и stderr сливаются в один pipe, и скобки попадают в error.
-static std::string strip_ffprobe_json(const std::string& s) {
+// Wine пишет свои диагностики в тот же поток, что и ffprobe:
+// `004c:err:winediag:...`, `wine: ...`. В сообщении об ошибке файла они
+// бесполезны и вытесняют настоящую причину — на живой библиотеке из-за них
+// строка «Invalid data found» уезжала за пределы видимой части.
+static bool is_wine_diagnostic(const std::string& line) {
+    const std::string t = util::trim(line);
+    const size_t colon = t.find(':');
+    if (colon == std::string::npos || colon == 0 || colon > 4) return false;
+    for (size_t i = 0; i < colon; i++)
+        if (!isxdigit((unsigned char)t[i])) return false;
+    std::string rest = t.substr(colon + 1);
+    const size_t colon2 = rest.find(':');
+    const std::string kind = colon2 == std::string::npos ? rest : rest.substr(0, colon2);
+    return kind == "err" || kind == "fixme" || kind == "trace";
+}
+
+// Очищенный вывод ffprobe: без диагностик wine и без одиночных скобок.
+static std::string ffprobe_message(const std::string& s) {
     std::string out;
     for (const auto& line : util::split(s, '\n')) {
+        if (is_wine_diagnostic(line)) continue;
         std::string trimmed = util::trim(line);
         if (trimmed == "{" || trimmed == "}" || trimmed.empty()) continue;
         if (!out.empty()) out += '\n';
-        out += line;
+        out += trimmed;
     }
     return out;
 }
@@ -173,9 +192,9 @@ Probe probe_file(const std::string& path, const std::string& ffprobe,
         return p;
     }
     if (r.exit_code != 0) {
-        std::string cleaned = strip_ffprobe_json(r.output);
+        std::string cleaned = ffprobe_message(r.output);
         p.error = i18n::fmt("ffprobe: code %d", r.exit_code) +
-                  (cleaned.empty() ? "" : ": " + util::trim(cleaned));
+                  (cleaned.empty() ? "" : ": " + cleaned);
         return p;
     }
     try {
@@ -238,10 +257,11 @@ Probe probe_file(const std::string& path, const std::string& ffprobe,
         // другое. Сообщение парсера в этом случае бесполезно: на живой
         // библиотеке он звучал как «parse error ... last read: 'I'», и
         // настоящая причина — первая строка вывода ffprobe — терялась.
-        std::string first = util::trim(r.output.substr(0, r.output.find('\n')));
-        p.error = first.empty()
+        std::string msg = ffprobe_message(r.output);
+        if (msg.size() > 200) msg = msg.substr(0, 200) + "…";
+        p.error = msg.empty()
                       ? i18n::str("could not parse ffprobe output: ") + exc.what()
-                      : i18n::str("could not parse ffprobe output: ") + first;
+                      : i18n::str("could not parse ffprobe output: ") + msg;
     }
     return p;
 }
