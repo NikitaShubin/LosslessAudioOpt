@@ -96,8 +96,14 @@ int Engine::init(const Options& opts, const std::vector<std::string>& initial_in
 
     i.jobs = resolve_jobs(i.opts.jobs, i.opts.jobs_float);
 
-    clear_tmp_base(i.opts.tmp_dir);
-    i.tmp = base_tmp_dir(i.opts.tmp_dir);
+    // Каталог сессий — свой на процесс, как у разового прогона. Демон раньше
+    // писал прямо в tmp/ и стирал его целиком при старте и остановке, из-за
+    // чего второй llao из того же каталога (демон рядом с демоном или
+    // разовый прогон рядом с демоном) делил с ним и имена каталогов, и
+    // ref.wav. На живой библиотеке это выглядело как «tak не читает ref.wav»,
+    // «wavpack: can't open file ref.wav» и «data chunk extends beyond the
+    // file» на совершенно обычных файлах.
+    i.tmp = session_tmp_dir(i.opts.tmp_dir);
 
     if (i.opts.debug)
         i.logger = std::make_unique<report::Logger>(
@@ -291,7 +297,9 @@ void Engine::shutdown() {
                         {"done", i.r.total_done},
                         {"failed", i.r.failed.load()}});
     }
-    clear_tmp_base(i.opts.tmp_dir);
+    // Убираем только свой каталог: чужой трогать нельзя, в нём может идти
+    // работа соседнего процесса.
+    clear_session_tmp_dir_impl(i.opts.tmp_dir);
     i.started = false;
 }
 

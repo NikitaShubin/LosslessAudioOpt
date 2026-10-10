@@ -44,17 +44,18 @@ jobs:
 
       - name: Юнит-тесты и ядро демона
         run: |
-          make test-unit test-daemon-core test-stats-core test-enumerate
+          make test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation
           ./test-unit
           ./test-daemon-core
           ./test-stats-core
           ./test-enumerate
+          ./test-tmp-isolation
 
       - name: Интеграционные тесты демона (restore/interactions/queue/persist)
         run: |
-          make test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist \
+          make test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist test-daemon-pair \
             || { echo "=== daemon.log (последние 120 строк каждого префикса) ==="; \
-                 for f in /tmp/llao-*-test-*/daemon.log /tmp/llao-restest-*/daemon.log /tmp/llao-int-*/daemon.log /tmp/llao-queue-*/daemon.log /tmp/llao-persist-*/daemon.log; do \
+                 for f in /tmp/llao-*-test-*/daemon.log /tmp/llao-restest-*/daemon.log /tmp/llao-int-*/daemon.log /tmp/llao-queue-*/daemon.log /tmp/llao-persist-*/daemon.log /tmp/llao-pair-*/daemon.log; do \
                    [ -f "$f" ] && { echo "--- $f ---"; tail -n 120 "$f"; }; \
                  done; exit 1; }
 

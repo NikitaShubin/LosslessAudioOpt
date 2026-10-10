@@ -108,7 +108,7 @@ $(OBJDIR)/%.o: third_party/%.c
 clean:
 	rm -rf build
 	rm -f llao.exe llao-linux
-	rm -f test-unit test-daemon-core test-stats-core test-enumerate
+	rm -f test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation
 
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
@@ -128,6 +128,12 @@ test-enumerate: tests/test_enumerate.cpp src/optimize_util.cpp src/util.cpp src/
 	gcc -O2 -Ithird_party -c third_party/miniz/miniz.c -o build/miniz-test.o
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $(filter %.cpp,$^) build/miniz-test.o
 
+# Изоляция tmp между процессами: тот же набор исходников, что и у
+# test-enumerate, — они тянут optimize_util оба.
+test-tmp-isolation: tests/test_tmp_isolation.cpp src/optimize_util.cpp src/util.cpp src/config.cpp src/i18n.cpp src/media.cpp src/out.cpp src/proc.cpp src/stats.cpp src/tags_core.cpp src/tags_id3.cpp src/tags_vorbis.cpp src/tags_apev2.cpp src/tags_mp4.cpp src/tags_sidecar.cpp src/tags_wav.cpp src/tags_write.cpp src/sha256.cpp
+	gcc -O2 -Ithird_party -c third_party/miniz/miniz.c -o build/miniz-test.o
+	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $(filter %.cpp,$^) build/miniz-test.o
+
 # Живые интеграционные тесты сервера (нужен собранный llao-linux и ffmpeg;
 # каждый поднимает свой сервер на случайном порту, 18180 не трогает).
 # Тесты рассчитаны на нативный linux-бинарник: собирайте через `make TARGET=linux
@@ -139,7 +145,7 @@ else
 DAEMON_TEST_BIN :=
 endif
 
-test-daemon: test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist
+test-daemon: test-daemon-restore test-daemon-interactions test-daemon-queue test-daemon-persist test-daemon-pair
 
 test-daemon-queue: $(DAEMON_TEST_BIN)
 	python3 tests/test_daemon_queue.py
@@ -155,6 +161,10 @@ test-daemon-restore: $(DAEMON_TEST_BIN)
 # Персистентность очереди (queue.json), crash-перезапуск и транзакционный sidecar.
 test-daemon-persist: $(DAEMON_TEST_BIN)
 	python3 tests/test_daemon_persist.py
+
+# Два демона из одного каталога: каталог сессий должен быть свой у процесса.
+test-daemon-pair: $(DAEMON_TEST_BIN)
+	python3 tests/test_daemon_pair.py
 
 # Генерация встроенных веб-ассетов (zip → C++ массив).
 src/web_assets_data.cpp: web/index.html web/app.js web/style.css web/favicon.svg tools/embed_assets.py

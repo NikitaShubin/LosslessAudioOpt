@@ -19,8 +19,6 @@ std::string session_cookie() {
     return util::process_id() + "-" + std::to_string(g_session_counter.fetch_add(1));
 }
 
-void reset_session_counter() { g_session_counter.store(0); }
-
 std::string norm_path(const std::string& p) {
     std::string s = p;
     for (auto& c : s)
@@ -128,14 +126,6 @@ std::string session_tmp_dir(const std::string& custom) {
 void clear_session_tmp_dir_impl(const std::string& custom) {
     std::error_code ec;
     fs::remove_all(fs::u8path(session_tmp_dir(custom)), ec);
-}
-
-void clear_tmp_base(const std::string& custom) {
-    std::string d = base_tmp_dir(custom);
-    std::error_code ec;
-    fs::remove_all(fs::u8path(d), ec);
-    util::mkdirs(d);
-    reset_session_counter();
 }
 
 uint64_t estimated_wav_bytes(const media::Probe& probe, int bits) {
