@@ -188,10 +188,47 @@ def m5_install_intact():
 
 INSTALL_SNAPSHOT = {"bin_ffmpeg": []}
 
+def m4_stderr_noise_does_not_break_probe_json():
+    """Диагностика в stderr не должна ломать JSON от ffprobe.
+
+    Регрессия. `proc::run` отдаёт наружу один поток на stdout и stderr, поэтому
+    строка wine (`004c:err:winediag:...`) попадает перед `{` — и разбор падает
+    на совершенно обычном файле: «could not parse ffprobe output». Под
+    wine-обёрткой это скрыто переменной WINEDEBUG=-all, но нативная сборка
+    запускает ffprobe.exe через wine и без неё теряла файлы пачками.
+
+    Проверяем на настоящем прогоне: тот же wav с включёнными диагностиками
+    wine обязан обработаться.
+    """
+    import tempfile as tf
+    binary = os.path.join(ROOT, "llao-linux")
+    if not os.path.exists(binary):
+        raise RuntimeError("нет llao-linux")
+    with tf.TemporaryDirectory(prefix="llao-m4-") as d:
+        wav = os.path.join(d, "tone.wav")
+        gen = subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+             "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", wav],
+            capture_output=True)
+        if gen.returncode != 0:
+            raise RuntimeError("ffmpeg не создал тестовый wav")
+        env = dict(os.environ)
+        env.pop("WINEDEBUG", None)  # пусть wine пишет диагностики
+        r = subprocess.run([binary, "optimize", wav, "--no-stats", "--jobs=2",
+                            "--formats=flac"],
+                           capture_output=True, text=True, env=env, cwd=d)
+        out = (r.stdout or "") + (r.stderr or "")
+        if "could not parse ffprobe output" in out:
+            raise RuntimeError("разбор JSON от ffprobe сломался шумом stderr")
+        if r.returncode != 0:
+            raise RuntimeError("прогон упал: " + out.strip()[-300:])
+
+
 SCENARIOS = [
     ("M1 find_ffmpeg берёт вложенный ffmpeg.exe", m1_ffmpeg_bundled),
     ("M2 find_ffprobe берёт вложенный ffprobe.exe", m2_ffprobe_bundled),
     ("M3 без расширения — нативный файл (POSIX)", m3_native_name_wins),
+    ("M4 шум в stderr не ломает JSON от ffprobe", m4_stderr_noise_does_not_break_probe_json),
     ("M4 встроенного нет — утилита из PATH", m4_falls_back_to_path),
     ("M5 рабочая установка не тронута", m5_install_intact),
 ]

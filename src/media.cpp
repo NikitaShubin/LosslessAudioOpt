@@ -159,6 +159,19 @@ static bool is_wine_diagnostic(const std::string& line) {
     return kind == "err" || kind == "fixme" || kind == "trace";
 }
 
+// ffprobe печатает JSON в stdout, но proc::run отдаёт наружу один поток на
+// оба дескриптора, поэтому туда же попадает всё, что он и wine пишут в stderr.
+// Любая строка-диагностика перед '{' ломает разбор, хотя с файлом всё в
+// порядке: на живой библиотеке так терялись обычные ape-файлы, а не только
+// битые mp3. Поэтому JSON вырезается из вывода, а не разбирается целиком.
+static std::string json_slice(const std::string& out) {
+    const size_t open = out.find('{');
+    if (open == std::string::npos) return out;
+    const size_t close = out.rfind('}');
+    if (close == std::string::npos || close < open) return out;
+    return out.substr(open, close - open + 1);
+}
+
 // Очищенный вывод ffprobe: без диагностик wine и без одиночных скобок.
 static std::string ffprobe_message(const std::string& s) {
     std::string out;
@@ -198,7 +211,7 @@ Probe probe_file(const std::string& path, const std::string& ffprobe,
         return p;
     }
     try {
-        json::json d = json::json::parse(r.output);
+        json::json d = json::json::parse(json_slice(r.output));
         const auto& fmt = d.value("format", json::json::object());
         p.format_name = fmt.value("format_name", "");
         // ffprobe может отдавать duration/size строками (в т.ч. "N/A")
