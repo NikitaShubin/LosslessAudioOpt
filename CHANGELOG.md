@@ -4,6 +4,28 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.6.1 — 2026-10-08
+
+### Noise in stderr no longer breaks the JSON from ffprobe
+
+Ordinary files failed with `could not parse ffprobe output` during probing.
+Reproduced three times out of three on an unremarkable 16-bit/44.1 kHz stereo
+file, and gone the moment `WINEDEBUG=-all` was set.
+
+`proc::run` hands out one stream for both stdout and stderr, so the child's two
+streams are merged. The native build runs `ffprobe.exe` through wine, and a wine
+diagnostic (`004c:err:winediag:...`) lands before the `{`, so parsing fails
+although the file is fine. The wine wrapper hid this behind `WINEDEBUG=-all`:
+the symptom was hidden, not the cause — the same files were being lost under
+2.5.2 for the same reason, and the `could not parse ffprobe output ... last
+read: 'I'` seen on mp3 files was this same thing.
+
+The JSON is now cut out of the output by its first `{` and last `}` instead of
+parsing the whole stream. Splitting the streams in `proc::run` would be the
+proper fix, but it would touch every place that shows a tool's output in an
+error message — and that output is the codec's diagnostics, which should stay
+visible.
+
 ## 2.6.0 — 2026-10-08
 
 ### The server is a singleton on every platform, not just on Windows

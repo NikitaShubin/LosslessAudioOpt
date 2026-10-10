@@ -546,6 +546,10 @@ Sidecar доставляется той же транзакцией (`.<имя>.
 
 ### Тесты
 
+- Выбор утилит и проба (`tests/test_media.py`, нужны `g++` и `ffmpeg`):
+  встроенные `ffmpeg`/`ffprobe` находятся под нативной сборкой, плюс прогон с
+  намеренно включёнными диагностиками wine — они идут в тот же поток, что и JSON
+  от ffprobe, и разбор ломать не должны.
 - Нативные (без wine, собираются g++):
   `make test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation`
   и запуск всех пяти. `test-stats-core` проверяет арифметику сводки

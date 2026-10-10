@@ -554,6 +554,10 @@ phases: decode the source → encode into the target format.
 
 ### Tests
 
+- Utility selection and probing (`tests/test_media.py`, needs `g++` and
+  `ffmpeg`): the embedded `ffmpeg`/`ffprobe` win under a native build, plus a
+  run where wine's own diagnostics are deliberately left on — they go to the
+  same stream as ffprobe's JSON and must not break it.
 - Native (no wine, built with g++):
   `make test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation`
   and run all five. `test-stats-core` covers the efficiency summary arithmetic —
