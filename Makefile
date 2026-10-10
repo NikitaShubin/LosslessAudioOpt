@@ -108,7 +108,7 @@ $(OBJDIR)/%.o: third_party/%.c
 clean:
 	rm -rf build
 	rm -f llao.exe llao-linux
-	rm -f test-unit test-daemon-core test-stats-core
+	rm -f test-unit test-daemon-core test-stats-core test-enumerate
 
 test-unit: tests/test_resource_manager.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -o $@ $<
@@ -121,6 +121,12 @@ test-daemon-core: tests/test_daemon_core.cpp src/events.cpp src/daemon_sink.cpp 
 # вручную, а не только форма ответа.
 test-stats-core: tests/test_stats_core.cpp src/stats.cpp src/config.cpp src/i18n.cpp src/media.cpp src/out.cpp src/util.cpp src/proc.cpp
 	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $^
+
+# Перечисление файлов. optimize_util тянет за собой теги и miniz, поэтому
+# отдельная цель: собирать весь llao ради одного предиката смысла нет.
+test-enumerate: tests/test_enumerate.cpp src/optimize_util.cpp src/util.cpp src/config.cpp src/i18n.cpp src/media.cpp src/out.cpp src/proc.cpp src/stats.cpp src/tags_core.cpp src/tags_id3.cpp src/tags_vorbis.cpp src/tags_apev2.cpp src/tags_mp4.cpp src/tags_sidecar.cpp src/tags_wav.cpp src/tags_write.cpp src/sha256.cpp
+	gcc -O2 -Ithird_party -c third_party/miniz/miniz.c -o build/miniz-test.o
+	g++ -std=c++17 -O2 -Wall -Wextra -Ithird_party -Isrc -o $@ $(filter %.cpp,$^) build/miniz-test.o
 
 # Живые интеграционные тесты сервера (нужен собранный llao-linux и ffmpeg;
 # каждый поднимает свой сервер на случайном порту, 18180 не трогает).

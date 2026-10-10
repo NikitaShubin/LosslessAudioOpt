@@ -51,7 +51,27 @@ std::set<std::string> supported_extensions(const std::vector<config::Format>& fm
     return s;
 }
 
+// Артефакты переноса с macOS: файлы `._имя` рядом с оригиналом и всё, что
+// лежит в каталоге `__MACOSX`. Это AppleDouble-ветки ресурсов и расширенных
+// атрибутов, а не аудио: ffprobe честно отвечает «Invalid data», и на живой
+// библиотеке они давали одиннадцать ошибок в очереди. Обнаружить их дешевле,
+// чем гонять кодеки по файлу, который заведомо не музыка.
+static bool is_macos_resource_fork(const std::string& path) {
+    const std::string base = util::base_name(path);
+    if (base.size() >= 2 && base[0] == '.' && base[1] == '_') return true;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t end = path.find_first_of("/\\", start);
+        if (end == std::string::npos) end = path.size();
+        if (end - start == 9 && path.compare(start, 9, "__MACOSX") == 0) return true;
+        if (end == path.size()) break;
+        start = end + 1;
+    }
+    return false;
+}
+
 bool is_supported_file(const std::string& path, const std::set<std::string>& exts) {
+    if (is_macos_resource_fork(path)) return false;
     std::string base = util::to_lower(util::base_name(path));
     size_t dot = base.find_last_of('.');
     if (dot == std::string::npos) return false;

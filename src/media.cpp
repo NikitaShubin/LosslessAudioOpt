@@ -234,7 +234,14 @@ Probe probe_file(const std::string& path, const std::string& ffprobe,
         }
         p.ok = true;
     } catch (const std::exception& exc) {
-        p.error = i18n::str("could not parse ffprobe output: ") + exc.what();
+        // Код возврата нулевой, а вместо JSON ffprobe напечатал что-то
+        // другое. Сообщение парсера в этом случае бесполезно: на живой
+        // библиотеке он звучал как «parse error ... last read: 'I'», и
+        // настоящая причина — первая строка вывода ffprobe — терялась.
+        std::string first = util::trim(r.output.substr(0, r.output.find('\n')));
+        p.error = first.empty()
+                      ? i18n::str("could not parse ffprobe output: ") + exc.what()
+                      : i18n::str("could not parse ffprobe output: ") + first;
     }
     return p;
 }

@@ -44,10 +44,11 @@ jobs:
 
       - name: Юнит-тесты и ядро демона
         run: |
-          make test-unit test-daemon-core test-stats-core
+          make test-unit test-daemon-core test-stats-core test-enumerate
           ./test-unit
           ./test-daemon-core
           ./test-stats-core
+          ./test-enumerate
 
       - name: Интеграционные тесты демона (restore/interactions/queue/persist)
         run: |
