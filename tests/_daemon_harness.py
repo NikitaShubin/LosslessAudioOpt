@@ -199,6 +199,11 @@ class Daemon:
             self.proc = subprocess.Popen(
                 cmd, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT,
                 env={**os.environ, "LLAO_DISCOVERY": self.disc,
+                     # Как в CI: без этого stderr wine (err:ntlm, err:winediag)
+                     # лезет в тот же поток, что и stdout кодеков, и портит
+                     # разбираемый JSON ffprobe. На CI переменная выставлена,
+                     # локально тесты падали из-за её отсутствия.
+                     "WINEDEBUG": "-all",
                      "LLAO_STATS_FILE": self.stats_file,
                      "LLAO_STATS_JOURNAL": self.stats_journal,
                      "LLAO_STATS_TSV": self.stats_tsv})
@@ -252,11 +257,22 @@ class Daemon:
     def ids(self):
         return [x["id"] for x in self.rows()]
 
-    def stop(self, force=False):
-        """Вежливо shutdown, при ошибке — kill. Возвращает exit-код."""
+    def stop(self, force=False, timeout=60):
+        """Вежливо shutdown, при ошибке — kill. Возвращает exit-код.
+
+        Таймаут здесь — не «тест провалился», а «демон не успел». На загруженной
+        машине кодировщик (Lossless Audio поднимает сотни потоков) держит
+        остановку дольше, и kill даёт -9, который раньше читался как падение.
+        Поэтому убитый по таймауту демон возвращает None: вызывающий код видит
+        отличие и жалуется конкретно на зависание, а не на код возврата.
+        """
         try:
             self.rpc("shutdown", {"force": force})
-            self.proc.wait(timeout=15)
+            self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+            return None
         except Exception:
             self.proc.kill()
             self.proc.wait()

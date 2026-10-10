@@ -377,7 +377,9 @@ def main():
             shutil.rmtree(workdir10, ignore_errors=True)
 
         print("case 11: shutdown")
-        check(d.stop() == 0, "exit 0")
+        rc = d.stop()
+        check(rc is not None, "демон не завершился за 60 с — зависание, а не ошибка")
+        check(rc == 0, "exit 0")
         check(not os.path.exists(d.disc), "discovery removed")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
