@@ -4,6 +4,40 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.5.0 — 2026-10-08
+
+### A page that shows what the codecs are actually worth
+
+Running a library through every codec produced a final table with one number per
+file — the winner and its savings. That number is the answer, but not the
+question. It cannot show whether `-8` is worth its runtime against `-0`, whether
+`-noseek` helps or hurts, or where the curve flattens and further effort is
+pointless.
+
+`/stats` answers those. Every task that ran gets a column on one shared scale:
+the distribution of its savings as a smooth curve, and the candle of
+minimum/quartiles/mean. Tasks are grouped by codec and sorted by mean within the
+group, so presets stand next to each other and the gap is visible; a dot above a
+column marks a task that actually won files, and a dashed line marks the best
+mean in the library. The filters (bit depth, sample rate, channels, duration)
+select a subset and accept several values at once.
+
+Measured on a 5000-file library, this is what it shows: the four LA variants
+(`default`, `-noseek`, `-8`, `-8 -noseek`) differ by 0.4 % of the file — `high`
+is smaller on 78 % of tracks, `noseek` is 9 KB *larger* than the default and
+slower, which is the opposite of what `la.exe --help` promises. On average the
+four are indistinguishable, and on every individual track they differ.
+
+The numbers are read-only and behind the same token as the rest of the API.
+
+### Filters select several values
+
+A filter with a single active value is a toggle, and toggles are worse than a
+checklist for the same job: "only 24-bit" and "24 and 16 together" need two
+different controls. The facets now hold sets, the query takes a list
+(`bits=24,16`), and removing the last value restores everything — an empty
+selection would otherwise mean an empty chart.
+
 ## 2.4.1 — 2026-10-08
 
 ### LLAO was changing the permissions of your library

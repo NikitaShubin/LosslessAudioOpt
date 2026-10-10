@@ -76,6 +76,11 @@ survive without loss.
 - **Daemon and web UI.** The `llao serve` subcommand is a headless process with an
   HTTP API and a web interface: the queue can be filled, reordered, paused and
   files restarted on the fly without tying up a terminal (see "Daemon and web UI").
+- **Efficiency page.** A separate page (`/stats`, linked from the queue header)
+  shows what every task actually saves, averaged over the whole library: one
+  column per task, distributions and ranges on a shared scale. It answers the
+  question the final table cannot — where the curve flattens and which codec
+  variants are worth their runtime.
 
 ## Formats
 
@@ -341,6 +346,27 @@ Open `http://127.0.0.1:<port>/` and enter the token. Features:
   processed (and follows upwards when the list is cleaned or active rows move); a
   dark scrollbar.
 
+### Efficiency page
+
+`http://127.0.0.1:<port>/stats` — a separate page (linked from the queue header,
+with a back link; it is not an overlay) built from `GET /api/stats`.
+
+Every task that ran at least once gets a column: the distribution of its savings
+as a smooth curve on the left, the candle of minimum/quartiles/mean on the right.
+Both use one shared vertical scale, so all tasks are directly comparable. Columns
+are grouped by codec and sorted by mean within the group, so presets sit next to
+each other; the codec family is drawn as a background band for external codecs, a
+dashed line marks the best mean in the library, and a dot above a column marks a
+task that actually won files. The scale is savings against the uncompressed
+original — higher is better; a file that grew falls below zero.
+
+The filters select a subset of the library (bit depth, sample rate, channels,
+duration); several values can be selected at once, and clearing the last one
+restores "everything". The number under a filter is how many files that value
+would give — a value's own facet is not filtered, so its buttons stay clickable.
+Full numbers (mean, standard deviation, range, files considered, wins) are in the
+tooltips.
+
 The token and the autoscroll setting are remembered by the browser. In dev mode
 (launched from a directory with the `web/` sources next to it) the daemon serves the
 files straight from disk — HTML/JS/CSS edits are applied by refreshing the page
@@ -366,7 +392,29 @@ only `fmt` and `variant` (plus `error` for a failed variant); running and failed
 files also get `params` and `note`.
 | `GET /api/events?since=N` | event log (log/task/state/…) with `last_seq` for the delta |
 | `GET /api/formats` | list of enabled formats |
+| `GET /api/stats` | efficiency summary: per task and per format, with filters |
 | `POST /rpc` | JSON-RPC: `{ "cmd": "...", "args": {...} }` |
+
+`GET /api/stats` aggregates the run journal (`runs/*.jsonl`) into numbers for the
+efficiency page. Query parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `bits`, `rate`, `ch`, `dur` | facet filters; a comma-separated list selects several values at once (`bits=24,16`). An empty list means "no restriction"; a value a facet cannot produce (`dur`) refers to buckets — under a minute, under five, under ten, … |
+| `wav` | `0` measures savings against the file on disk instead of the uncompressed original (values go negative for files that grew) |
+
+The response carries `denominator`, the sample size and three views of the same
+data: `methods` (per codec — the best result that codec got on each file),
+`variants` (per task, i.e. per format *and* variant — this is where presets
+separate) and `facet_values`/`facet_counts` (the filter values and how many
+files each has). Each summary holds the mean, standard deviation, min/max, a
+21-bin histogram over 5 % steps (bin 0 counts files that grew), `files`,
+`considered`, `not_applicable` and `wins`. Filtered-out files are excluded, so
+`files` is the number the mean was computed over.
+
+Rebuilding walks the journal, so the result is cached for 30 s and rebuilt in
+the background: the first call after a change may still answer the previous
+summary. The endpoint is read-only and shares the daemon's token.
 
 `/rpc` commands: `ping`, `stat`, `add`, `cancel-file`, `remove`,
 `bulk-cancel`, `bulk-remove`, `clear-done`, `sort`, `restart`,
@@ -493,7 +541,9 @@ phases: decode the source → encode into the target format.
 ### Tests
 
 - Native (no wine, built with g++):
-  `make test-unit test-daemon-core && ./test-unit && ./test-daemon-core`.
+  `make test-unit test-daemon-core test-stats-core && ./test-unit && ./test-daemon-core && ./test-stats-core`.
+  `test-stats-core` covers the efficiency summary arithmetic — the part where a
+  mistake stays invisible in the JSON and only misleads on the chart.
 - Server integration tests (need a built `llao-linux`, `ffmpeg` in PATH and codecs
   in `bin/`): `make TARGET=linux` then `make test-daemon`
   (restore → interactions → queue → persist). Each test brings up its own daemon
