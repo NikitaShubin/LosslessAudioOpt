@@ -4,6 +4,28 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.5.3 — 2026-10-08
+
+### Two daemons from the same folder no longer delete each other's work
+
+Diagnosing the errors left in the queue on a real library turned up a bug that
+had nothing to do with the files or the codecs. The files were ordinary
+16-bit/44.1 kHz stereo Monkey's Audio, and on their own every one of them
+completed with all nine TAK variants verified. In the queue they failed with
+`tak: Error reading source 1`, `wavpack: can't open file ref.wav` and
+`optimfrog: data chunk extends beyond the file` — all of which mean the same
+thing: the reference WAV the encoder was supposed to read had disappeared.
+
+Session directories were not isolated. A one-shot run takes `tmp/<pid>/`, but
+the daemon wrote straight into `tmp/` and cleared that folder wholesale at
+startup and at shutdown. Any second `llao` started from the same folder — a
+second daemon next to a running one — got the same session names, and its
+startup deleted the `ref.wav` of the file being encoded next door. `serve` has
+no `--tmp` option, so a user cannot keep two apart by configuration.
+
+The daemon now takes `session_tmp_dir()` like a one-shot run, and clears only
+its own directory on shutdown.
+
 ## 2.5.2 — 2026-10-08
 
 ### Error messages are no longer buried under wine diagnostics

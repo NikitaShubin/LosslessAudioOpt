@@ -546,13 +546,17 @@ phases: decode the source → encode into the target format.
 ### Tests
 
 - Native (no wine, built with g++):
-  `make test-unit test-daemon-core test-stats-core test-enumerate` and run all four.
-  `test-stats-core` covers the efficiency summary arithmetic — the part where a
-  mistake stays invisible in the JSON and only misleads on the chart.
+  `make test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation`
+  and run all five. `test-stats-core` covers the efficiency summary arithmetic —
+  the part where a mistake stays invisible in the JSON and only misleads on the
+  chart; `test-tmp-isolation` checks that session directories belong to one
+  process and that clearing them never touches a neighbour.
 - Server integration tests (need a built `llao-linux`, `ffmpeg` in PATH and codecs
   in `bin/`): `make TARGET=linux` then `make test-daemon`
-  (restore → interactions → queue → persist). Each test brings up its own daemon
-  on a random port (`--no-auth`), `18180` stays untouched. `test-daemon-persist`
+  (restore → interactions → queue → persist → pair). Each test brings up its own
+  daemon on a random port (`--no-auth`), `18180` stays untouched. `test-daemon-pair`
+  starts a second daemon on top of a running one — two daemons from one folder
+  must not delete each other's temporary files. `test-daemon-persist`
   covers `queue.json`, graceful and crash restarts of the queue and the transactional
   sidecar delivery.
 - CI: `.github/workflows/ci-linux.yml` — builds the linux binary, installs codecs

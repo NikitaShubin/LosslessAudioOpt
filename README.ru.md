@@ -537,14 +537,17 @@ Sidecar доставляется той же транзакцией (`.<имя>.
 ### Тесты
 
 - Нативные (без wine, собираются g++):
-  `make test-unit test-daemon-core test-stats-core test-enumerate` и запуск всех
-  четырёх. `test-stats-core` проверяет арифметику сводки эффективности — ту
-  часть, где ошибка остаётся незаметной в JSON и только сбивает с толку на
-  графике.
+  `make test-unit test-daemon-core test-stats-core test-enumerate test-tmp-isolation`
+  и запуск всех пяти. `test-stats-core` проверяет арифметику сводки
+  эффективности — ту часть, где ошибка остаётся незаметной в JSON и только сбивает
+  с толку на графике; `test-tmp-isolation` — что каталоги сессий принадлежат
+  одному процессу и что их очистка не трогает соседние.
 - Интеграционные тесты сервера (нужны собранный `llao-linux`, `ffmpeg` в PATH
   и кодеки в `bin/`): `make TARGET=linux` затем `make test-daemon`
-  (restore → interactions → queue → persist). Каждый тест поднимает свой демон
-  на случайном порту (`--no-auth`), `18180` не трогает. `test-daemon-persist`
+  (restore → interactions → queue → persist → pair). Каждый тест поднимает свой
+  демон на случайном порту (`--no-auth`), `18180` не трогает.
+  `test-daemon-pair` поднимает второй демон поверх работающего: два демона из
+  одного каталога не должны удалять временные файлы друг друга. `test-daemon-persist`
   покрывает `queue.json`, грациозный и аварийный перезапуски очереди и
   транзакционную доставку sidecar.
 - CI: `.github/workflows/ci-linux.yml` — собирает linux-бинарник, ставит
