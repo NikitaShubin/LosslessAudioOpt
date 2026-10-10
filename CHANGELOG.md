@@ -4,6 +4,47 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.5.2 — 2026-10-08
+
+### Error messages are no longer buried under wine diagnostics
+
+ffprobe runs as a Windows binary, and wine writes its own diagnostics
+(`err:ntlm`, `err:winediag`) into the same captured stream as ffprobe's output.
+Those lines appeared ahead of the real reason, so `Invalid data found when
+processing input` — the only line that says anything — was pushed past the end
+of what the queue and the journal show. Such lines are filtered out now, and
+the remaining output is capped at 200 characters.
+
+This matters mostly under Linux/wine; on Windows there is nothing to filter.
+
+### Correction to 2.5.1: the macOS rule was name-only, and now it is explicit
+
+The 2.5.1 notes said leftovers are skipped "by file name and by path component".
+The path-component half never matched — it compared a nine-character window
+against the eight-character name `__MACOSX` — so released behaviour was correct
+all along: only `._name` files were skipped, and no real audio inside
+`__MACOSX` was dropped. The rule is now exactly that, with tests that would have
+caught it. The earlier, over-broad version would have discarded real audio, so
+the behaviour is pinned by test rather than by a comment.
+
+### A rarely-taken path returned garbage
+
+`DaemonSession::state_document()` could reach the end of the function without a
+`return` on one branch, which is undefined behaviour (the compiler had been
+warning since 2.3.8). The branch is unreachable by construction and the
+compiler had been warning about it since 2.3.8, but the function now returns
+the last built document instead of whatever happens to be in a register.
+
+### Integration tests stopped reporting slow machines as failures
+
+Under heavy load (a full library running with Lossless Audio, which spawns
+hundreds of threads per file) the daemon sometimes needed longer than the
+harness allowed to shut down. The harness then killed it and read the kill code
+as a crash. Shutdown now gets 60 seconds, and a timeout is reported as a hang
+rather than as a failed exit. The test harness also sets `WINEDEBUG=-all`, as CI
+does — without it wine's diagnostics corrupted the JSON from ffprobe and probes
+failed locally while passing on CI.
+
 ## 2.5.1 — 2026-10-08
 
 ### macOS leftovers are no longer treated as audio
