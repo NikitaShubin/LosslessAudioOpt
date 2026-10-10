@@ -25,6 +25,7 @@
 #else
 #include <fcntl.h>
 #include <fstream>
+#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -162,6 +163,43 @@ int run_daemon(const std::vector<std::string>& args) {
         return 1;
     }
     (void)singleton;  // живёт до завершения процесса; закрытие — за ОС
+#else
+    // Тот же запрет для нативной сборки. Раньше он жил только в ветке выше,
+    // и `llao-linux serve` можно было поднять сколько угодно копий: они
+    // делили каталог сессий и очередь, и это выглядело как поломка кодеков
+    // («wavpack: can't open file ref.wav») на совершенно обычных файлах.
+    // Имя мьютекса Windows привязано к сессии пользователя, поэтому здесь —
+    // блокировка файла на пользователя: flock держится, пока живёт процесс,
+    // и освобождается сам при его завершении.
+    if (const char* allow = std::getenv("LLAO_ALLOW_MULTIPLE");
+        allow && *allow && std::strcmp(allow, "0") != 0) {
+        std::fprintf(stderr,
+                     "WARNING: LLAO_ALLOW_MULTIPLE is set — the singleton check is "
+                     "off, temporary directories and the queue are not protected\n");
+    } else {
+        const char* rt = std::getenv("XDG_RUNTIME_DIR");
+        std::string base = (rt && *rt) ? rt : "/tmp";
+        char name[64];
+        std::snprintf(name, sizeof(name), "/llao-singleton-%u",
+                      (unsigned)getuid());
+        const std::string lock_path = base + name;
+        int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            // Не смогли взять блокировку — не запрещаем запуск, но говорим.
+            std::fprintf(stderr,
+                         "WARNING: could not open the singleton lock '%s' "
+                         "(another server may be running)\n",
+                         lock_path.c_str());
+        } else if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            std::fprintf(stderr, "ERROR: another LLAO server is already running\n");
+            ::close(fd);
+            return 1;
+        } else {
+            // fd держим до конца процесса — блокировка снимется сама.
+            static int g_singleton_fd = fd;
+            (void)g_singleton_fd;
+        }
+    }
 #endif
 
     // По умолчанию слушаем все интерфейсы (0.0.0.0) — веб-интерфейс доступен

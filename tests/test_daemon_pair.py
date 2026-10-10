@@ -47,6 +47,9 @@ def main():
         # Оба демона — один и тот же бинарник, значит один и тот же tmp.
         os.makedirs(os.path.join(workdir, "a"))
         os.makedirs(os.path.join(workdir, "b"))
+        # Обход синглтона — только ради самого теста: он поднимает два демона
+        # намеренно. В обычной работе LLAO_ALLOW_MULTIPLE не задаётся, и второй
+        # демон отвергается (см. case 2).
         a = Daemon(binary, os.path.join(workdir, "a"), jobs=2, extra=["--no-download"])
         b = Daemon(binary, os.path.join(workdir, "b"), jobs=2, extra=["--no-download"])
         wa = os.path.join(workdir, "a", "one.wav")
@@ -84,6 +87,27 @@ def main():
         rc_a, rc_b = a.stop(), b.stop()
         check(rc_a is not None, f"демон A завершился сам: {rc_a}")
         check(rc_b is not None, f"демон B завершился сам: {rc_b}")
+
+        # case 2: без обхода второй демон из того же каталога обязан отказаться.
+        print("case 2: без обхода второй демон отвергается")
+        os.makedirs(os.path.join(workdir, "e"))
+        os.makedirs(os.path.join(workdir, "f"))
+        e = Daemon(binary, os.path.join(workdir, "e"), jobs=2, extra=["--no-download"],
+                   allow_multiple=False)
+        f = Daemon(binary, os.path.join(workdir, "f"), jobs=2, extra=["--no-download"],
+                   allow_multiple=False)
+        e.start()
+        r = subprocess.run(f.cmd, cwd=f.cwd, capture_output=True, text=True,
+                           env={k: v for k, v in os.environ.items()
+                                if k != "LLAO_ALLOW_MULTIPLE"} | f.env_extra | {
+                                "LLAO_STATS_FILE": f.stats_file,
+                                "LLAO_STATS_JOURNAL": f.stats_journal,
+                                "LLAO_STATS_TSV": f.stats_tsv})
+        check(r.returncode != 0, f"второй демон вышел с ненулевым кодом: {r.returncode}")
+        check("already running" in (r.stderr or ""),
+              "и объяснил почему: " + (r.stderr or "").strip()[:120])
+        rc_e = e.stop()
+        check(rc_e is not None, f"первый демон остался цел: {rc_e}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

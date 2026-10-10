@@ -158,7 +158,8 @@ def wait_state(d, pred, timeout=120, interval=3):
 class Daemon:
     """Живой демон на случайном порту с компактным HTTP/RPC-клиентом."""
 
-    def __init__(self, binary, workdir, jobs=2.0, extra=(), cwd=None):
+    def __init__(self, binary, workdir, jobs=2.0, extra=(), cwd=None, env_extra=None,
+                 allow_multiple=True):
         """jobs — число воркеров: передаётся в --jobs как есть; дефолт 2.0 —
         множитель числа ядер (позволяет движку использовать все ядра машины).
         cwd — рабочая директория процесса демона (по умолчанию ROOT); тесты
@@ -179,6 +180,14 @@ class Daemon:
         self.stats_journal = os.path.join(workdir, "stats.jsonl")
         self.stats_tsv = os.path.join(workdir, "stats.tsv")
         self.proc = None
+        # Дополнительные переменные окружения для процесса демона.
+        self.env_extra = dict(env_extra or {})
+        # Синглтон нативной сборки (2.6.0) не даёт поднять второй демон на
+        # машине. Тесты по умолчанию его обходят: у разработчика может быть
+        # запущен свой демон, и иначе тесты падали бы не из-за своей логики.
+        # Проверка самого запрета — отдельный кейс с allow_multiple=False.
+        if allow_multiple:
+            self.env_extra.setdefault("LLAO_ALLOW_MULTIPLE", "1")
         # --verify=winner задан явно, чтобы тесты не зависели от дефолта
         # демона. С 2.3.2 дефолт verify=all: каждый вариант декодируется и
         # сверяется, файл идёт в разы дольше, и сценарии очереди, ждущие
@@ -206,7 +215,8 @@ class Daemon:
                      "WINEDEBUG": "-all",
                      "LLAO_STATS_FILE": self.stats_file,
                      "LLAO_STATS_JOURNAL": self.stats_journal,
-                     "LLAO_STATS_TSV": self.stats_tsv})
+                     "LLAO_STATS_TSV": self.stats_tsv,
+                     **self.env_extra})
         _ALIVE.append(self)
         # Стартовый гейт кодеков (cli_check через wine на Linux) может занимать
         # заметно больше 15 с — особенно когда префикс только что разогревался.
