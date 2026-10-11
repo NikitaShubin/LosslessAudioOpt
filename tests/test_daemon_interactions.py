@@ -378,7 +378,7 @@ def main():
 
         print("case 11: shutdown")
         rc = d.stop()
-        check(rc is not None, "демон не завершился за 60 с — зависание, а не ошибка")
+        check(rc is not None, "демон не завершился — зависание, а не ошибка выхода")
         check(rc == 0, "exit 0")
         check(not os.path.exists(d.disc), "discovery removed")
     finally:

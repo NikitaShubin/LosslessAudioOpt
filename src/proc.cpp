@@ -12,6 +12,7 @@
 #endif
 
 #include <atomic>
+#include <poll.h>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -338,16 +339,37 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
     res.started = true;
 
     std::string output;
+    // Чтение ограничено по времени намеренно. Блокирующий read() возвращает
+    // управление только когда ВСЕ держатели конца записи закрылись, а под wine
+    // это не только сам процесс: запущенный им wineserver держит унаследованные
+    // дескрипторы. На двухъядерном раннере демон из-за этого не выходил дольше
+    // трёх минут — join() на потоке чтения ждал конца pipe, который не наступал.
+    // Поэтому читаем через poll и уходим, как только процесс завершён, а данные
+    // перестали приходить.
+    std::atomic<bool> stop_reading{false};
+    std::atomic<bool> reader_finished{false};
     std::thread reader([&]() {
         char buf[8192];
         ssize_t n = 0;
         size_t cap = 8u << 20;
-        while ((n = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        while (!stop_reading.load(std::memory_order_relaxed)) {
+            struct pollfd pfd {};
+            pfd.fd = pipefd[0];
+            pfd.events = POLLIN;
+            const int pr = ::poll(&pfd, 1, 200);
+            if (pr < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (pr == 0) continue;  // тишина: решает флаг stop_reading
+            n = ::read(pipefd[0], buf, sizeof(buf));
+            if (n <= 0) break;
             if (output.size() < cap) {
                 size_t take = std::min<size_t>((size_t)n, cap - output.size());
                 output.append(buf, take);
             }
         }
+        reader_finished.store(true, std::memory_order_relaxed);
     });
 
     auto effective_timeout = timeout_sec;
@@ -469,6 +491,11 @@ Result run(const std::vector<std::string>& args, int timeout_sec, const std::str
         waitpid(pid, nullptr, 10000);
     }
 
+    // Процесса уже нет — ждём остаток вывода, но не бесконечно: если кто-то из
+    // потомков держит конец записи, данные всё равно придут уже не от него.
+    for (int i = 0; i < 50 && !reader_finished.load(std::memory_order_relaxed); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stop_reading.store(true, std::memory_order_relaxed);
     reader.join();
     close(pipefd[0]);
 
