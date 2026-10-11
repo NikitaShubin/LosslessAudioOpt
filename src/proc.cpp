@@ -9,10 +9,10 @@
 #include <signal.h>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <poll.h>
 #endif
 
 #include <atomic>
-#include <poll.h>
 #include <cstdio>
 #include <cstring>
 #include <thread>
