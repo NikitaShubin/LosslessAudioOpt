@@ -4,6 +4,32 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.6.2 — 2026-10-08
+
+### llao does not decide that a file is not a real file
+
+Version 2.5.1 started skipping files whose name begins with `._` — the resource
+forks macOS leaves next to the real ones, and the `__MACOSX` directory they live
+in. They are not audio, and ffprobe says so, so they produced errors in the
+queue.
+
+That was the wrong call, and it has been reverted. Which files a library
+contains is the owner's business; the tool taking quiet exception to names it
+dislikes would silently drop anything so called, and it changed the contents of
+a library to improve an error count. Files are enumerated by extension, and
+nothing else.
+
+The eleven `._*` files of one album are back in the queue and will fail the way
+the others do, honestly: the probe rejects them and the queue says why.
+
+### The daemon's exit can take longer than a slow CI runner expects
+
+`ci-linux` failed intermittently on the integration tests: the daemon did not
+exit within the harness timeout. Measured locally, shutdown takes 4 s even with
+1.3 GB of session files, so the time goes into waiting for encoders to finish,
+not into cleaning up. The harness now allows 180 s and still fails — with a
+"did not exit" message — if the daemon really hangs.
+
 ## 2.6.1 — 2026-10-08
 
 ### Noise in stderr no longer breaks the JSON from ffprobe
@@ -120,6 +146,10 @@ queue, so a single album produced eleven errors that had to be investigated like
 real failures. They are now skipped at enumeration, by file name. The `__MACOSX`
 directory itself is not treated as junk: real audio that happens to sit there is
 still converted rather than lost.
+
+**Reverted in 2.6.2** — which files a library contains is the owner's business;
+skipping them by name changed the library to improve an error count. The
+description above is kept as written at the time.
 
 ### The real ffprobe error is no longer swallowed
 

@@ -49,19 +49,14 @@ std::set<std::string> supported_extensions(const std::vector<config::Format>& fm
     return s;
 }
 
-// Артефакты переноса с macOS: файлы `._имя`, которые macOS кладёт рядом с
-// оригиналом (в том числе внутри каталога `__MACOSX`). Это AppleDouble-ветки
-// ресурсов и расширенных атрибутов, а не аудио: ffprobe честно отвечает
-// «Invalid data», и на живой библиотеке один альбом дал одиннадцать ошибок в
-// очереди. Обнаружить их дешевле, чем гонять кодеки по заведомо не музыке.
-//
-// Проверяется только имя, а не каталог `__MACOSX`: попадание настоящего
-// аудиофайла в такой каталог — редкость, но выбросить его значило бы потерять
-// музыку, а «.`+`_` — однозначный признак мусора.
+// Единственный критерий — известное аудиорасширение. Никаких «похожих на
+// мусор» имён: файлы `._имя` и содержимое `__MACOSX` — это перенос с macOS, но
+// решать, что файл «ненастоящий», не наше дело. Отсев по имени молча выкидывал
+// бы из библиотеки всё, что так названо, и добавлен был он на живом прогоне
+// ради одиннадцати ошибок в очереди — то есть менял содержимое библиотеки,
+// чтобы починить счётчик. Откачено.
 bool is_supported_file(const std::string& path, const std::set<std::string>& exts) {
-    const std::string base = util::base_name(path);
-    if (base.size() >= 2 && base[0] == '.' && base[1] == '_') return false;
-    std::string lower = util::to_lower(base);
+    const std::string lower = util::to_lower(util::base_name(path));
     size_t dot = lower.find_last_of('.');
     if (dot == std::string::npos) return false;
     return exts.count(lower.substr(dot + 1)) != 0;

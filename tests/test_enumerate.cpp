@@ -1,8 +1,13 @@
-// Перечисление файлов: мусор macOS не должен попадать в очередь.
+// Перечисление файлов: в очередь попадает только известное аудиорасширение.
 //
 // Проверка живёт отдельной целью, а не внутри test-unit, потому что
 // is_supported_file живёт в optimize_util.cpp, который тянет за собой теги и
 // miniz — ради одного предиката это неподъёмно тяжёлая сборка.
+//
+// Здесь же закреплено решение, принятое заказчиком: имена, «похожие на
+// мусор», ничего не отсекают. Файлы `._имя` и содержимое каталога `__MACOSX`
+// приходят с macOS, но решать, что файл ненастоящий, не задача llao. Отсев
+// по имени молча выбрасывал бы из библиотеки всё, что так названо.
 
 #include <cstdio>
 #include <set>
@@ -26,32 +31,35 @@ static int g_failed = 0;
 int main() {
     const std::set<std::string> exts = {"wav", "mp3", "ape", "flac"};
 
-    // `._имя` — ресурс-форк, независимо от расширения и от того, лежит ли он
-    // в `__MACOSX`.
-    const char* junk[] = {
-        "/lib/__MACOSX/album/._track.wav",
-        "/lib/__MACOSX/._track.ape",
-        "/lib/album/._hidden.flac",
-        "/lib/album/._leading.flac.wav",  // ресурс-форк самого .flac
-        "Z:\\lib\\__MACOSX\\album\\._track.mp3",
-        "/lib/album/._x",   // без расширения — но мусор по-прежнему мусор
-        "/lib/album/._a.WAV",  // регистр расширения роли не играет
-        "/lib/album/._not_junk.txt",  // и не аудио по расширению
-    };
-    for (const char* p : junk) CHECK(!optimize::is_supported_file(p, exts));
-
-    // Похожие имена мусором быть не должны. Отдельно важно: сам каталог
-    // `__MACOSX` не является признаком мусора — настоящее аудио, случайно
-    // оказавшееся там, лучше пережать, чем потерять.
+    // Известные расширения — в очередь.
     const char* good[] = {
         "/lib/album/track.wav",
         "/lib/album/song.ape",
-        "/lib/__MACOSXbackup/track.wav",
         "/lib/album/_ok.mp3",
         "/lib/album/.hidden.wav",
-        "/lib/__MACOSX/album/real.wav",
+        "/lib/album/Track.WAV",          // регистр расширения не важен
+        "Z:\\lib\\album\\track.flac",
+        "/lib/album/song.flac.wav",      // берётся последнее расширение
     };
     for (const char* p : good) CHECK(optimize::is_supported_file(p, exts));
+
+    // Неизвестные расширения и файлы без расширения — не в очередь.
+    const char* bad[] = {
+        "/lib/album/cover.jpg",
+        "/lib/album/notes.txt",
+        "/lib/album/README",
+    };
+    for (const char* p : bad) CHECK(!optimize::is_supported_file(p, exts));
+
+    // Регрессия: `._` внутри имени не должен выкидывать файл. Артефакты macOS
+    // приходят с расширением аудио, и отсев по имени молча убирал их из
+    // библиотеки, чтобы починить счётчик ошибок.
+    const char* macos[] = {
+        "/lib/album/._track.wav",
+        "/lib/__MACOSX/album/._track.wav",
+        "/lib/__MACOSX/album/._01 - Track.flac",
+    };
+    for (const char* p : macos) CHECK(optimize::is_supported_file(p, exts));
 
     if (g_failed == 0) {
         fprintf(stderr, "ALL PASSED (%d assertions)\n", g_passed);

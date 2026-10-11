@@ -28,10 +28,10 @@ survive without loss.
    `tools` checks/downloads the codec utilities once (checksums are verified while
    downloading). `optimize` recompresses every audio file in the folder, recursively.
 
-   Only files with a known audio extension are enumerated. macOS leftovers —
-   `._name` siblings and everything inside `__MACOSX` — are skipped: those are
-   resource forks, not audio, and they would fail the probe instead of being
-   converted.
+   Only files with a known audio extension are enumerated, and nothing else
+   filters them out. Files that turn out not to be audio fail the probe and are
+   reported in the queue — which files a library contains is not the tool's
+   business to judge.
 
    On Linux (under wine) `llao.exe` comes with an `llao` wrapper that covers
    everything wine does not provide out of the box, without touching `llao.exe`:
