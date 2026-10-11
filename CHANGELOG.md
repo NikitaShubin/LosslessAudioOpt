@@ -4,6 +4,23 @@ All notable changes to LLAO, newest first. This file is the base text; [CHANGELO
 
 Versions 1.x shipped a terminal status bar and a `llao-daemon` process. **Both were removed in 2.0** — the engine now runs headless and the interface is a browser. Sections for 1.x therefore describe an interface that no longer exists; the engine behaviour they describe is still current.
 
+## 2.6.3 — 2026-10-08
+
+### The daemon no longer hangs on shutdown
+
+Intermittent CI failures on the integration tests were not a slow runner after
+all: with a 180-second timeout the daemon still failed to exit.
+
+The output reader sat in a blocking `read()` on the pipe, which returns only
+when every write end is closed — and under wine there is more than one holder,
+because the spawned wineserver inherits the handles. Joining that thread waited
+for an end that never came, so the daemon's exit was blocked indefinitely.
+
+The reader now polls and gives up once the process is gone and the output has
+stopped arriving: up to five seconds for the remainder, then it leaves.
+Nothing is lost — whatever the finished process wrote is still collected; we
+stop waiting only for whoever is holding the pipe against reason.
+
 ## 2.6.2 — 2026-10-08
 
 ### llao does not decide that a file is not a real file
